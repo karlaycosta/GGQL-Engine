@@ -1,0 +1,82 @@
+---
+# clang-format configuration for ggql_engine
+# Based on LLVM style with adjustments for modern C++23 code
+---
+Language: Cpp
+BasedOnStyle: LLVM
+
+# Indentation
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+IndentCaseLabels: true
+IndentPPDirectives: BeforeHash
+
+# Column limit
+ColumnLimit: 100
+
+# Braces
+BreakBeforeBraces: Attach
+BraceWrapping:
+  AfterClass: false
+  AfterControlStatement: Never
+  AfterEnum: false
+  AfterFunction: false
+  AfterNamespace: false
+  AfterStruct: false
+  BeforeElse: false
+
+# Alignment
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignOperands: Align
+AlignTrailingComments: true
+
+# Include ordering
+IncludeBlocks: Regroup
+SortIncludes: CaseInsensitive
+IncludeCategories:
+  # Project headers first
+  - Regex: '^"ggql/'
+    Priority: 1
+  # Third-party headers
+  - Regex: '^<tao/'
+    Priority: 2
+  # System/STL headers
+  - Regex: '^<'
+    Priority: 3
+
+# Spaces
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+SpacesInAngles: Never
+SpacesInContainerLiterals: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+# Line breaks
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+BreakConstructorInitializers: BeforeColon
+BreakInheritanceList: BeforeColon
+ConstructorInitializerIndentWidth: 4
+
+# Pointers and references (prefer T* ptr, not T *ptr)
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# Comments
+ReflowComments: false
+
+# Namespaces
+CompactNamespaces: false
+NamespaceIndentation: None
+
+# Penalties
+PenaltyBreakBeforeFirstCallParameter: 19
+PenaltyExcessCharacter: 1000000
+...
