@@ -36,7 +36,6 @@
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 #ifdef _OPENMP
@@ -163,56 +162,96 @@ public:
     return repeats;
   }
 
-  // Detecção de bolhas por BFS + interseção de conjuntos.
+  // Detecção de superbubbles locais por BFS conjunto por nível.
   //
-  // Algoritmo (idêntico ao validado no Dart/C++ prototype):
-  //   Para cada nó `source` com out_degree >= 2:
-  //     Expande BFS a partir de cada vizinho direto até profundidade max_depth.
-  //     Qualquer nó que apareça em TODOS os conjuntos de alcançabilidade é um
-  //     `sink` candidato.
-  //     O menor sink (por ordem de BFS) é selecionado como o sink da bolha.
-  std::vector<Bubble> find_bubbles(int max_depth = 5) const {
+  // Algoritmo (corrigido em relação à implementação anterior):
+  //
+  //   Para cada source com out_degree >= 2:
+  //     1. Executa BFS independente por ramo, nível a nível, com cap
+  //        max_nodes_per_branch (padrão 1024) para evitar explosão em grafos
+  //        densos. Cada nó visitado recebe profundidade mínima por ramo.
+  //     2. Um nó n é candidato a sink se:
+  //          a. cnt_bitmap_[n] == num_branches  (alcançado por todos os ramos)
+  //          b. depth(n) <= max_depth           (localidade: sink próximo)
+  //          c. Não é a própria source
+  //     3. Do conjunto de candidatos, seleciona o de menor profundidade máxima
+  //        entre os ramos (sink mais "justo" em todos os caminhos).
+  //     4. Valida disjunção: nenhum nó interno ao subgrafo
+  //        (source, branches, sink) deve aparecer em mais de um ramo
+  //        entre source e sink — se aparecer é repeat/cycle, não bolha.
+  //     5. Valida fechamento: nenhum nó interno deve ter aresta de saída para
+  //        fora do subgrafo {internos ∪ {sink}} (sem "escapes").
+  //
+  // Correções em relação à versão anterior:
+  //   - Elimina segundo BFS (find_nearest_bfs) — sink é determinado na fase 2.
+  //   - Interseção simétrica sobre todos os ramos (não apenas reachable[0]).
+  //   - max_nodes_per_branch com default 1024 (em vez de 0=ilimitado).
+  //   - Critério de localidade: depth(sink) <= max_depth.
+  //   - Verificação de disjunção de ramos (condição de superbubble real).
+  //   - Verificação de fechamento (sem "escapes" do subgrafo).
+  //
+  // Limitação: num_branches por nó <= 254 (grafos reais: tipicamente < 10).
+  //
+  // num_threads > 1: ativa caminho paralelo OpenMP.
+  //   Custo extra: num_threads × 2 × num_nodes bytes de bitmaps por thread.
+  std::vector<Bubble> find_bubbles(int max_depth = 5,
+                                   size_t max_nodes_per_branch = 1024,
+                                   int num_threads = 1) const {
     std::vector<Bubble> bubbles;
+    if (num_nodes_ == 0) return bubbles;
 
-    for (uint64_t source = 0; source < num_nodes_; ++source) {
-      auto out = out_neighbors(source);
-      if (out.size() < 2) continue;
+#ifndef _OPENMP
+    num_threads = 1;
+#endif
 
-      // BFS a partir de cada vizinho direto
-      std::vector<std::unordered_set<uint64_t>> reachable(out.size());
-      for (size_t b = 0; b < out.size(); ++b) {
-        auto [start, _orient] = decode(out[b]);
-        bfs_reachable(start, max_depth, reachable[b]);
+    if (num_threads > 1) {
+      // ── Caminho paralelo ─────────────────────────────────────────────────
+      const int nth = num_threads;
+      std::vector<std::vector<uint8_t>> t_cnt(static_cast<size_t>(nth));
+      std::vector<std::vector<uint8_t>> t_vis(static_cast<size_t>(nth));
+      std::vector<std::vector<uint8_t>> t_tmp(static_cast<size_t>(nth));
+      std::vector<std::vector<Bubble>>  t_bubs(static_cast<size_t>(nth));
+
+#pragma omp parallel num_threads(nth)
+      {
+        int tid = 0;
+#ifdef _OPENMP
+        tid = omp_get_thread_num();
+#endif
+        auto& cnt  = t_cnt [static_cast<size_t>(tid)];
+        auto& vis  = t_vis [static_cast<size_t>(tid)];
+        auto& tmp  = t_tmp [static_cast<size_t>(tid)];
+        auto& bubs = t_bubs[static_cast<size_t>(tid)];
+        if (cnt.size() < num_nodes_) cnt.assign(num_nodes_, 0);
+        if (vis.size() < num_nodes_) vis.assign(num_nodes_, 0);
+        if (tmp.size() < num_nodes_) tmp.assign(num_nodes_, 0);
+
+#pragma omp for schedule(dynamic, 64) nowait
+        for (uint64_t source = 0; source < num_nodes_; ++source) {
+          find_bubble_at(*this, source, max_depth, max_nodes_per_branch,
+                         cnt, vis, tmp, bubs);
+        }
       }
 
-      // Interseção de todos os conjuntos
-      std::unordered_set<uint64_t> common = reachable[0];
-      for (size_t b = 1; b < reachable.size(); ++b) {
-        std::erase_if(common, [&](uint64_t n) {
-          return !reachable[b].contains(n);
-        });
-      }
-
-      if (common.empty()) continue;
-
-      // Encontra o sink mais próximo via BFS a partir do source
-      uint64_t sink = find_nearest_in_set(source, common, max_depth * 2);
-      if (sink == UINT64_MAX) continue;
-
-      // Coleta nós intermediários (union de todos os conjuntos, excluindo
-      // source e sink)
-      std::unordered_set<uint64_t> all_between;
-      for (auto& rs : reachable) all_between.insert(rs.begin(), rs.end());
-      all_between.erase(source);
-      all_between.erase(sink);
-
-      Bubble bub;
-      bub.source   = source;
-      bub.sink     = sink;
-      bub.branches = std::vector<uint64_t>(all_between.begin(), all_between.end());
-      bubbles.push_back(std::move(bub));
+      size_t total = 0;
+      for (auto& v : t_bubs) total += v.size();
+      bubbles.reserve(total);
+      for (auto& v : t_bubs)
+        bubbles.insert(bubbles.end(),
+                       std::make_move_iterator(v.begin()),
+                       std::make_move_iterator(v.end()));
+      return bubbles;
     }
 
+    // ── Caminho serial — usa bitmaps membros ─────────────────────────────
+    if (cnt_bitmap_.size() < num_nodes_) cnt_bitmap_.assign(num_nodes_, 0);
+    if (bfs_bitmap_.size() < num_nodes_) bfs_bitmap_.assign(num_nodes_, 0);
+    if (tmp_bitmap_.size() < num_nodes_) tmp_bitmap_.assign(num_nodes_, 0);
+
+    for (uint64_t source = 0; source < num_nodes_; ++source) {
+      find_bubble_at(*this, source, max_depth, max_nodes_per_branch,
+                     cnt_bitmap_, bfs_bitmap_, tmp_bitmap_, bubbles);
+    }
     return bubbles;
   }
 
@@ -240,6 +279,14 @@ private:
   // uint32_t é suficiente: num_edges <= 118M << 2^32
   std::vector<uint32_t> offsets_fwd_;
   std::vector<uint32_t> offsets_bwd_;
+
+  // Bitmaps membros — usados pelo caminho serial de find_bubbles (num_threads=1).
+  // INVARIANTE: sempre zerados antes e após cada uso — reset O(|visitados|).
+  // O caminho paralelo (num_threads>1) usa bitmaps locais por thread; estes
+  // membros ficam intocados durante execução paralela.
+  mutable std::vector<uint8_t> bfs_bitmap_; // marcador de visita no BFS
+  mutable std::vector<uint8_t> cnt_bitmap_; // contagem de ramos (interseção)
+  mutable std::vector<uint8_t> tmp_bitmap_; // scratch BFS para find_bubble_at serial
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -393,48 +440,245 @@ private:
              static_cast<uint64_t>(offsets_bwd_[node + 1]) };
   }
 
-  // BFS limitado a max_depth a partir de `start`, preenche `visited`.
-  void bfs_reachable(uint64_t start, int max_depth,
-                     std::unordered_set<uint64_t>& visited) const {
-    std::vector<std::pair<uint64_t, int>> queue;
-    queue.reserve(64);
-    queue.push_back({start, 0});
-    visited.insert(start);
+  // ── BFS com captura de profundidade — passagem única ────────────────────
+  //
+  // Expande BFS a partir de `start` até max_depth hops.
+  // out_nodes recebe os nós visitados em ordem BFS (inclui start com depth=0).
+  // out_depths[i] = profundidade de out_nodes[i].
+  // vis_bitmap: zerado na entrada, zerado na saída (reset O(|visit|)).
+  // Retorna false se explodiu max_cap (vis_bitmap zerado mesmo assim).
+  static bool bfs_with_depth(const GfaCsrTopology& g,
+                              uint64_t start, int max_depth,
+                              std::vector<uint64_t>& out_nodes,
+                              std::vector<uint8_t>&  out_depths,
+                              std::vector<uint8_t>&  vis_bitmap,
+                              size_t max_cap) {
+    out_nodes.clear();
+    out_depths.clear();
+    if (start >= g.num_nodes_) return true;
+    if (vis_bitmap.size() < g.num_nodes_) vis_bitmap.assign(g.num_nodes_, 0);
 
-    for (size_t qi = 0; qi < queue.size(); ++qi) {
-      auto [node, depth] = queue[qi];
-      if (depth >= max_depth) continue;
-      for (uint64_t enc : out_neighbors(node)) {
-        auto [nb, _orient] = decode(enc);
-        if (visited.insert(nb).second) {
-          queue.push_back({nb, depth + 1});
+    // Fila inline: pares (node, depth) — sem alocação dinâmica por nó
+    std::vector<std::pair<uint64_t, uint8_t>> q;
+    q.reserve(64);
+    q.push_back({start, 0});
+    vis_bitmap[start] = 1;
+    out_nodes.push_back(start);
+    out_depths.push_back(0);
+
+    for (size_t qi = 0; qi < q.size(); ++qi) {
+      auto [node, d] = q[qi];
+      if (d >= static_cast<uint8_t>(max_depth)) continue;
+      for (uint64_t enc : g.out_neighbors(node)) {
+        auto [nb, _o] = GfaCsrTopology::decode(enc);
+        if (!vis_bitmap[nb]) {
+          vis_bitmap[nb] = 1;
+          const uint8_t nd = d + 1;
+          out_nodes.push_back(nb);
+          out_depths.push_back(nd);
+          if (max_cap > 0 && out_nodes.size() >= max_cap) {
+            for (uint64_t n : out_nodes) vis_bitmap[n] = 0;
+            return false;
+          }
+          q.push_back({nb, nd});
         }
       }
     }
+    for (uint64_t n : out_nodes) vis_bitmap[n] = 0;
+    return true;
   }
 
-  // Retorna o nó mais próximo de `source` (BFS) que esteja em `candidates`.
-  uint64_t find_nearest_in_set(uint64_t source,
-                                const std::unordered_set<uint64_t>& candidates,
-                                int max_depth) const {
-    std::vector<std::pair<uint64_t, int>> queue;
-    std::unordered_set<uint64_t> visited;
-    queue.push_back({source, 0});
-    visited.insert(source);
+  // ── Núcleo do algoritmo de superbubble para um source ────────────────────
+  //
+  // BFS por ramo com interseção progressiva para aborte precoce:
+  //   - Ramo 0: BFS livre, popula cnt_bitmap[n] = 1 para nós visitados.
+  //   - Ramos b >= 1: BFS "guiado" — só se expande a partir de nós com
+  //     cnt_bitmap[n] == b (alcançados por todos os b ramos anteriores).
+  //     Isso reduz drasticamente o tamanho do BFS para ramos tardios.
+  //   - Candidato a sink: cnt_bitmap[n] == B ao final.
+  //   - vis_bitmap: guarda max(depth_b(n)+1) para achar o sink mais próximo.
+  //
+  // Bitmaps na entrada: cnt_bitmap, vis_bitmap, tmp_bitmap zerados.
+  // Bitmaps na saída: todos zerados.
+  // tmp_bitmap: bitmap auxiliar de visita para BFS de cada ramo.
+  static void find_bubble_at(const GfaCsrTopology& g,
+                              uint64_t source,
+                              int max_depth,
+                              size_t max_nodes_per_branch,
+                              std::vector<uint8_t>& cnt_bitmap,  // conta ramos (zerado)
+                              std::vector<uint8_t>& vis_bitmap,  // max depth+1 por nó (zerado)
+                              std::vector<uint8_t>& tmp_bitmap,  // scratch BFS (zerado)
+                              std::vector<Bubble>& out) {
+    auto out_span = g.out_neighbors(source);
+    const size_t B = out_span.size();
+    if (B < 2 || B > 254) return;
 
-    for (size_t qi = 0; qi < queue.size(); ++qi) {
-      auto [node, depth] = queue[qi];
-      if (depth > max_depth) continue;
-      if (node != source && candidates.contains(node)) return node;
-      for (uint64_t enc : out_neighbors(node)) {
-        auto [nb, _orient] = decode(enc);
-        if (visited.insert(nb).second) {
-          queue.push_back({nb, depth + 1});
+    if (cnt_bitmap.size() < g.num_nodes_) cnt_bitmap.assign(g.num_nodes_, 0);
+    if (vis_bitmap.size() < g.num_nodes_) vis_bitmap.assign(g.num_nodes_, 0);
+    if (tmp_bitmap.size() < g.num_nodes_) tmp_bitmap.assign(g.num_nodes_, 0);
+
+    // ── BFS unificado com interseção progressiva ─────────────────────────
+    // Acumula todos os nós visitados em touched[] para limpeza final.
+    // Para cada ramo b: faz BFS a partir do vizinho direto do source.
+    //   - Se b == 0: aceita qualquer nó não visitado.
+    //   - Se b  > 0: só aceita nós onde cnt_bitmap[n] == b (na fronteira
+    //     da interseção progressiva dos ramos 0..b-1).
+    //
+    // Após o ramo b, cnt_bitmap[n] é incrementado para nós alcançados.
+    // vis_bitmap[n] armazena max(depth_b(n)+1) como no algoritmo original.
+
+    std::vector<uint64_t> touched; // todos os nós marcados (para limpeza)
+    touched.reserve(64);
+
+    // Fila BFS reutilizada entre ramos
+    std::vector<std::pair<uint64_t, uint8_t>> q;
+    q.reserve(64);
+
+    // rdepth_sink[b] = profundidade do sink no ramo b (preenchida on-the-fly)
+    // reachable_b[b] + rdepth_b[b] = nós internos (para validação de disjunção)
+    // Só armazenamos nós que são candidatos internos (depth < depth_sink, != source/sink)
+    std::vector<std::vector<uint64_t>> reachable(B);
+    std::vector<std::vector<uint8_t>>  rdepth(B);
+
+    bool all_have_candidate = false;
+
+    for (size_t b = 0; b < B; ++b) {
+      auto [sn, _o] = GfaCsrTopology::decode(out_span[b]);
+      if (sn >= g.num_nodes_) goto cleanup;
+
+      q.clear();
+      q.push_back({sn, 1}); // depth=1 (source está no nível 0 implicitamente)
+      tmp_bitmap[sn] = 1;
+
+      for (size_t qi = 0; qi < q.size(); ++qi) {
+        auto [node, d] = q[qi];
+        // Visita este nó:
+        if (b == 0) {
+          // Primeiro ramo: marca tudo
+          if (cnt_bitmap[node] == 0) touched.push_back(node);
+          ++cnt_bitmap[node]; // agora cnt = 1
+          if (d > vis_bitmap[node]) vis_bitmap[node] = d; // max depth+1
+        } else {
+          // Ramos subsequentes: só processa nós onde cnt == b (fronteira progressiva)
+          // Nós com cnt < b ainda não foram vistos por todos os ramos anteriores — skip
+          if (cnt_bitmap[node] == static_cast<uint8_t>(b)) {
+            ++cnt_bitmap[node]; // agora cnt = b+1
+            if (d > vis_bitmap[node]) vis_bitmap[node] = d;
+          }
+          // Independente de incrementar, expandimos o BFS a partir deste nó
+          // (para que nós mais distantes possam ser alcançados via este)
+        }
+
+        if (d >= static_cast<uint8_t>(max_depth)) continue;
+        for (uint64_t enc : g.out_neighbors(node)) {
+          auto [nb, _o2] = GfaCsrTopology::decode(enc);
+          if (nb >= g.num_nodes_) continue;
+          if (!tmp_bitmap[nb]) {
+            // Para ramos b > 0, só enfileira nós que têm cnt_bitmap >= b
+            // (só eles podem chegar à interseção)
+            if (b > 0 && cnt_bitmap[nb] < static_cast<uint8_t>(b)) continue;
+            tmp_bitmap[nb] = 1;
+            uint8_t nd = d + 1;
+            q.push_back({nb, nd});
+            if (max_nodes_per_branch > 0 && q.size() >= max_nodes_per_branch)
+              goto abort_branch;
+          }
         }
       }
+      abort_branch:;
+      // Reset tmp_bitmap para este ramo
+      for (auto [n, _d] : q) tmp_bitmap[n] = 0;
+
+      // Armazena reachable[b] = nós visitados por este ramo com seu depth
+      // (Necessário para validações de disjunção/fechamento)
+      reachable[b].clear();
+      rdepth[b].clear();
+      for (auto [n, d] : q) {
+        if (n == source) continue;
+        reachable[b].push_back(n);
+        rdepth[b].push_back(d - 1); // d era depth+1 (por causa do encoding)
+      }
     }
-    return UINT64_MAX;
+
+    {
+      // ── Fase 2: seleciona melhor sink ────────────────────────────────────
+      const uint8_t need      = static_cast<uint8_t>(B);
+      const uint8_t depth_lim = static_cast<uint8_t>(max_depth) + 1;
+      uint64_t best_sink  = UINT64_MAX;
+      uint8_t  best_maxd1 = depth_lim + 1;
+
+      for (uint64_t n : touched) {
+        if (cnt_bitmap[n] != need || n == source) continue;
+        uint8_t md1 = vis_bitmap[n];
+        if (md1 > depth_lim) continue;
+        if (md1 < best_maxd1) { best_maxd1 = md1; best_sink = n; }
+      }
+
+      if (best_sink == UINT64_MAX) goto cleanup;
+
+      // ── Fase 3: coleta nós internos + validação de disjunção ─────────────
+      std::vector<std::vector<uint64_t>> branch_internals(B);
+      bool valid = true;
+
+      // Reutiliza cnt_bitmap (já limpo na saída) → usa vis_bitmap como "membro do subgrafo"
+      // mas vis_bitmap está com depths — usa tmp_bitmap como subgraph marker
+      tmp_bitmap[source]    = 1;
+      tmp_bitmap[best_sink] = 1;
+      std::vector<uint64_t> subgraph_nodes = {source, best_sink};
+
+      for (size_t b = 0; b < B && valid; ++b) {
+        uint8_t sinked = 0;
+        for (size_t i = 0; i < reachable[b].size(); ++i) {
+          if (reachable[b][i] == best_sink) { sinked = rdepth[b][i]; break; }
+        }
+        auto& internals = branch_internals[b];
+        for (size_t i = 0; i < reachable[b].size(); ++i) {
+          uint64_t n = reachable[b][i];
+          if (n == source || n == best_sink) continue;
+          if (rdepth[b][i] >= sinked) continue;
+          if (tmp_bitmap[n]) { valid = false; break; } // disjunção violada
+          tmp_bitmap[n] = 1;
+          subgraph_nodes.push_back(n);
+          internals.push_back(n);
+        }
+      }
+
+      // ── Fase 4: validação de fechamento ──────────────────────────────────
+      if (valid) {
+        for (size_t b = 0; b < B && valid; ++b) {
+          for (uint64_t n : branch_internals[b]) {
+            for (uint64_t enc : g.out_neighbors(n)) {
+              auto [nb, _o] = GfaCsrTopology::decode(enc);
+              if (!tmp_bitmap[nb]) { valid = false; break; }
+            }
+            if (!valid) break;
+          }
+        }
+      }
+
+      // Limpeza tmp_bitmap subgraph
+      for (uint64_t n : subgraph_nodes) tmp_bitmap[n] = 0;
+
+      if (valid) {
+        std::vector<uint64_t> branches;
+        for (auto& v : branch_internals)
+          branches.insert(branches.end(), v.begin(), v.end());
+        out.push_back({source, best_sink, std::move(branches)});
+      }
+    }
+
+    cleanup:
+    for (uint64_t n : touched) { cnt_bitmap[n] = 0; vis_bitmap[n] = 0; }
   }
-};
+
+  // Wrapper serial para bfs_collect (compatibilidade externa).
+  void bfs_collect(uint64_t start, int max_depth,
+                   std::vector<uint64_t>& out_nodes,
+                   size_t max_cap = 0) const {
+    std::vector<uint8_t> depths;
+    bfs_with_depth(*this, start, max_depth, out_nodes, depths, bfs_bitmap_, max_cap);
+  }
+
+}; // class GfaCsrTopology
 
 } // namespace ggql

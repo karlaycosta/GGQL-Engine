@@ -17,14 +17,16 @@
 // Terminador de query: ';' (pode ser omitido em linhas que começam com FIND/SEARCH)
 // Multi-linha: a acumulação de linhas termina quando ';' for encontrado.
 
+#include <chrono>
+#include <filesystem>
 #include <ggql/ingest/gfa_ingestor.hpp>
 #include <ggql/query/ggql_grammar.hpp>
 #include <ggql/query/query_planner.hpp>
-
-#include <chrono>
-#include <filesystem>
-#include <iomanip>
+#include <algorithm>
+#include <cstdio>
 #include <iostream>
+#include <print>
+#include <ranges>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -37,14 +39,15 @@ using namespace ggql::grammar;
 
 static std::string trim(std::string_view s) {
     const auto b = s.find_first_not_of(" \t\r\n");
-    if (b == std::string_view::npos) return {};
+    if (b == std::string_view::npos)
+        return {};
     const auto e = s.find_last_not_of(" \t\r\n");
     return std::string{s.substr(b, e - b + 1)};
 }
 
 static std::string to_upper(std::string_view s) {
     std::string u{s};
-    for (auto& c : u) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    std::ranges::transform(u, u.begin(), [](unsigned char c) { return std::toupper(c); });
     return u;
 }
 
@@ -53,9 +56,9 @@ static std::string to_upper(std::string_view s) {
 struct Session {
     GfaIngestorMmapParallel ingestor;
     std::optional<IngestStatsParallel> stats;
-    std::unique_ptr<QueryPlanner>      planner;
-    std::string                        db_path;
-    std::string                        gfa_path;
+    std::unique_ptr<QueryPlanner> planner;
+    std::string db_path;
+    std::string gfa_path;
 
     bool has_data() const noexcept { return planner != nullptr; }
 };
@@ -63,7 +66,7 @@ struct Session {
 // ─── Exibição de ajuda ────────────────────────────────────────────────────────
 
 static void print_help() {
-    std::cout << R"(
+    std::print(R"(
 ┌─────────────────────────────────────────────────────────────────┐
 │                   GGQL  —  Ajuda rápida                         │
 ├─────────────────────────────────────────────────────────────────┤
@@ -97,48 +100,46 @@ static void print_help() {
 │                                                                 │
 │ Dica: ';' encerra uma query multi-linha                         │
 └─────────────────────────────────────────────────────────────────┘
-)";
+)");
 }
 
 // ─── Exibição de estatísticas ─────────────────────────────────────────────────
 
 static void print_stats(const Session& sess) {
     if (!sess.has_data()) {
-        std::cout << "  Nenhum dado carregado. Use .load <arquivo.gfa>\n";
+        std::println("  Nenhum dado carregado. Use .load <arquivo.gfa>");
         return;
     }
 
-    std::cout << '\n';
+    std::println("");
     if (!sess.gfa_path.empty())
-        std::cout << "  GFA      : " << sess.gfa_path << '\n';
+        std::println("  GFA      : {}", sess.gfa_path);
     if (!sess.db_path.empty())
-        std::cout << "  SQLite   : " << sess.db_path << '\n';
+        std::println("  SQLite   : {}", sess.db_path);
 
     if (sess.stats) {
         const auto& s = *sess.stats;
-        std::cout << "  Nós      : " << s.node_count    << '\n';
-        std::cout << "  Segmentos: " << s.segment_count << '\n';
-        std::cout << "  Links    : " << s.link_count    << '\n';
-        std::cout << "  Tempo total ingest: "
-                  << std::fixed << std::setprecision(2)
-                  << s.elapsed_total_s << " s\n";
-        std::cout << "    passada1   : " << s.elapsed_io1_s    << " s\n";
-        std::cout << "    build MPHF : " << s.elapsed_build_s  << " s\n";
-        std::cout << "    passada2   : " << s.elapsed_ingest_s << " s\n";
-        std::cout << "    SQLite     : " << s.elapsed_sqlite_s << " s\n";
-        std::cout << "    topologia  : " << s.elapsed_topology_s << " s\n";
+        std::println("  Nós      : {}", s.node_count);
+        std::println("  Segmentos: {}", s.segment_count);
+        std::println("  Links    : {}", s.link_count);
+        std::println("  Tempo total ingest: {:.2f} s", s.elapsed_total_s);
+        std::println("    passada1   : {:.2f} s", s.elapsed_io1_s);
+        std::println("    build MPHF : {:.2f} s", s.elapsed_build_s);
+        std::println("    passada2   : {:.2f} s", s.elapsed_ingest_s);
+        std::println("    SQLite     : {:.2f} s", s.elapsed_sqlite_s);
+        std::println("    topologia  : {:.2f} s", s.elapsed_topology_s);
     }
-    std::cout << '\n';
+    std::println("");
 }
 
 // ─── Carregamento de GFA ──────────────────────────────────────────────────────
 
-static void load_gfa(Session& sess, const std::string& gfa_path,
-                     int threads, const std::string& db_path_override = "") {
+static void load_gfa(Session& sess, const std::string& gfa_path, int threads,
+                     const std::string& db_path_override = "") {
     namespace fs = std::filesystem;
 
     if (!fs::exists(gfa_path)) {
-        std::cerr << "  Erro: arquivo não encontrado: " << gfa_path << '\n';
+        std::println(stderr, "  Erro: arquivo não encontrado: {}", gfa_path);
         return;
     }
 
@@ -155,46 +156,39 @@ static void load_gfa(Session& sess, const std::string& gfa_path,
     // O banco é inteiramente derivado do GFA — pode ser recriado a qualquer momento
     if (fs::exists(db_path)) {
         fs::remove(db_path);
-        std::cout << "  (banco anterior removido: " << db_path << ")\n";
+        std::println("  (banco anterior removido: {})", db_path);
     }
 
-    std::cout << "  Carregando " << gfa_path << " ...\n";
-    std::cout << "  SQLite   : " << db_path << '\n';
-    std::cout << "  Threads  : " << threads << '\n';
+    std::println("  Carregando {} ...", gfa_path);
+    std::println("  SQLite   : {}", db_path);
+    std::println("  Threads  : {}", threads);
 
     sess.ingestor.reset();
 
-    const auto result = sess.ingestor.ingest(
-        gfa_path,
-        threads,
-        /*gamma=*/2.0,
-        /*verbose=*/false,
-        db_path,
-        /*build_topology=*/true
-    );
+    const auto result = sess.ingestor.ingest(gfa_path, threads,
+                                             /*gamma=*/2.0,
+                                             /*verbose=*/false, db_path,
+                                             /*build_topology=*/true);
 
     if (!result) {
-        std::cerr << "  Erro no ingest: " << result.error() << '\n';
+        std::println(stderr, "  Erro no ingest: {}", result.error());
         sess.planner.reset();
         return;
     }
 
-    sess.stats    = *result;
+    sess.stats = *result;
     sess.gfa_path = gfa_path;
-    sess.db_path  = db_path;
-    sess.planner  = std::make_unique<QueryPlanner>(sess.ingestor.topology(), db_path);
+    sess.db_path = db_path;
+    sess.planner = std::make_unique<QueryPlanner>(sess.ingestor.topology(), db_path);
 
-    std::cout << "  Pronto: " << result->node_count << " nós, "
-              << result->link_count << " links ("
-              << std::fixed << std::setprecision(2)
-              << result->elapsed_total_s << " s)\n";
+    std::println("  Pronto: {} nós, {} links ({:.2f} s)", result->node_count, result->link_count, result->elapsed_total_s);
 }
 
 // ─── Execução de uma query ────────────────────────────────────────────────────
 
 static void execute_query(const Session& sess, const std::string& query_str) {
     if (!sess.has_data()) {
-        std::cerr << "  Nenhum dado carregado. Use .load <arquivo.gfa> ou --gfa.\n";
+        std::println(stderr, "  Nenhum dado carregado. Use .load <arquivo.gfa> ou --gfa.");
         return;
     }
 
@@ -202,7 +196,7 @@ static void execute_query(const Session& sess, const std::string& query_str) {
 
     const auto parsed = parse_ggql(query_str);
     if (!parsed) {
-        std::cerr << "  Erro de sintaxe: " << parsed.error() << '\n';
+        std::println(stderr, "  Erro de sintaxe: {}", parsed.error());
         return;
     }
 
@@ -211,12 +205,12 @@ static void execute_query(const Session& sess, const std::string& query_str) {
     const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
     if (!result) {
-        std::cerr << "  Erro: " << result.error() << '\n';
+        std::println(stderr, "  Erro: {}", result.error());
         return;
     }
 
-    std::cout << result->format_table();
-    std::cout << "  Tempo: " << std::fixed << std::setprecision(2) << ms << " ms\n\n";
+    std::print("{}", result->format_table());
+    std::println("  Tempo: {:.2f} ms\n", ms);
 }
 
 // ─── Loop principal ───────────────────────────────────────────────────────────
@@ -226,12 +220,14 @@ static void repl_loop(Session& sess, int threads) {
     std::string buffer; // acumulador multi-linha
 
     auto prompt = [&]() {
-        if (!tty) return;
-        std::cout << (buffer.empty() ? "ggql> " : "   -> ") << std::flush;
+        if (!tty)
+            return;
+        std::print("{}", buffer.empty() ? "ggql> " : "   -> ");
+        std::fflush(stdout);
     };
 
     prompt();
-    for (std::string line; std::getline(std::cin, line); ) {
+    for (std::string line; std::getline(std::cin, line);) {
         const std::string trimmed = trim(line);
 
         // ── Ignora linhas vazias (exceto se em acumulação multi-linha) ────────
@@ -252,12 +248,12 @@ static void repl_loop(Session& sess, int threads) {
         // ── Meta-comandos (sempre com buffer vazio) ───────────────────────────
         if (trimmed[0] == '.') {
             if (!buffer.empty()) {
-                std::cerr << "  Buffer pendente descartado.\n";
+                std::println(stderr, "  Buffer pendente descartado.");
                 buffer.clear();
             }
 
             if (trimmed == ".quit" || trimmed == ".exit") {
-                std::cout << "  bye.\n";
+                std::println("  bye.");
                 return;
             } else if (trimmed == ".help") {
                 print_help();
@@ -266,12 +262,11 @@ static void repl_loop(Session& sess, int threads) {
             } else if (trimmed.starts_with(".load ")) {
                 const std::string path = trim(trimmed.substr(6));
                 if (path.empty())
-                    std::cerr << "  Uso: .load <arquivo.gfa>\n";
+                    std::println(stderr, "  Uso: .load <arquivo.gfa>");
                 else
                     load_gfa(sess, path, threads);
             } else {
-                std::cerr << "  Comando desconhecido: " << trimmed
-                          << "  (tente .help)\n";
+                std::println(stderr, "  Comando desconhecido: {}  (tente .help)", trimmed);
             }
 
             prompt();
@@ -279,7 +274,8 @@ static void repl_loop(Session& sess, int threads) {
         }
 
         // ── Acumula linha no buffer ────────────────────────────────────────────
-        if (!buffer.empty()) buffer += '\n';
+        if (!buffer.empty())
+            buffer += '\n';
         buffer += trimmed;
 
         // ── Verifica se a query está completa (termina em ';') ────────────────
@@ -322,8 +318,8 @@ static void repl_loop(Session& sess, int threads) {
 struct Args {
     std::string gfa_path;
     std::string db_path;
-    int         threads = 4;
-    bool        help    = false;
+    int threads = 4;
+    bool help = false;
 };
 
 static Args parse_args(int argc, char** argv) {
@@ -332,30 +328,30 @@ static Args parse_args(int argc, char** argv) {
         std::string_view arg{argv[i]};
         if ((arg == "--gfa" || arg == "-g") && i + 1 < argc)
             a.gfa_path = argv[++i];
-        else if ((arg == "--db"  || arg == "-d") && i + 1 < argc)
+        else if ((arg == "--db" || arg == "-d") && i + 1 < argc)
             a.db_path = argv[++i];
         else if ((arg == "--threads" || arg == "-t") && i + 1 < argc)
             a.threads = std::stoi(argv[++i]);
         else if (arg == "--help" || arg == "-h")
             a.help = true;
         else
-            std::cerr << "  Argumento desconhecido ignorado: " << arg << '\n';
+            std::println(stderr, "  Argumento desconhecido ignorado: {}", arg);
     }
     return a;
 }
 
 static void usage(const char* prog) {
-    std::cout << "Uso: " << prog << " [opções]\n"
-              << "  --gfa <arquivo.gfa>    carrega e indexa o arquivo GFA\n"
-              << "  --db  <arquivo.sqlite> abre banco SQLite existente\n"
-              << "  --threads <N>          threads para ingest (padrão: 4)\n"
-              << "  --help                 esta mensagem\n";
+    std::print("Uso: {} [opções]\n"
+               "  --gfa <arquivo.gfa>    carrega e indexa o arquivo GFA\n"
+               "  --db  <arquivo.sqlite> abre banco SQLite existente\n"
+               "  --threads <N>          threads para ingest (padrão: 4)\n"
+               "  --help                 esta mensagem\n", prog);
 }
 
 // ─── Banner ───────────────────────────────────────────────────────────────────
 
 static void print_banner() {
-    std::cout << R"(
+    std::println(R"(
   ██████╗  ██████╗  ██████╗ ██╗
  ██╔════╝ ██╔════╝ ██╔═══██╗██║
  ██║  ███╗██║  ███╗██║   ██║██║
@@ -365,7 +361,7 @@ static void print_banner() {
 
  Genomic Graph Query Language — REPL interativo
  Digite .help para ajuda ou .quit para sair.
-)" << '\n';
+)");
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -389,11 +385,11 @@ int main(int argc, char** argv) {
         // Apenas SQLite — sem topologia CSR (SEGMENT funciona, TIP/BUBBLE/REPEAT não)
         sess.db_path = args.db_path;
         sess.planner = std::make_unique<QueryPlanner>(nullptr, args.db_path);
-        std::cout << "  Banco SQLite aberto: " << args.db_path << '\n';
-        std::cout << "  (FIND TIP / BUBBLE / REPEAT requerem --gfa)\n\n";
+        std::println("  Banco SQLite aberto: {}", args.db_path);
+        std::println("  (FIND TIP / BUBBLE / REPEAT requerem --gfa)\n");
     } else {
-        std::cout << "  Nenhum dado carregado.\n"
-                  << "  Use .load <arquivo.gfa>  ou  passe --gfa na linha de comando.\n\n";
+        std::print("  Nenhum dado carregado.\n"
+                   "  Use .load <arquivo.gfa>  ou  passe --gfa na linha de comando.\n\n");
     }
 
     repl_loop(sess, args.threads);

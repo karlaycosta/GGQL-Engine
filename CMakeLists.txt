@@ -55,6 +55,14 @@ add_executable(ggql_repl src/repl/ggql_repl.cpp)
 target_compile_options(ggql_repl PRIVATE -O2 -march=native -fopenmp)
 target_link_libraries(ggql_repl PRIVATE pegtl sdsl sqlite3 gomp pthread tbb)
 
+# ── bench_bubbles ─────────────────────────────────────────
+# Benchmark isolado de find_tips / find_repeats / find_bubbles.
+# Uso: ./build/bench_bubbles <arquivo.gfa> [threads] [max_depth] [runs]
+add_executable(bench_bubbles src/storage/bench_bubbles.cpp)
+target_compile_options(bench_bubbles PRIVATE -O3 -march=native -fopenmp -flto=auto)
+target_link_options(bench_bubbles PRIVATE -flto=auto)
+target_link_libraries(bench_bubbles PRIVATE gomp pthread sdsl sqlite3 tbb)
+
 # ── Testes ────────────────────────────────────────────────
 enable_testing()
 add_subdirectory(tests)
