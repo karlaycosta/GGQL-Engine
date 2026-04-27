@@ -58,8 +58,12 @@ vg-master/
 *~
 .DS_Store
 
-# ─── Documentação — metadados Obsidian ────────────────────────────────────────
-docs/.obsidian/
+# ─── Documentação — não versionada ───────────────────────────────────────────
+docs/
+
+# ─── Dados — scripts e análises locais ───────────────────────────────────────
+data/*.md
+data/*.py
 
 # ─── GUI Flutter (WIP — não versionada) ──────────────────────────────────────
 gui/
