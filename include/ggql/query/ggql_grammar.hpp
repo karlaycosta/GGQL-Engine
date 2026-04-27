@@ -15,10 +15,10 @@
 
 #include <tao/pegtl.hpp>
 
+#include <cassert>
 #include <charconv>
 #include <expected>
 #include <string>
-#include <string_view>
 
 #include "ggql_ast.hpp"
 
@@ -80,13 +80,18 @@ struct return_field : peg::seq<peg::not_at<keyword_any>, peg::identifier> {};
 
 // ─── Valores ──────────────────────────────────────────────────────────────────
 
+/// Literal float: dígitos '.' dígitos  (ex: 3.5, 12.30)
+struct float_value : peg::seq<peg::plus<peg::digit>, peg::one<'.'>, peg::plus<peg::digit>> {};
+
 struct int_value : peg::plus<peg::digit> {};
 
 /// Conteúdo entre aspas duplas (sem as aspas)
 struct str_content : peg::star<peg::not_one<'"'>> {};
 struct str_value : peg::seq<peg::one<'"'>, str_content, peg::one<'"'>> {};
 
-struct value : peg::sor<int_value, str_value> {};
+/// float_value antes de int_value: PEG ordered choice tenta float primeiro,
+/// backtracks para int se não houver '.'.
+struct value : peg::sor<float_value, int_value, str_value> {};
 
 // ─── Chamadas de função ───────────────────────────────────────────────────────
 
@@ -145,13 +150,13 @@ struct query : peg::seq<ws, peg::sor<find_stmt, search_stmt>, ws, peg::eof> {};
 
 struct ParseState {
     // ── temporários (válidos apenas durante o parse de uma cláusula) ──────────
-    std::string tmp_entity_str;
-    std::string tmp_field;
-    std::string tmp_op_str;
-    bool tmp_value_is_string = false;
-    int64_t tmp_int_value = 0;
-    std::string tmp_str_value;
-    std::string tmp_fn_arg;
+    // string_view é seguro: o input permanece válido durante todo o parse.
+    std::string_view tmp_entity_sv;
+    std::string_view tmp_field;
+    std::string_view tmp_op_sv;
+    // Valor temporário de uma condição WHERE: inteiro, double ou string (zero-copy).
+    std::variant<int64_t, double, std::string_view> tmp_value{int64_t{0}};
+    std::string_view tmp_fn_arg;
 
     // ── acumuladores ─────────────────────────────────────────────────────────
     std::vector<ConditionExpr> where_conditions;
@@ -169,32 +174,34 @@ struct ParseState {
 
 namespace detail {
 
-[[nodiscard]] inline EntityType parse_entity(std::string_view s) noexcept {
-    if (s == "SEGMENT")
-        return EntityType::SEGMENT;
-    if (s == "EDGE")
-        return EntityType::EDGE;
-    if (s == "PATH")
-        return EntityType::PATH;
-    if (s == "BUBBLE")
-        return EntityType::BUBBLE;
-    if (s == "TIP")
-        return EntityType::TIP;
-    /* REPEAT */ return EntityType::REPEAT;
+[[nodiscard]] constexpr EntityType parse_entity(std::string_view s) noexcept {
+    using enum EntityType;
+    if (s == "SEGMENT") { return SEGMENT;
+}
+    if (s == "EDGE") {    return EDGE;
+}
+    if (s == "PATH") {    return PATH;
+}
+    if (s == "BUBBLE") {  return BUBBLE;
+}
+    if (s == "TIP") {     return TIP;
+}
+    /* REPEAT */        return REPEAT;
 }
 
-[[nodiscard]] inline Operator parse_op(std::string_view s) noexcept {
-    if (s == "!=")
-        return Operator::NEQ;
-    if (s == ">=")
-        return Operator::GEQ;
-    if (s == "<=")
-        return Operator::LEQ;
-    if (s == ">")
-        return Operator::GT;
-    if (s == "<")
-        return Operator::LT;
-    /* = */ return Operator::EQ;
+[[nodiscard]] constexpr Operator parse_op(std::string_view s) noexcept {
+    using enum Operator;
+    if (s == "!=") { return NEQ;
+}
+    if (s == ">=") { return GEQ;
+}
+    if (s == "<=") { return LEQ;
+}
+    if (s == ">") {  return GT;
+}
+    if (s == "<") {  return LT;
+}
+    /* = */        return EQ;
 }
 
 } // namespace detail
@@ -205,21 +212,31 @@ template <typename Rule> struct action : peg::nothing<Rule> {};
 // ── entity_type ───────────────────────────────────────────────────────────────
 template <> struct action<entity_type> {
     template <typename In> static void apply(const In& in, ParseState& s) {
-        s.tmp_entity_str = in.string();
+        s.tmp_entity_sv = in.string_view();
     }
 };
 
 // ── where_field ───────────────────────────────────────────────────────────────
 template <> struct action<where_field> {
     template <typename In> static void apply(const In& in, ParseState& s) {
-        s.tmp_field = in.string();
+        s.tmp_field = in.string_view();
     }
 };
 
 // ── op_sym ────────────────────────────────────────────────────────────────────
 template <> struct action<op_sym> {
     template <typename In> static void apply(const In& in, ParseState& s) {
-        s.tmp_op_str = in.string();
+        s.tmp_op_sv = in.string_view();
+    }
+};
+
+// ── float_value ───────────────────────────────────────────────────────────────
+template <> struct action<float_value> {
+    template <typename In> static void apply(const In& in, ParseState& s) {
+        const auto sv = in.string_view();
+        double v = 0;
+        std::from_chars(sv.data(), sv.data() + sv.size(), v);
+        s.tmp_value = v;
     }
 };
 
@@ -227,77 +244,90 @@ template <> struct action<op_sym> {
 template <> struct action<int_value> {
     template <typename In> static void apply(const In& in, ParseState& s) {
         const auto sv = in.string_view();
-        const auto end = sv.data() + sv.size();
-        std::from_chars(sv.data(), end, s.tmp_int_value);
-        s.tmp_value_is_string = false;
+        int64_t v = 0;
+        std::from_chars(sv.data(), sv.data() + sv.size(), v);
+        s.tmp_value = v;
     }
 };
 
 // ── str_content (conteúdo de valor string em condições WHERE) ─────────────────
 template <> struct action<str_content> {
     template <typename In> static void apply(const In& in, ParseState& s) {
-        s.tmp_str_value = in.string();
-        s.tmp_value_is_string = true;
+        s.tmp_value = in.string_view();
     }
 };
 
 // ── condition_expr: <field> <op> <value> ─────────────────────────────────────
 template <> struct action<condition_expr> {
     template <typename In> static void apply(const In&, ParseState& s) {
-        Value v = s.tmp_value_is_string ? Value{s.tmp_str_value} : Value{s.tmp_int_value};
+        // Converte o variant interno (string_view) para o Value do AST (string).
+        Value ast_value = std::visit(
+            []<typename T>(const T& v) -> Value {
+                if constexpr (std::is_same_v<T, std::string_view>) {
+                    return Value{std::string{v}};
+                } else {
+                    return Value{v};
+}
+            },
+            s.tmp_value);
         s.where_conditions.push_back(
-            CompareCondition{s.tmp_field, detail::parse_op(s.tmp_op_str), std::move(v)});
+            CompareCondition{std::string{s.tmp_field}, detail::parse_op(s.tmp_op_sv),
+                             std::move(ast_value)});
     }
 };
 
 // ── fn_crosses_arg ────────────────────────────────────────────────────────────
 template <> struct action<fn_crosses_arg> {
     template <typename In> static void apply(const In& in, ParseState& s) {
-        s.tmp_fn_arg = in.string();
+        s.tmp_fn_arg = in.string_view();
     }
 };
 
 // ── fn_crosses: empurra CrossesCondition ao completar ─────────────────────────
 template <> struct action<fn_crosses> {
     template <typename In> static void apply(const In&, ParseState& s) {
-        s.where_conditions.push_back(CrossesCondition{s.tmp_fn_arg});
-        s.tmp_fn_arg.clear();
+        s.where_conditions.push_back(CrossesCondition{std::string{s.tmp_fn_arg}});
+        s.tmp_fn_arg = {};
     }
 };
 
 // ── fn_contains_arg ───────────────────────────────────────────────────────────
 template <> struct action<fn_contains_arg> {
     template <typename In> static void apply(const In& in, ParseState& s) {
-        s.tmp_fn_arg = in.string();
+        s.tmp_fn_arg = in.string_view();
     }
 };
 
 // ── fn_contains: empurra ContainsKmerCondition ao completar ───────────────────
 template <> struct action<fn_contains> {
     template <typename In> static void apply(const In&, ParseState& s) {
-        s.where_conditions.push_back(ContainsKmerCondition{s.tmp_fn_arg});
-        s.tmp_fn_arg.clear();
+        s.where_conditions.push_back(ContainsKmerCondition{std::string{s.tmp_fn_arg}});
+        s.tmp_fn_arg = {};
     }
 };
 
 // ── logical_op ────────────────────────────────────────────────────────────────
 template <> struct action<logical_op> {
     template <typename In> static void apply(const In& in, ParseState& s) {
-        s.where_connectors.push_back(in.string_view() == "AND" ? LogicalOp::AND : LogicalOp::OR);
+        const auto sv = in.string_view();
+        if (sv == "AND") {      s.where_connectors.push_back(LogicalOp::AND);
+        } else if (sv == "OR") {  s.where_connectors.push_back(LogicalOp::OR);
+        } else {                  std::unreachable();
+}
     }
 };
 
 // ── return_field ──────────────────────────────────────────────────────────────
 template <> struct action<return_field> {
     template <typename In> static void apply(const In& in, ParseState& s) {
-        s.return_fields.push_back(in.string());
+        s.return_fields.emplace_back(in.string_view());
     }
 };
 
 // ── kmer_arg (SEARCH KMER "...") ──────────────────────────────────────────────
 template <> struct action<kmer_arg> {
     template <typename In> static void apply(const In& in, ParseState& s) {
-        s.kmer_str = in.string();
+        s.kmer_str = in.string_view();
     }
 };
 
@@ -305,12 +335,13 @@ template <> struct action<kmer_arg> {
 template <> struct action<find_stmt> {
     template <typename In> static void apply(const In&, ParseState& s) {
         FindQuery fq;
-        fq.entity = detail::parse_entity(s.tmp_entity_str);
+        fq.entity = detail::parse_entity(s.tmp_entity_sv);
 
         if (!s.where_conditions.empty()) {
             WhereClause wc;
             wc.conditions = std::move(s.where_conditions);
             wc.connectors = std::move(s.where_connectors);
+            assert(wc.is_valid() && "WHERE: connectors.size() deve ser conditions.size() - 1");
             fq.where = std::move(wc);
         }
 
@@ -336,19 +367,18 @@ template <> struct action<search_stmt> {
 /// Analisa uma query GGQL.
 /// Retorna o AST tipado em caso de sucesso ou uma mensagem de erro.
 [[nodiscard]] inline std::expected<GgqlQuery, std::string> parse_ggql(std::string_view input) {
-    // peg::memory_input requer um ponteiro válido durante todo o parse
-    const std::string input_str{input};
-    peg::memory_input in(input_str, "ggql_input");
+    peg::memory_input in(input.data(), input.size(), "ggql_input");
     ParseState state;
 
     try {
-        if (!peg::parse<query, action>(in, state))
+        if (!peg::parse<query, action>(in, state)) {
             return std::unexpected{"Erro de sintaxe na query GGQL"};
+}
     } catch (const peg::parse_error& e) {
         return std::unexpected{std::string{e.what()}};
     }
 
-    return std::move(state.result);
+    return state.result;
 }
 
 } // namespace ggql::grammar

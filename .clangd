@@ -1,0 +1,12 @@
+CompileFlags:
+  CompilationDatabase: build/
+  Compiler: /usr/bin/g++-14
+  Add:
+    - "-std=c++23"
+    - "-I/home/karlay/Documentos/c++/ggql_engine/include"
+    - "-I/home/karlay/Documentos/c++/ggql_engine/third_party/sdsl-lite/include"
+    - "-I/home/karlay/Documentos/c++/ggql_engine/third_party/gbwt/include"
+    - "-I/home/karlay/Documentos/c++/ggql_engine/third_party/pegtl/include"
+    - "-I/home/karlay/Documentos/c++/ggql_engine/third_party/libsais/include"
+    - "-I/home/karlay/Documentos/c++/ggql_engine/third_party/fmt/include"
+    - "-I/usr/lib/llvm-20/lib/clang/20/include"

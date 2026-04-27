@@ -558,6 +558,19 @@ public:
     return (_nchar * 64ULL + _ranks.capacity() * 64ULL);
   }
 
+  // PERF-3: pré-busca a linha de cache que contém a palavra e o sample de rank.
+  // Emitida ANTES de lookup() do elemento atual para cobrir a latência DRAM
+  // durante o processamento do elemento anterior (software pipelining).
+  void prefetch_hint(uint64_t pos) const noexcept {
+    if (_bitArray) {
+      __builtin_prefetch(_bitArray + (pos >> 6), 0, 1);
+      const uint64_t rank_idx = pos / _nb_bits_per_rank_sample;
+      if (rank_idx < _ranks.size()) {
+        __builtin_prefetch(_ranks.data() + rank_idx, 0, 1);
+      }
+    }
+  }
+
   // clear whole array
   void clear() { memset(_bitArray, 0, _nchar * sizeof(uint64_t)); }
 
@@ -799,10 +812,10 @@ public:
           (_fastModeLevel + 1) + (pow(_proba_collision, _fastModeLevel)) *
                                      (_nb_levels - (_fastModeLevel + 1));
 
-      std::print(
+      /* std::print(
           "for info, total work write each  : {:.3f}    total work inram from "
           "level {} : {:.3f}  total work raw : {:.3f}\n",
-          total_writeEach, _fastModeLevel, total_fastmode_ram, total_raw);
+          total_writeEach, _fastModeLevel, total_fastmode_ram, total_raw); */
 
       if (writeEach) {
         _progressBar.init(_nelem * total_writeEach, "Building BooPHF",
@@ -868,6 +881,16 @@ public:
 
   uint64_t nbKeys() const { return _nelem; }
 
+  // PERF-3: pré-busca o bitset de nível 0 para o próximo elemento.
+  // Chamar ANTES de lookup(atual) para amortizar latência DRAM do próximo lookup.
+  void prefetch_lookup(const elem_t& elem) noexcept {
+    if (!_built || _levels.empty()) return;
+    hash_pair_t bbhash;
+    uint64_t h = _hasher.h0(bbhash, elem);
+    uint64_t pos = fastrange64(h, _levels[0].hash_domain);
+    _levels[0].bitset.prefetch_hint(pos);
+  }
+
   uint64_t totalBitSize() {
 
     uint64_t totalsizeBitset = 0;
@@ -879,13 +902,13 @@ public:
     // with uint64_t key, would be larger for other type of elem)
     uint64_t totalsize = totalsizeBitset + _final_hash.size() * 42 * 8;
 
-    std::print("Bitarray    {}  bits ({:.2f} %%)   (array + ranks )\n",
-               totalsizeBitset, 100 * (float)totalsizeBitset / totalsize);
-    std::print(
-        "Last level hash  {}  bits ({:.2f} %%) (nb in last level hash {})\n",
+    // std::print("Bitarray    {}  bits ({:.2f} %)   (array + ranks )\n",
+    //            totalsizeBitset, 100 * (float)totalsizeBitset / totalsize);
+    /* std::print(
+        "Last level hash  {}  bits ({:.2f} %) (nb in last level hash {})\n",
         _final_hash.size() * 42 * 8,
         100 * (float)(_final_hash.size() * 42 * 8) / totalsize,
-        _final_hash.size());
+        _final_hash.size()); */
     return totalsize;
   }
 

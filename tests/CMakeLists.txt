@@ -1,5 +1,52 @@
-# Adicione aqui os testes quando houver arquivos em tests/
-# Exemplo:
-# add_executable(test_parser test_parser.cpp)
-# target_link_libraries(test_parser PRIVATE pegtl)
-# add_test(NAME test_parser COMMAND test_parser)
+cmake_minimum_required(VERSION 3.20)
+
+enable_testing()
+
+# ── Testes do ingestor (dependem de ggql_ingest) ──────────────────────────────
+set(INGEST_TEST_SRCS
+    test_ingestor_tokenize.cpp
+    test_ingestor_remap.cpp
+    test_ingestor_binpack.cpp
+    test_ingestor_manifest.cpp
+    test_ingestor_parse.cpp
+)
+
+foreach(src ${INGEST_TEST_SRCS})
+    get_filename_component(tname ${src} NAME_WE)
+    add_executable(${tname} ${src})
+    target_compile_options(${tname} PRIVATE
+        -std=c++23 -march=native -fopenmp -fno-strict-aliasing
+        $<$<CONFIG:Debug>:-O0 -g>
+        $<$<NOT:$<CONFIG:Debug>>:-O2>
+    )
+    target_link_libraries(${tname} PRIVATE ggql_ingest)
+    add_test(NAME ${tname} COMMAND ${tname})
+endforeach()
+
+# ── Testes de storage (dependem apenas de ggql_storage) ──────────────────────
+set(STORAGE_TEST_SRCS
+    test_storage_csr.cpp
+    test_storage_fm_index.cpp
+)
+
+foreach(src ${STORAGE_TEST_SRCS})
+    get_filename_component(tname ${src} NAME_WE)
+    add_executable(${tname} ${src})
+    target_compile_options(${tname} PRIVATE
+        -std=c++23 -march=native -fopenmp -fno-strict-aliasing
+        $<$<CONFIG:Debug>:-O0 -g>
+        $<$<NOT:$<CONFIG:Debug>>:-O2>
+    )
+    target_link_libraries(${tname} PRIVATE ggql_storage)
+    add_test(NAME ${tname} COMMAND ${tname})
+endforeach()
+
+# ── Testes do query planner (dependem de ggql_query) ─────────────────────────
+add_executable(test_query_planner test_query_planner.cpp)
+target_compile_options(test_query_planner PRIVATE
+    -std=c++23 -march=native
+    $<$<CONFIG:Debug>:-O0 -g>
+    $<$<NOT:$<CONFIG:Debug>>:-O2>
+)
+target_link_libraries(test_query_planner PRIVATE ggql_query)
+add_test(NAME test_query_planner COMMAND test_query_planner)

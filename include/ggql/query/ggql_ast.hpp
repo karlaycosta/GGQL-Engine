@@ -1,9 +1,11 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>   // std::to_underlying, std::unreachable (C++23)
 #include <variant>
 #include <vector>
 
@@ -17,7 +19,7 @@ enum class LogicalOp { AND, OR };
 
 // ─── Value (número inteiro ou string entre aspas) ─────────────────────────────
 
-using Value = std::variant<int64_t, std::string>;
+using Value = std::variant<int64_t, double, std::string>;
 
 // ─── Expressões de condição (cláusula WHERE) ──────────────────────────────────
 
@@ -47,6 +49,11 @@ struct WhereClause {
     /// connectors[i] é o operador lógico entre conditions[i] e conditions[i+1].
     /// Invariante: connectors.size() == conditions.size() - 1
     std::vector<LogicalOp> connectors;
+
+    /// Verifica o invariante de tamanho em tempo de execução (debug builds).
+    [[nodiscard]] bool is_valid() const noexcept {
+        return conditions.empty() || connectors.size() + 1 == conditions.size();
+    }
 };
 
 // ─── Queries ──────────────────────────────────────────────────────────────────
@@ -68,44 +75,37 @@ using GgqlQuery = std::variant<FindQuery, SearchKmerQuery>;
 
 // ─── Utilitários de conversão para string ─────────────────────────────────────
 
-[[nodiscard]] constexpr std::string_view entity_to_string(EntityType e) noexcept {
-    switch (e) {
-        case EntityType::SEGMENT:
-            return "SEGMENT";
-        case EntityType::EDGE:
-            return "EDGE";
-        case EntityType::PATH:
-            return "PATH";
-        case EntityType::BUBBLE:
-            return "BUBBLE";
-        case EntityType::TIP:
-            return "TIP";
-        case EntityType::REPEAT:
-            return "REPEAT";
-    }
-    return "?";
+// Enums são contíguos a partir de 0 — garantido por static_assert abaixo.
+static_assert(std::to_underlying(EntityType::REPEAT) == 5,
+    "EntityType deve ser contíguo 0..5");
+static_assert(std::to_underlying(Operator::LEQ) == 5,
+    "Operator deve ser contíguo 0..5");
+
+constexpr std::array<std::string_view, 6> k_entity_names {
+    "SEGMENT", "EDGE", "PATH", "BUBBLE", "TIP", "REPEAT"
+};
+
+constexpr std::array<std::string_view, 6> k_op_names {
+    "=", "!=", ">", "<", ">=", "<="
+};
+
+[[nodiscard("Use o nome retornado para exibição ou serialização")]]
+constexpr std::string_view entity_to_string(EntityType e) noexcept {
+    return k_entity_names[std::to_underlying(e)];
 }
 
-[[nodiscard]] constexpr std::string_view op_to_string(Operator o) noexcept {
-    switch (o) {
-        case Operator::EQ:
-            return "=";
-        case Operator::NEQ:
-            return "!=";
-        case Operator::GT:
-            return ">";
-        case Operator::LT:
-            return "<";
-        case Operator::GEQ:
-            return ">=";
-        case Operator::LEQ:
-            return "<=";
-    }
-    return "?";
+[[nodiscard("Use o operador retornado para exibição ou serialização")]]
+constexpr std::string_view op_to_string(Operator o) noexcept {
+    return k_op_names[std::to_underlying(o)];
 }
 
-[[nodiscard]] constexpr std::string_view logical_op_to_string(LogicalOp l) noexcept {
-    return l == LogicalOp::AND ? "AND" : "OR";
+[[nodiscard("Use o operador lógico retornado para exibição ou serialização")]]
+constexpr std::string_view logical_op_to_string(LogicalOp l) noexcept {
+    switch (l) {
+        case LogicalOp::AND: return "AND";
+        case LogicalOp::OR:  return "OR";
+    }
+    std::unreachable();
 }
 
 } // namespace ggql

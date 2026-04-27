@@ -22,6 +22,9 @@ bench_ingest
 bench_mmap
 bench_mmap_parallel
 bench_mphf
+bench_gbwt
+bench_fm_index
+test_fm_index_minimal
 gfa_ingestor
 ggql_engine
 ggql_engine_dev
@@ -32,9 +35,18 @@ ggql_repl
 data/*.gfa
 data/*.sqlite
 data/*.db
+data/*.idx/
+data/chm13_*/
+.idx_bench/
+bench_output.txt
+
+# ─── Diretórios de referência externos (não são parte do projeto) ─────────────
+odgi-master/
+vg-master/
 
 # ─── Cache de ferramentas ─────────────────────────────────────────────────────
 .cache/
+.claude/
 
 # ─── IDEs e editores ──────────────────────────────────────────────────────────
 .vscode/settings.json
@@ -45,6 +57,12 @@ data/*.db
 *.swo
 *~
 .DS_Store
+
+# ─── Documentação — metadados Obsidian ────────────────────────────────────────
+docs/.obsidian/
+
+# ─── GUI Flutter (WIP — não versionada) ──────────────────────────────────────
+gui/
 
 # ─── Coverage / profiling ─────────────────────────────────────────────────────
 *.gcno
