@@ -567,12 +567,13 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
     }
 
     // ── Sigma por componente: max(encoded_value)+1 ────────────────────────────
-    // encoded_value = (node_id << 1) | orient_bit; máximo = (max_id*2)+1
+    // encoded_value = gbwt_encode_node(node_id, orient) = ((node_id+1)<<1)|orient
+    // máximo = ((max_id+1)*2)+1 = 2*max_id + 3
     std::vector<uint64_t> comp_sigma(target_n, 0ull);
     for (size_t nid = 0; nid < node_component.size(); ++nid) {
         const uint32_t c = node_component[nid];
         if (c < target_n) {
-            comp_sigma[c] = std::max(comp_sigma[c], static_cast<uint64_t>((nid << 1) | 1u));
+            comp_sigma[c] = std::max(comp_sigma[c], gbwt_encode_node(nid, 1u));
         }
     }
     for (auto& s : comp_sigma) {
@@ -613,7 +614,7 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
     const auto path_comp = [&](const gbwt::vector_type& seq) -> size_t {
         for (auto enc : seq) {
             if (enc != gbwt::ENDMARKER) {
-                const uint64_t nid = static_cast<uint64_t>(enc) >> 1;
+                const uint64_t nid = gbwt_decode_node(static_cast<uint64_t>(enc));
                 if (nid < node_component.size()) {
                     return std::min<size_t>(node_component[nid], target_n - 1);
                 }
@@ -697,8 +698,8 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
 // ── path_nodes ────────────────────────────────────────────────────────────────
 //
 // Extrai a sequência de IDs internos de nós de um path via gBWT.
-// O gBWT armazena cada nó como (node_id << 1) | orient_bit — mesmo encoding
-// que E_fwd_/E_bwd_. Fazemos >> 1 para obter o ID interno limpo.
+// O gBWT armazena cada nó com encoding gbwt_encode_node (shift +1 para
+// reservar valor 0 a ENDMARKER). Decodificamos com gbwt_decode_node.
 
 std::vector<uint64_t> GfaCsrTopology::path_nodes(size_t global_path_id) const {
     if (gbwts_.empty() || gbwt_offsets_.empty() || global_path_id >= path_names_.size()) {
@@ -723,7 +724,7 @@ std::vector<uint64_t> GfaCsrTopology::path_nodes(size_t global_path_id) const {
     nodes.reserve(seq.size());
     for (const auto enc : seq) {
         if (enc == gbwt::ENDMARKER) { continue; }
-        nodes.push_back(static_cast<uint64_t>(enc) >> 1); // strip orient bit
+        nodes.push_back(gbwt_decode_node(static_cast<uint64_t>(enc)));
     }
     return nodes;
 }

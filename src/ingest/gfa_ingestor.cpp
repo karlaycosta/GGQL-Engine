@@ -331,7 +331,7 @@ bool GfaIngestorMmapParallel::parse_w_line(const char*& p, const char* end,
         }
         uint64_t remapped = has_remap ? static_cast<uint64_t>(remap[nid]) : nid;
         uint64_t orient_bit = (orient_c == '<') ? 1u : 0u;
-        local_nodes.push_back((remapped << 1) | orient_bit);
+        local_nodes.push_back(gbwt_encode_node(remapped, orient_bit));
     }
     return true;
 }
@@ -378,7 +378,7 @@ bool GfaIngestorMmapParallel::parse_p_line(const char*& p, const char* end,
         }
         uint64_t remapped = has_remap ? static_cast<uint64_t>(remap[nid]) : nid;
         uint64_t orient_bit = (orient_c == '-') ? 1u : 0u;
-        local_nodes.push_back((remapped << 1) | orient_bit);
+        local_nodes.push_back(gbwt_encode_node(remapped, orient_bit));
     }
     return true;
 }
@@ -816,7 +816,7 @@ void GfaIngestorMmapParallel::write_manifest_atomic(const std::string& dir, uint
             fmt::print(stderr, "  [cache] AVISO: falha ao criar manifest.tmp\n");
             return;
         }
-        out << "version=2\n"
+        out << "version=3\n"
             << "gfa_hash=" << hash << "\n"
             << "gfa_size=" << file_sz << "\n"
             << "gfa_mtime_ns=" << file_mtime_ns_val << "\n"
@@ -888,7 +888,10 @@ GfaIngestorMmapParallel::load_index(const std::string& dir, std::optional<uint64
         }
     }
 
-    if (manifest_version < 2) {
+    if (manifest_version < 3) {
+        // v3: encoding GBWT-bound corrigido (gbwt_encode_node com shift +1).
+        // Caches v2 ou anteriores tinham paths divididos silenciosamente em
+        // node_id=0 forward. Re-ingest obrigatório.
         cli::step_info(
             fmt::format("cache version={} desatualizado — será regenerado", manifest_version));
         return std::nullopt;
@@ -1238,11 +1241,12 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                 if (!g.in_ram_seqs.empty()) {
                     for (auto& seq : g.in_ram_seqs) {
                         for (auto& enc : seq) {
-                            const uint64_t old_node = enc >> 1;
+                            // enc já vem com shift +1 de parse_w/p_line.
+                            const uint64_t old_node = gbwt_decode_node(enc);
                             const uint64_t new_node = (old_node < remap.size())
                                                           ? static_cast<uint64_t>(remap[old_node])
                                                           : old_node;
-                            enc = (new_node << 1) | (enc & 1ull);
+                            enc = gbwt_encode_node(new_node, gbwt_decode_orient(enc));
                         }
                     }
                 } else {
@@ -1255,13 +1259,13 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                         if (val == gbwt::ENDMARKER) {
                             out_buf.push_back(gbwt::ENDMARKER);
                         } else {
-                            const uint64_t old_node = static_cast<uint64_t>(val) >> 1;
-                            const uint64_t orient = static_cast<uint64_t>(val) & 1ull;
+                            const uint64_t old_node = gbwt_decode_node(val);
+                            const uint64_t orient = gbwt_decode_orient(val);
                             const uint64_t new_node = (old_node < remap.size())
                                                           ? static_cast<uint64_t>(remap[old_node])
                                                           : old_node;
-                            out_buf.push_back(
-                                static_cast<gbwt::size_type>((new_node << 1) | orient));
+                            out_buf.push_back(static_cast<gbwt::size_type>(
+                                gbwt_encode_node(new_node, orient)));
                         }
                     }
                     out_buf.close();
@@ -1334,10 +1338,11 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                     if (!g.in_ram_seqs.empty()) {
                         // Grupo em RAM: iteração direta — O(nodes) a ~20 GB/s
                         for (const auto& seq : g.in_ram_seqs) {
+                            if (seq.empty()) continue;
                             precomp_nc.push_back(static_cast<uint32_t>(seq.size()));
                             int64_t bp = 0;
                             for (const uint64_t v : seq) {
-                                const uint64_t nid = v >> 1;
+                                const uint64_t nid = gbwt_decode_node(v);
                                 if (nid < lengths.size()) {
                                     bp += static_cast<int64_t>(lengths[nid]);
                                 }
@@ -1346,24 +1351,32 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                         }
                     } else if (!g.tmp_path.empty()) {
                         // Grupo em disco: leitura sequencial do tmp file (muito mais
-                        // rápido que GBWT decompression). Cada path termina com ENDMARKER.
+                        // rápido que GBWT decompression). gbwt_encode_node garante que
+                        // valores armazenados nunca colidem com gbwt::ENDMARKER (0).
                         gbwt::text_buffer_type buf(g.tmp_path, std::ios::in,
                                                    size_t(64) << 20, node_width);
                         uint32_t cur_nc = 0;
                         int64_t  cur_bp = 0;
                         for (const gbwt::size_type val : buf) {
                             if (val == gbwt::ENDMARKER) {
-                                precomp_nc.push_back(cur_nc);
-                                precomp_bp.push_back(cur_bp);
+                                if (cur_nc > 0) {
+                                    precomp_nc.push_back(cur_nc);
+                                    precomp_bp.push_back(cur_bp);
+                                }
                                 cur_nc = 0;
                                 cur_bp = 0;
                             } else {
-                                const uint64_t nid = static_cast<uint64_t>(val) >> 1;
+                                const uint64_t nid = gbwt_decode_node(val);
                                 ++cur_nc;
                                 if (nid < lengths.size()) {
                                     cur_bp += static_cast<int64_t>(lengths[nid]);
                                 }
                             }
+                        }
+                        // Defensivo: path sem ENDMARKER final (não deveria acontecer)
+                        if (cur_nc > 0) {
+                            precomp_nc.push_back(cur_nc);
+                            precomp_bp.push_back(cur_bp);
                         }
                     }
                     // Grupo vazio: sem paths, sem ação
@@ -1391,8 +1404,24 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                                              ggql::format_seconds(stats.elapsed_gbwt_s)));
             }
 
-            // Aplica path stats: pré-computado (RAM/disco) ou GBWT decompression (fallback)
+            // Aplica path stats: pré-computado (RAM/disco) ou GBWT decompression
+            // (fallback usado apenas se store_up existir mas precomp falhou —
+            // shouldn't happen with v3 encoding, mas mantido como defesa).
             if (store_up) {
+                if (stats_from_ram &&
+                    precomp_nc.size() != res_.topology->path_count()) {
+                    // Não deveria ocorrer com gbwt_encode_node (v3); se ocorrer,
+                    // fallback via GBWT decompression preserva correção.
+                    if (verbose) {
+                        cli::step_info(
+                            "Path stats",
+                            fmt::format("precomp count {} != path_count {} — usando fallback",
+                                        precomp_nc.size(), res_.topology->path_count()));
+                    }
+                    stats_from_ram = false;
+                    precomp_nc.clear();
+                    precomp_bp.clear();
+                }
                 auto t_ps0 = clock::now();
                 if (stats_from_ram) {
                     res_.topology->set_path_stats(std::move(precomp_nc), std::move(precomp_bp));

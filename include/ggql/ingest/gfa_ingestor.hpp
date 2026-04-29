@@ -173,8 +173,13 @@ using ggql::ProgressTracker;
 // ── GfaIngestorMmapParallel
 // ───────────────────────────────────────────────────
 // C++23: constexpr node_width calculation
+//
+// Encoding GBWT-bound: gbwt_encode_node(internal_id, orient) =
+//   ((internal_id + 1) << 1) | orient. Para nkeys nós (IDs em [0, nkeys-1]),
+// o maior valor encoded é ((nkeys-1+1)*2) | 1 = 2*nkeys + 1.
+// Bits necessários = bit_width(2*nkeys + 1).
 constexpr uint8_t calc_node_width(uint64_t nkeys) noexcept {
-    return nkeys > 1 ? static_cast<uint8_t>(std::bit_width((nkeys - 1) * 2 + 1)) : uint8_t(1);
+    return nkeys > 0 ? static_cast<uint8_t>(std::bit_width(nkeys * 2ull + 1ull)) : uint8_t(1);
 }
 
 class GfaIngestorMmapParallel {
