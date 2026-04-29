@@ -1,6 +1,6 @@
-#include "ffi/ggql_ffi.h"
+#include "ffi/ffi.h"
 #include "ggql/cli/console.hpp"
-#include "ggql/ingest/gfa_ingestor.hpp"
+#include "ggql/ingest/ingestor.hpp"
 #include "ggql/ingest/gfa_metadata_store.hpp"
 #include "ggql/query/ggql_grammar.hpp"
 #include "ggql/query/query_planner.hpp"

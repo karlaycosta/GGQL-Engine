@@ -12,7 +12,7 @@
 //   max_paths  = limite de caminhos a carregar (0=ilimitado)  (padrão: 0)
 
 #include "ggql/cli/console.hpp"
-#include "ggql/ingest/gfa_ingestor.hpp"
+#include "ggql/ingest/ingestor.hpp"
 
 #include <chrono>
 #include <fmt/color.h>

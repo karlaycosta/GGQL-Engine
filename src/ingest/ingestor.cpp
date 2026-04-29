@@ -1,10 +1,10 @@
-// gfa_ingestor.cpp — Implementações de GfaIngestorMmapParallel.
+// ingestor.cpp — Implementações de GfaIngestorMmapParallel.
 //
 // Separado do header em ARCH-1 para que alterações neste arquivo não
-// disparem recompilação de todos os binários que incluem gfa_ingestor.hpp.
+// disparem recompilação de todos os binários que incluem ingestor.hpp.
 // Compilado uma única vez em ggql_topology_vg.
 
-#include "ggql/ingest/gfa_ingestor.hpp"
+#include "ggql/ingest/ingestor.hpp"
 
 #include "ggql/storage/gfa_cactus_finder.hpp"
 #include "ggql/storage/gfa_fm_index.hpp"

@@ -1,7 +1,7 @@
 // test_ingestor_binpack.cpp — testa o bin-packing via ingestão de GFA
 // com múltiplos componentes e verifica equilíbrio de carga.
 
-#include "ggql/ingest/gfa_ingestor.hpp"
+#include "ggql/ingest/ingestor.hpp"
 
 #include <cassert>
 #include <cstdlib>

@@ -1,7 +1,7 @@
 // test_ingestor_manifest.cpp — testa write_manifest_atomic + load_index
 // (roundtrip, campo inválido, arquivo truncado).
 
-#include "ggql/ingest/gfa_ingestor.hpp"
+#include "ggql/ingest/ingestor.hpp"
 
 #include <cassert>
 #include <cstdlib>

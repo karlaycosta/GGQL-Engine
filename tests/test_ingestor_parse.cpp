@@ -1,7 +1,7 @@
 // test_ingestor_parse.cpp — testa parse_w_line e parse_p_line via ingestão
 // de GFAs mínimos com W-lines e P-lines.
 
-#include "ggql/ingest/gfa_ingestor.hpp"
+#include "ggql/ingest/ingestor.hpp"
 
 #include <cassert>
 #include <cstdlib>

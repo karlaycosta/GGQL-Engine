@@ -8,7 +8,7 @@
 //   └─
 //
 // Cada função representa UM EVENTO semântico (phase_start, step_ok, etc.).
-// No futuro, um callback FFI (ver include/ffi/ggql_ffi.h) poderá se plugar
+// No futuro, um callback FFI (ver include/ffi/ffi.h) poderá se plugar
 // aqui para espelhar os mesmos eventos para a GUI Flutter sem duplicar
 // pontos de chamada no resto da engine.
 //
@@ -100,7 +100,7 @@ void step_progress_finish() noexcept; // imprime \n no TTY (não emite evento)
 //
 // Cada função pública (phase, step_ok, step_info, etc.) dispara UM evento.
 // Serve para espelhar o que o terminal mostra em consumidores externos:
-// hoje o FFI (include/ffi/ggql_ffi.h); potencialmente tracing, logging, etc.
+// hoje o FFI (include/ffi/ffi.h); potencialmente tracing, logging, etc.
 //
 // O callback é chamado na thread que emitiu o evento — pode ser chamado
 // concorrentemente. O consumidor é responsável por serializar se precisar.

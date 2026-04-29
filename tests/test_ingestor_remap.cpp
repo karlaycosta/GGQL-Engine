@@ -1,7 +1,7 @@
 // test_ingestor_remap.cpp — testa build_remap_from_pairs via ingestão de GFAs
 // com topologia conhecida (componentes desconexos, grafo trivial, grafo linear).
 
-#include "ggql/ingest/gfa_ingestor.hpp"
+#include "ggql/ingest/ingestor.hpp"
 
 #include <cassert>
 #include <cstdlib>

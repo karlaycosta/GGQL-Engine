@@ -10,7 +10,7 @@
 //   - ggql_result_free
 //   - Erro de parse via ggql_engine_last_error
 
-#include "ffi/ggql_ffi.h"
+#include "ffi/ffi.h"
 
 #include <cassert>
 #include <cstdio>

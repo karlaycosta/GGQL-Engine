@@ -82,7 +82,7 @@ target_link_libraries(ggql_storage PUBLIC ggql_core sdsl gbwt libsais tbb gomp p
 
 # ── Camada 2 — ggql_ingest (parser GFA; depende de Storage) ──────────────────
 add_library(ggql_ingest STATIC
-    src/ingest/gfa_ingestor.cpp
+    src/ingest/ingestor.cpp
 )
 target_compile_options(ggql_ingest PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing

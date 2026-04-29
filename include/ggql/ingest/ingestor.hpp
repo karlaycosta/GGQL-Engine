@@ -1,6 +1,6 @@
 #pragma once
 
-// gfa_ingestor.hpp — GfaIngestorMmapParallel (vg-equivalent).
+// ingestor.hpp — GfaIngestorMmapParallel (vg-equivalent).
 //
 // Diferença em relação ao original:
 //   Após topology_->build(), remapeia os IDs MPHF para IDs sequenciais

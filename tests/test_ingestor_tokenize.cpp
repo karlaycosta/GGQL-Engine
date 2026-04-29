@@ -5,7 +5,7 @@
 // (acessados via GfaIngestorMmapParallel::process_data_parallel como static private,
 //  mas verificáveis indiretamente através do comportamento do ingestor em GFA mínimo).
 
-#include "ggql/ingest/gfa_ingestor.hpp"
+#include "ggql/ingest/ingestor.hpp"
 
 #include <cassert>
 #include <cstdlib>
