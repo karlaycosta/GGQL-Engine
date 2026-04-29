@@ -58,9 +58,8 @@ vg-master/
 *~
 .DS_Store
 
-# ─── Documentação — não versionada (exceto imagens) ─────────────────────────
-docs/*.md
-docs/.obsidian/
+# ─── Documentação — não versionada (toda a pasta) ────────────────────────────
+docs/
 
 # ─── Dados — scripts e análises locais ───────────────────────────────────────
 data/*.md

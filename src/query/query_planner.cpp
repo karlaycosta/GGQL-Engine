@@ -32,7 +32,8 @@ static constexpr size_t   kMaxTotalHitsCount = 1'000'000;
 namespace detail {
 
 static constexpr std::array<std::string_view, 3> kNodeColumns    = {"id", "in_degree", "out_degree"};
-static constexpr std::array<std::string_view, 3> kBubbleColumns  = {"source", "sink", "branch_count"};
+static constexpr std::array<std::string_view, 5> kBubbleColumns  = {
+    "source", "sink", "branch_count", "internal_node_count", "has_cycles"};
 static constexpr std::array<std::string_view, 5> kSegmentColumns = {"id", "name", "length",
                                                                      "read_count", "depth"};
 static constexpr std::array<std::string_view, 3> kEdgeColumns    = {"from_id", "to_id", "to_orient"};
@@ -523,8 +524,13 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_bubbles(const FindQue
         return std::unexpected{*err};
     }
     if (!topology_) { return std::unexpected{"FIND BUBBLE requer GfaCsrTopology"}; }
+    if (!topology_->has_snarls()) {
+        return std::unexpected{
+            "FIND BUBBLE: snarls.bin ausente — execute o ingest novamente para "
+            "habilitar a query (snarls são pré-computados)."};
+    }
 
-    const auto bubbles = topology_->find_bubbles();
+    const auto snarls = topology_->snarls();
     auto cols = detail::resolve_return_fields(q.return_fields, detail::kBubbleColumns);
     const size_t ncols = cols.size();
 
@@ -535,18 +541,22 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_bubbles(const FindQue
 
     QueryResult result;
     result.columns = cols;
-    result.flat.reserve(std::min(bubbles.size(), size_t{take_n}) * ncols);
+    result.flat.reserve(std::min(snarls.size(), size_t{take_n}) * ncols);
 
-    for (const auto& b : bubbles) {
-        const int64_t src = static_cast<int64_t>(b.source);
-        const int64_t snk = static_cast<int64_t>(b.sink);
-        const int64_t bc  = static_cast<int64_t>(b.branches.size());
+    for (const auto& s : snarls) {
+        const int64_t src = static_cast<int64_t>(s.source);
+        const int64_t snk = static_cast<int64_t>(s.sink);
+        const int64_t bc  = static_cast<int64_t>(s.branch_count);
+        const int64_t inc = static_cast<int64_t>(s.internal_node_count);
+        const int64_t hc  = static_cast<int64_t>(s.has_cycles);
 
         if (q.where) {
             RowFields row;
-            row.insert("source",       src);
-            row.insert("sink",         snk);
-            row.insert("branch_count", bc);
+            row.insert("source",              src);
+            row.insert("sink",                snk);
+            row.insert("branch_count",        bc);
+            row.insert("internal_node_count", inc);
+            row.insert("has_cycles",          hc);
             if (!eval_where(*q.where, row)) { continue; }
         }
 
@@ -556,9 +566,11 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_bubbles(const FindQue
         if (pag_skipped < skip_n) { ++pag_skipped; continue; }
         if (result.row_count >= take_n) { continue; }
         for (const auto& col : cols) {
-            if (col == "source")           { result.flat.emplace_back(src); }
-            else if (col == "sink")         { result.flat.emplace_back(snk); }
-            else if (col == "branch_count") { result.flat.emplace_back(bc);  }
+            if (col == "source")                   { result.flat.emplace_back(src); }
+            else if (col == "sink")                 { result.flat.emplace_back(snk); }
+            else if (col == "branch_count")         { result.flat.emplace_back(bc);  }
+            else if (col == "internal_node_count")  { result.flat.emplace_back(inc); }
+            else if (col == "has_cycles")           { result.flat.emplace_back(hc);  }
         }
         ++result.row_count;
     }

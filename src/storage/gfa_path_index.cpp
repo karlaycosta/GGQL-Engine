@@ -585,6 +585,21 @@ void GfaCsrTopology::save(const std::string& dir) const {
         }
     }
 
+    // Salva snarls (FIND BUBBLE) — só grava se foi populado pelo ingestor
+    if (!snarls_.empty()) {
+        std::ofstream out(dir + "/snarls.bin", std::ios::binary);
+        if (!out) {
+            throw std::runtime_error("[topology::save] Falha ao abrir snarls.bin");
+        }
+        const uint64_t n = static_cast<uint64_t>(snarls_.size());
+        out.write(reinterpret_cast<const char*>(&n), sizeof(n));
+        out.write(reinterpret_cast<const char*>(snarls_.data()),
+                  static_cast<std::streamsize>(n * sizeof(SnarlRecord)));
+        if (!out) {
+            throw std::runtime_error("[topology::save] Erro de I/O ao escrever snarls.bin");
+        }
+    }
+
     cli::ok("índice salvo", dir);
 }
 
@@ -745,6 +760,23 @@ void GfaCsrTopology::load(const std::string& dir) {
                 if (!in) {
                     path_node_counts_.clear();
                     path_bp_lengths_.clear();
+                }
+            }
+        }
+    }
+
+    // Carrega snarls (FIND BUBBLE) — opcional; ausência sinaliza re-ingest necessário.
+    {
+        std::ifstream in(dir + "/snarls.bin", std::ios::binary);
+        if (in) {
+            uint64_t n = 0;
+            in.read(reinterpret_cast<char*>(&n), sizeof(n));
+            if (in && n < (1ULL << 32)) {
+                snarls_.resize(static_cast<size_t>(n));
+                in.read(reinterpret_cast<char*>(snarls_.data()),
+                        static_cast<std::streamsize>(n * sizeof(SnarlRecord)));
+                if (!in) {
+                    snarls_.clear();
                 }
             }
         }

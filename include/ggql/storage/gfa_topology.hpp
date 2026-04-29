@@ -414,6 +414,18 @@ class GfaCsrTopology {
         return path_id < path_bp_lengths_.size() ? path_bp_lengths_[path_id] : 0;
     }
 
+    // ── Snarls (FIND BUBBLE) — persistido em snarls.bin ───────────────────────
+    //
+    // Computado uma única vez durante o ingest via find_snarls_streaming().
+    // Carregado em load() com fallback gracioso (vazio se snarls.bin ausente).
+    bool has_snarls() const noexcept { return !snarls_.empty(); }
+
+    std::span<const SnarlRecord> snarls() const noexcept {
+        return std::span<const SnarlRecord>(snarls_.data(), snarls_.size());
+    }
+
+    void set_snarls(std::vector<SnarlRecord> s) noexcept { snarls_ = std::move(s); }
+
   private:
     // ── Threshold de paralelismo ─────────────────────────────────────────────
     // Abaixo deste valor o overhead do fork/join OpenMP (~0.5 ms) supera o
@@ -444,6 +456,9 @@ class GfaCsrTopology {
     // Cache de estatísticas de path (persistido em path_stats.bin)
     std::vector<uint32_t> path_node_counts_;
     std::vector<int64_t>  path_bp_lengths_;
+
+    // Snarls (persistido em snarls.bin) — vazio se nunca computado.
+    std::vector<SnarlRecord> snarls_;
 
     // ── Helpers privados (implementados no .cpp) ─────────────────────────────
 

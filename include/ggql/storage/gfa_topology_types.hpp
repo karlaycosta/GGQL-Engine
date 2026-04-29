@@ -58,6 +58,22 @@ struct Bubble {
     std::vector<uint64_t> branches; // nós intermediários em qualquer ramo
 };
 
+// ── SnarlRecord: registro compacto de snarl persistido em snarls.bin ───────
+//
+// Layout fixo para serialização direta — exatamente 24 bytes, alinhamento 8.
+// branch_count em uint8_t (cap em 32 ramos por source — limite do bitmask
+// na BFS; sources com mais ramos são raros em pangenoma).
+struct SnarlRecord {
+    uint64_t source;              // 8 — ID do nó de entrada
+    uint64_t sink;                // 8 — ID do nó de saída
+    uint32_t internal_node_count; // 4 — soma de comp_size das intermediárias
+    uint8_t  branch_count;        // 1 — out-degree de source no cactus
+    uint8_t  has_cycles;          // 1 — 1 se alguma intermediária tem >1 nó
+    uint8_t  _pad[2];             // 2 — explícito (alinhamento)
+};
+static_assert(sizeof(SnarlRecord) == 24, "SnarlRecord deve ter 24 bytes para layout em disco");
+static_assert(alignof(SnarlRecord) == 8, "SnarlRecord deve ter alignment 8");
+
 // ── PathRecord: entrada para build_path_index (camada gBWT) ────────────────
 //
 // nodes[i] = (node_id << 1) | orient_bit  — mesmo encoding de E_fwd_.

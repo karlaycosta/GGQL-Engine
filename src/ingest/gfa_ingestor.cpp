@@ -6,6 +6,7 @@
 
 #include "ggql/ingest/gfa_ingestor.hpp"
 
+#include "ggql/storage/gfa_cactus_finder.hpp"
 #include "ggql/storage/gfa_fm_index.hpp"
 #include "ggql/utils.hpp"
 
@@ -1415,6 +1416,32 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
     stats.elapsed_total_s = sec(clock::now() - t_start).count();
 
     if (!skip_pass1) {
+        // Snarls (FIND BUBBLE): pré-computa antes de salvar a topologia.
+        // Roda após GBWT/FM-Index para que estruturas pesadas do 3-ECC já tenham
+        // espaço; ainda assim, find_snarls_streaming aloca ~5 GB no HPRC (24 B
+        // por nó em TsinNode + UF + cactus). Single-thread por enquanto.
+        if (res_.topology) {
+            try {
+                auto t_snarls0 = clock::now();
+                std::vector<SnarlRecord> snarls;
+                snarls.reserve(1024);
+                find_snarls_streaming(*res_.topology,
+                                      [&](const SnarlRecord& r) { snarls.push_back(r); });
+                const auto count = snarls.size();
+                res_.topology->set_snarls(std::move(snarls));
+                if (verbose) {
+                    cli::step_info(
+                        "Snarls (FIND BUBBLE)",
+                        fmt::format("{} snarls em {}",
+                                    cli::format_count(count),
+                                    ggql::format_seconds(sec(clock::now() - t_snarls0).count())));
+                }
+            } catch (const std::exception& e) {
+                fmt::print(stderr,
+                           "  [snarls] AVISO: falha ao computar snarls — FIND BUBBLE indisponível: {}\n",
+                           e.what());
+            }
+        }
         try {
             if (res_.topology) {
                 res_.topology->save(cache_dir);
