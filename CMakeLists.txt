@@ -70,10 +70,10 @@ target_link_libraries(ggql_core PUBLIC fmt::fmt)
 
 # ── Camada 1 — ggql_storage (CSR + FM-Index + gBWT) ──────────────────────────
 add_library(ggql_storage STATIC
-    src/storage/gfa_csr_builder.cpp
-    src/storage/gfa_graph_algorithms.cpp
-    src/storage/gfa_path_index.cpp
-    src/storage/gfa_fm_index.cpp
+    src/storage/csr_builder.cpp
+    src/storage/graph_algorithms.cpp
+    src/storage/path_index.cpp
+    src/storage/fm_index.cpp
 )
 target_compile_options(ggql_storage PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
@@ -126,7 +126,7 @@ target_link_libraries(bench_gbwt PRIVATE ggql_ingest)
 # ── ggql_ffi (Dart/Flutter Integration) ──────────────────
 # Biblioteca compartilhada (.so/.dll/.dylib) para uso via Dart FFI.
 # Encapsula instâncias C++ com extern "C" e ponteiros opacos.
-add_library(ggql_ffi SHARED src/ffi/ggql_ffi.cpp)
+add_library(ggql_ffi SHARED src/ffi/ffi.cpp)
 target_compile_options(ggql_ffi PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fPIC
 )

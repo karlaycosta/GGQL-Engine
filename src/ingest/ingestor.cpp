@@ -6,8 +6,8 @@
 
 #include "ggql/ingest/ingestor.hpp"
 
-#include "ggql/storage/gfa_cactus_finder.hpp"
-#include "ggql/storage/gfa_fm_index.hpp"
+#include "ggql/storage/cactus_finder.hpp"
+#include "ggql/storage/fm_index.hpp"
 #include "ggql/utils.hpp"
 
 #include <fstream>

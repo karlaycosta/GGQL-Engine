@@ -1,10 +1,10 @@
-// gfa_fm_index.cpp — Implementação de GfaSequenceIndex.
+// fm_index.cpp — Implementação de GfaSequenceIndex.
 //
 // Inclui headers pesados (libsais64, omp, chrono, fstream, fmt) que antes
-// estavam em gfa_fm_index.hpp, forçando recompilação em cada TU que incluía
+// estavam em fm_index.hpp, forçando recompilação em cada TU que incluía
 // o índice. Agora compilado uma única vez em ggql_topology_vg.
 
-#include "ggql/storage/gfa_fm_index.hpp"
+#include "ggql/storage/fm_index.hpp"
 
 #include "ggql/cli/console.hpp"
 #include "ggql/cli/progress_tracker.hpp"

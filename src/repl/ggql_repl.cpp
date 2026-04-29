@@ -24,7 +24,7 @@
 #include <fmt/color.h>
 #include <fmt/core.h>
 #include <ggql/ingest/ingestor.hpp>
-#include <ggql/query/ggql_grammar.hpp>
+#include <ggql/query/grammar.hpp>
 #include <ggql/query/query_planner.hpp>
 #include <ggql/utils.hpp>
 #include <iostream>

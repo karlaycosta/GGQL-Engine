@@ -1,7 +1,7 @@
 // test_storage_fm_index.cpp — Testes unitários de GfaSequenceIndex (FM-Index).
 // Verifica: build, is_loaded, search_kmer (encontrado/não encontrado), save/load.
 
-#include "ggql/storage/gfa_fm_index.hpp"
+#include "ggql/storage/fm_index.hpp"
 
 #include <algorithm>
 #include <cassert>

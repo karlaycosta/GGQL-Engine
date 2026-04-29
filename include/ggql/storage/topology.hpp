@@ -1,6 +1,6 @@
 #pragma once
 
-// gfa_topology.hpp — Declaração de GfaCsrTopology.
+// topology.hpp — Declaração de GfaCsrTopology.
 //
 // Variante vg-equivalent: adiciona remap_node_ids() e make_component_remap()
 // para converter os IDs MPHF aleatórios em IDs sequenciais contíguos por
@@ -50,7 +50,7 @@
 //   • find_tips e find_repeats (inline por performance — hot paths medidos)
 
 #include "ggql/ingest/gbwt_group.hpp"
-#include "ggql/storage/gfa_topology_types.hpp"
+#include "ggql/storage/topology_types.hpp"
 
 #include <atomic>
 #include <cassert>
@@ -76,7 +76,7 @@
 #include <gbwt/utils.h>
 
 // ── Garante C++23 em tempo de compilação ────────────────────────────────────
-static_assert(__cplusplus >= 202302L, "gfa_topology.hpp requer C++23 — compile com -std=c++23.");
+static_assert(__cplusplus >= 202302L, "topology.hpp requer C++23 — compile com -std=c++23.");
 
 namespace ggql {
 

@@ -25,9 +25,9 @@
 
 // #include "ggql/cli/console.hpp"
 #include "ggql/cli/progress_tracker.hpp"
-#include "ggql/ingest/gfa_metadata_store.hpp"
+#include "ggql/ingest/metadata_store.hpp"
 #include "ggql/ingest/gbwt_group.hpp"
-#include "ggql/storage/gfa_topology.hpp"
+#include "ggql/storage/topology.hpp"
 
 // #include <algorithm>
 #include <array>

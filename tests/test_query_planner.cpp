@@ -2,9 +2,9 @@
 // Verifica: FIND TIP, FIND REPEAT, filtros WHERE, projeção RETURN, erros.
 
 #include "ggql/query/query_planner.hpp"
-#include "ggql/query/ggql_ast.hpp"
-#include "ggql/storage/gfa_topology.hpp"
-#include "ggql/storage/gfa_topology_types.hpp"
+#include "ggql/query/ast.hpp"
+#include "ggql/storage/topology.hpp"
+#include "ggql/storage/topology_types.hpp"
 
 #include <algorithm>
 #include <cassert>

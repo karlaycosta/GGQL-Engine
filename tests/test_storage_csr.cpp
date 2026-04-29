@@ -1,8 +1,8 @@
 // test_storage_csr.cpp — Testes unitários de GfaCsrTopology.
 // Verifica: build, graus, vizinhos, decode, find_tips, find_repeats.
 
-#include "ggql/storage/gfa_topology.hpp"
-#include "ggql/storage/gfa_topology_types.hpp"
+#include "ggql/storage/topology.hpp"
+#include "ggql/storage/topology_types.hpp"
 
 #include <algorithm>
 #include <cassert>

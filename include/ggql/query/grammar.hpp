@@ -1,6 +1,6 @@
 #pragma once
 
-// ggql_grammar.hpp — Gramática PEGTL para GGQL + ações + API pública
+// grammar.hpp — Gramática PEGTL para GGQL + ações + API pública
 //
 // Sintaxe suportada:
 //   FIND   <entity> [WHERE <cond> [AND|OR <cond> ...]] [RETURN <field>, ...]
@@ -20,7 +20,7 @@
 #include <expected>
 #include <string>
 
-#include "ggql_ast.hpp"
+#include "ast.hpp"
 
 namespace ggql::grammar {
 

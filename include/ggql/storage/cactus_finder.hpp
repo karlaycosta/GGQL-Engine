@@ -1,6 +1,6 @@
 #pragma once
 
-// gfa_cactus_finder.hpp — Detecção de snarls via 3-ECC + grafo Cactus + BFS.
+// cactus_finder.hpp — Detecção de snarls via 3-ECC + grafo Cactus + BFS.
 //
 // API (callback-based, sem acumulação em RAM):
 //   void find_snarls_streaming(
@@ -24,13 +24,13 @@
 //   * Branch mask em uint32_t → suporta até 32 ramos por source (cap; raro >32).
 //
 // Restrições:
-//   - NÃO modifica gfa_topology.hpp.
+//   - NÃO modifica topology.hpp.
 //   - Header-only, dependências: STL + ggql/detail/{tsin_3ecc,union_find}.
 
 #include "ggql/storage/detail/tsin_3ecc.hpp"
 #include "ggql/storage/detail/union_find.hpp"
-#include "ggql/storage/gfa_topology.hpp"
-#include "ggql/storage/gfa_topology_types.hpp"
+#include "ggql/storage/topology.hpp"
+#include "ggql/storage/topology_types.hpp"
 
 #include <algorithm>
 #include <bit>

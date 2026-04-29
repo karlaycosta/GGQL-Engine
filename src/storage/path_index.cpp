@@ -1,7 +1,7 @@
-// gfa_path_index.cpp — Construção paralela gBWT e persistência (save/load) de GfaCsrTopology.
+// path_index.cpp — Construção paralela gBWT e persistência (save/load) de GfaCsrTopology.
 //
 
-#include "ggql/storage/gfa_topology.hpp"
+#include "ggql/storage/topology.hpp"
 
 #include "ggql/cli/console.hpp"
 #include "ggql/cli/progress_tracker.hpp"
@@ -115,7 +115,7 @@ static size_t available_ram_kb() {
 
 } // namespace
 
-// gfa_path_index.cpp — Construção paralela gBWT e persistência (save/load).
+// path_index.cpp — Construção paralela gBWT e persistência (save/load).
 // ════════════════════════════════════════════════════════════════════════════
 // build_path_index_parallel
 // ════════════════════════════════════════════════════════════════════════════

@@ -18,7 +18,7 @@
 //   fm_index.bin   : N (BWT) + N/8 (bitmap) + S×8 (vals) + (N/64)×128 (Occ)
 //   Busca locate   : O(r) com bitmap O(1) e get_occ O(1) via popcount
 //
-// Implementação: src/storage/gfa_fm_index.cpp
+// Implementação: src/storage/fm_index.cpp
 // (inclui os headers pesados — libsais64, omp, chrono, fstream, fmt)
 
 #include <array>

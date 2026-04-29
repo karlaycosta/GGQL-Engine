@@ -1,7 +1,7 @@
-// gfa_csr_builder.cpp — Construção CSR, Elias-Fano e offsets cache de GfaCsrTopology.
+// csr_builder.cpp — Construção CSR, Elias-Fano e offsets cache de GfaCsrTopology.
 //
 
-#include "ggql/storage/gfa_topology.hpp"
+#include "ggql/storage/topology.hpp"
 
 #include "ggql/cli/console.hpp"
 #include "ggql/cli/progress_tracker.hpp"
@@ -115,7 +115,7 @@ static size_t available_ram_kb() {
 
 } // namespace
 
-// gfa_csr_builder.cpp — Construção CSR, Elias-Fano e offsets cache.
+// csr_builder.cpp — Construção CSR, Elias-Fano e offsets cache.
 // ════════════════════════════════════════════════════════════════════════════
 // Destrutor — definido aqui onde gbwt::GBWT é tipo completo.
 // unique_ptr<gbwt::GBWT> requer destrutor completo no ponto de instanciação.

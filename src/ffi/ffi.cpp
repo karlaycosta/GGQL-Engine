@@ -1,10 +1,10 @@
 #include "ffi/ffi.h"
 #include "ggql/cli/console.hpp"
 #include "ggql/ingest/ingestor.hpp"
-#include "ggql/ingest/gfa_metadata_store.hpp"
-#include "ggql/query/ggql_grammar.hpp"
+#include "ggql/ingest/metadata_store.hpp"
+#include "ggql/query/grammar.hpp"
 #include "ggql/query/query_planner.hpp"
-#include "ggql/storage/gfa_fm_index.hpp"
+#include "ggql/storage/fm_index.hpp"
 
 #include <cstring>
 #include <memory>

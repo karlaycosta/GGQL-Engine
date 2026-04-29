@@ -1,6 +1,6 @@
 #pragma once
 
-// gfa_topology_types.hpp — tipos POD compartilhados entre as camadas
+// topology_types.hpp — tipos POD compartilhados entre as camadas
 // de topologia GFA (CSR+EF e gBWT).
 //
 // DEPENDÊNCIAS INTENCIONALMENTE MÍNIMAS: apenas <cstdint>, <string>, <vector>.

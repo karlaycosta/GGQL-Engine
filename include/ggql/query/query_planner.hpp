@@ -25,10 +25,10 @@
 #include <unordered_set>
 #include <vector>
 
-#include <ggql/ingest/gfa_metadata_store.hpp>
-#include <ggql/storage/gfa_fm_index.hpp>
-#include <ggql/storage/gfa_topology.hpp>
-#include "ggql_ast.hpp"
+#include <ggql/ingest/metadata_store.hpp>
+#include <ggql/storage/fm_index.hpp>
+#include <ggql/storage/topology.hpp>
+#include "ast.hpp"
 
 namespace ggql {
 

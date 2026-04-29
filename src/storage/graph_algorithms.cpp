@@ -1,7 +1,7 @@
-// gfa_graph_algorithms.cpp — Algoritmos de grafo: superbubbles, remap de IDs, componentes.
+// graph_algorithms.cpp — Algoritmos de grafo: superbubbles, remap de IDs, componentes.
 //
 
-#include "ggql/storage/gfa_topology.hpp"
+#include "ggql/storage/topology.hpp"
 
 #include "ggql/cli/console.hpp"
 #include "ggql/cli/progress_tracker.hpp"
@@ -115,7 +115,7 @@ static size_t available_ram_kb() {
 
 } // namespace
 
-// gfa_graph_algorithms.cpp — Algoritmos de grafo: bubbles, remap, componentes, particionamento.
+// graph_algorithms.cpp — Algoritmos de grafo: bubbles, remap, componentes, particionamento.
 std::vector<Bubble> GfaCsrTopology::find_bubbles(int /*max_depth*/, size_t /*max_nodes_per_branch*/,
                                                  int num_threads) const {
     if (num_nodes_ == 0) {
