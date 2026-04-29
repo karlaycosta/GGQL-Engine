@@ -50,3 +50,20 @@ target_compile_options(test_query_planner PRIVATE
 )
 target_link_libraries(test_query_planner PRIVATE ggql_query)
 add_test(NAME test_query_planner COMMAND test_query_planner)
+
+# ── Testes de integração FFI de query (dependem de ggql_ffi) ─────────────────
+add_executable(test_ffi_query test_ffi_query.cpp)
+target_compile_options(test_ffi_query PRIVATE
+    -std=c++23 -march=native
+    $<$<CONFIG:Debug>:-O0 -g>
+    $<$<NOT:$<CONFIG:Debug>>:-O2>
+)
+target_link_libraries(test_ffi_query PRIVATE ggql_ffi)
+add_test(
+    NAME test_ffi_query
+    COMMAND test_ffi_query
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(test_ffi_query PROPERTIES
+    ENVIRONMENT "GGQL_TEST_IDX=${CMAKE_SOURCE_DIR}/data/chm13_subset_sm.gfa.idx"
+)

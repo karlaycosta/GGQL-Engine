@@ -87,9 +87,9 @@ bool QueryPlanner::eval_condition(const ConditionExpr& cond, const RowFields& ro
             using T = std::decay_t<decltype(c)>;
 
             if constexpr (std::is_same_v<T, CompareCondition>) {
-                auto it = row.find(c.field);
-                if (it == row.end()) { return false; } // campo ausente → predicado não aplicável
-                return compare_values(it->second, c.op, c.value);
+                const Value* v = row.find(c.field);
+                if (!v) { return false; }
+                return compare_values(*v, c.op, c.value);
 
             } else if constexpr (std::is_same_v<T, CrossesCondition>) {
                 // TODO Phase 2: integrar PathIndex
@@ -97,10 +97,10 @@ bool QueryPlanner::eval_condition(const ConditionExpr& cond, const RowFields& ro
 
             } else {
                 // ContainsKmerCondition
-                auto it_id = row.find("id");
-                if (it_id == row.end()) { return false; }
+                const Value* id_val = row.find("id");
+                if (!id_val) { return false; }
                 const uint64_t current_id =
-                    static_cast<uint64_t>(std::get<int64_t>(it_id->second));
+                    static_cast<uint64_t>(std::get<int64_t>(*id_val));
 
                 // Caminho rápido: cache pré-computado O(1)
                 if (cache) {
@@ -131,13 +131,14 @@ bool QueryPlanner::eval_where(const WhereClause& wc, const RowFields& row,
 
     bool result = eval_condition(wc.conditions[0], row, cache);
 
-    // Avaliação esquerda-para-direita (sem precedência de operadores)
+    // Avaliação esquerda-para-direita com short-circuit por operador.
     for (size_t i = 0; i < wc.connectors.size(); ++i) {
-        const bool rhs = eval_condition(wc.conditions[i + 1], row, cache);
         if (wc.connectors[i] == LogicalOp::AND) {
-            result &= rhs;
+            if (!result) { break; }               // false AND anything = false
+            result = eval_condition(wc.conditions[i + 1], row, cache);
         } else {
-            result |= rhs;
+            if (result)  { break; }               // true OR anything = true
+            result = eval_condition(wc.conditions[i + 1], row, cache);
         }
     }
     return result;

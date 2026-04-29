@@ -6,16 +6,31 @@
 //   - internal_id é o valor EXATO retornado por mphf_->lookup(), garantindo
 //     o mapeamento 1:1 entre RAM (MPHF/SDSL) e Metadados em O(1).
 //   - Sem o custo e lentidão de uma engine de B-Tree (SQLite).
+//
+// Índices secundários persistidos (gerados em flush_segments(), salvos em save()):
+//   - length_index.bin: dois arrays uint32_t sorted por length. O(log N) para WHERE length OP X.
+//   - depth_index.bin:  dois arrays (float + uint32_t) sorted por depth. O(log N) para WHERE depth OP X.
+//                       Ausente quando nenhum nó tem dp:f: (ex.: CHM13). Caches antigos: fallback.
+//
+// Índice invertido name→id (lazy, não persistido):
+//   - unordered_map<string_view, uint32_t> construído na primeira chamada a lookup_name().
+//   - Nunca gravado em disco: string_views apontam para name_chars_ em RAM.
+//   - Custo adiado: 0 ms no load(); ~2 ms (SM) ou ~42 ms (10W) na primeira query WHERE name=.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <mutex>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace ggql {
@@ -94,6 +109,103 @@ class GfaMetadataStore {
         }
         name_offsets_[num_nodes_] = current_name_offset;
         seq_offsets_[num_nodes_] = current_seq_offset;
+
+        build_length_index();
+        build_depth_index();
+    }
+
+    // ── Índice secundário de comprimento ─────────────────────────────────────
+
+    // Constrói dois arrays paralelos ordenados por length.
+    // Chamado automaticamente por flush_segments(); pode ser chamado
+    // manualmente após load() se length_index.bin não existir no cache.
+    void build_length_index() {
+        const size_t n = num_nodes_;
+        length_sorted_ids_.resize(n);
+        std::iota(length_sorted_ids_.begin(), length_sorted_ids_.end(), 0u);
+        std::sort(length_sorted_ids_.begin(), length_sorted_ids_.end(),
+                  [this](uint32_t a, uint32_t b) noexcept {
+                      return lengths_[a] < lengths_[b];
+                  });
+        length_sorted_vals_.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            length_sorted_vals_[i] = lengths_[length_sorted_ids_[i]];
+        }
+    }
+
+    [[nodiscard]] bool has_length_index() const noexcept {
+        return !length_sorted_ids_.empty();
+    }
+
+    // Retorna span de IDs cujo length está em [lo, hi] (ambos inclusive).
+    // IDs retornados estão em ordem crescente de comprimento.
+    // Requer has_length_index() == true.
+    [[nodiscard]] std::span<const uint32_t>
+    ids_in_length_range(uint32_t lo, uint32_t hi) const noexcept {
+        const auto beg = std::lower_bound(length_sorted_vals_.begin(),
+                                          length_sorted_vals_.end(), lo);
+        const auto end = std::upper_bound(beg, length_sorted_vals_.end(), hi);
+        const size_t off = static_cast<size_t>(beg - length_sorted_vals_.begin());
+        const size_t cnt = static_cast<size_t>(end - beg);
+        return std::span<const uint32_t>(length_sorted_ids_.data() + off, cnt);
+    }
+
+    // ── Índice secundário de depth ────────────────────────────────────────────
+
+    // Constrói dois arrays paralelos ordenados por depth.
+    // Exclui nós sem depth (depth < 0) — NULL não satisfaz nenhum predicado numérico.
+    void build_depth_index() {
+        depth_sorted_ids_.clear();
+        depth_sorted_ids_.reserve(num_nodes_);
+        for (size_t i = 0; i < num_nodes_; ++i) {
+            if (depths_[i] >= 0.f) { depth_sorted_ids_.push_back(static_cast<uint32_t>(i)); }
+        }
+        std::sort(depth_sorted_ids_.begin(), depth_sorted_ids_.end(),
+                  [this](uint32_t a, uint32_t b) noexcept { return depths_[a] < depths_[b]; });
+        depth_sorted_vals_.resize(depth_sorted_ids_.size());
+        for (size_t i = 0; i < depth_sorted_ids_.size(); ++i) {
+            depth_sorted_vals_[i] = depths_[depth_sorted_ids_[i]];
+        }
+    }
+
+    // Retorna false quando nenhum nó possui depth (ex.: CHM13 sem dp:f:).
+    [[nodiscard]] bool has_depth_index() const noexcept {
+        return !depth_sorted_vals_.empty();
+    }
+
+    // Retorna span de IDs cujo depth está em [lo, hi] (ambos inclusive).
+    // Requer has_depth_index() == true.
+    [[nodiscard]] std::span<const uint32_t>
+    ids_in_depth_range(float lo, float hi) const noexcept {
+        const auto beg = std::lower_bound(depth_sorted_vals_.begin(),
+                                          depth_sorted_vals_.end(), lo);
+        const auto end = std::upper_bound(beg, depth_sorted_vals_.end(), hi);
+        const size_t off = static_cast<size_t>(beg - depth_sorted_vals_.begin());
+        const size_t cnt = static_cast<size_t>(end - beg);
+        return std::span<const uint32_t>(depth_sorted_ids_.data() + off, cnt);
+    }
+
+    // ── Índice invertido name → id (lazy) ────────────────────────────────────
+    //
+    // Construído na primeira chamada a lookup_name() via std::call_once.
+    // Custo: O(N) — ~2 ms (SM 131k) ou ~42 ms (10W 3,2M) na primeira query.
+    // Zero overhead no load() do cache.
+
+    [[nodiscard]] bool has_name_index() const noexcept { return num_nodes_ > 0; }
+
+    // Retorna o internal_id para o nome dado, ou nullopt se não encontrado.
+    // Constrói o índice na primeira chamada (thread-safe via call_once).
+    [[nodiscard]] std::optional<uint32_t>
+    lookup_name(std::string_view name) const noexcept {
+        std::call_once(name_index_once_, [this]() {
+            name_to_id_.reserve(num_nodes_);
+            for (size_t i = 0; i < num_nodes_; ++i) {
+                name_to_id_.emplace(original_id(i), static_cast<uint32_t>(i));
+            }
+        });
+        auto it = name_to_id_.find(name);
+        if (it == name_to_id_.end()) { return std::nullopt; }
+        return it->second;
     }
 
     void save(const std::string& dir) const {
@@ -133,6 +245,30 @@ class GfaMetadataStore {
                 out.write(seq_chars_.data(), static_cast<std::streamsize>(char_size));
             }
         }
+        // Índices secundários — ausentes em caches antigos; load() faz fallback gracioso
+        if (has_length_index()) {
+            std::ofstream out(dir + "/length_index.bin", std::ios::binary);
+            if (out) {
+                const uint64_t n = length_sorted_vals_.size();
+                out.write(reinterpret_cast<const char*>(&n), sizeof(n));
+                out.write(reinterpret_cast<const char*>(length_sorted_vals_.data()),
+                          static_cast<std::streamsize>(n * sizeof(uint32_t)));
+                out.write(reinterpret_cast<const char*>(length_sorted_ids_.data()),
+                          static_cast<std::streamsize>(n * sizeof(uint32_t)));
+            }
+        }
+        if (has_depth_index()) {
+            std::ofstream out(dir + "/depth_index.bin", std::ios::binary);
+            if (out) {
+                const uint64_t n = depth_sorted_vals_.size();
+                out.write(reinterpret_cast<const char*>(&n), sizeof(n));
+                out.write(reinterpret_cast<const char*>(depth_sorted_vals_.data()),
+                          static_cast<std::streamsize>(n * sizeof(float)));
+                out.write(reinterpret_cast<const char*>(depth_sorted_ids_.data()),
+                          static_cast<std::streamsize>(n * sizeof(uint32_t)));
+            }
+        }
+        // name_to_id_ não é persistido — string_views apontam para name_chars_ em RAM.
     }
 
     void load(const std::string& dir) {
@@ -183,8 +319,37 @@ class GfaMetadataStore {
                 in.read(reinterpret_cast<char*>(&char_size), sizeof(char_size));
                 seq_chars_.resize(char_size);
                 in.read(seq_chars_.data(), static_cast<std::streamsize>(char_size));
+            }
+            // Ignore missing seqs — compatible with older cache versions
+        }
+        {
+            std::ifstream in(dir + "/length_index.bin", std::ios::binary);
+            if (in) {
+                uint64_t n = 0;
+                in.read(reinterpret_cast<char*>(&n), sizeof(n));
+                length_sorted_vals_.resize(n);
+                length_sorted_ids_.resize(n);
+                in.read(reinterpret_cast<char*>(length_sorted_vals_.data()),
+                        static_cast<std::streamsize>(n * sizeof(uint32_t)));
+                in.read(reinterpret_cast<char*>(length_sorted_ids_.data()),
+                        static_cast<std::streamsize>(n * sizeof(uint32_t)));
             } else {
-                // Ignore missing seqs to stay compatible with previous cache versions
+                build_length_index();
+            }
+        }
+        {
+            std::ifstream in(dir + "/depth_index.bin", std::ios::binary);
+            if (in) {
+                uint64_t n = 0;
+                in.read(reinterpret_cast<char*>(&n), sizeof(n));
+                depth_sorted_vals_.resize(n);
+                depth_sorted_ids_.resize(n);
+                in.read(reinterpret_cast<char*>(depth_sorted_vals_.data()),
+                        static_cast<std::streamsize>(n * sizeof(float)));
+                in.read(reinterpret_cast<char*>(depth_sorted_ids_.data()),
+                        static_cast<std::streamsize>(n * sizeof(uint32_t)));
+            } else {
+                build_depth_index();
             }
         }
     }
@@ -192,6 +357,7 @@ class GfaMetadataStore {
     // ── Accessors O(1) ────────────────────────────────────────────────────────
     size_t size() const noexcept { return num_nodes_; }
     uint32_t length(uint64_t id) const { return lengths_[id]; }
+    std::span<const uint32_t> lengths_span() const noexcept { return lengths_; }
     int32_t read_count(uint64_t id) const { return read_counts_[id]; }
     float depth(uint64_t id) const { return depths_[id]; }
 
@@ -235,12 +401,24 @@ class GfaMetadataStore {
   private:
     size_t num_nodes_ = 0;
     std::vector<uint32_t> lengths_;
-    std::vector<int32_t> read_counts_;
-    std::vector<float> depths_;
+    std::vector<int32_t>  read_counts_;
+    std::vector<float>    depths_;
     std::vector<uint64_t> name_offsets_; // tamanho: num_nodes_ + 1
-    std::vector<char> name_chars_;
-    std::vector<uint64_t> seq_offsets_; // tamanho: num_nodes_ + 1
-    std::vector<char> seq_chars_;
+    std::vector<char>     name_chars_;
+    std::vector<uint64_t> seq_offsets_;  // tamanho: num_nodes_ + 1
+    std::vector<char>     seq_chars_;
+
+    // Índice secundário de comprimento — arrays paralelos ordenados por length
+    std::vector<uint32_t> length_sorted_vals_;
+    std::vector<uint32_t> length_sorted_ids_;
+
+    // Índice secundário de depth — apenas nós com depth >= 0
+    std::vector<float>    depth_sorted_vals_;
+    std::vector<uint32_t> depth_sorted_ids_;
+
+    // Índice invertido name → id (lazy, não persistido; string_views apontam para name_chars_)
+    mutable std::once_flag name_index_once_;
+    mutable std::unordered_map<std::string_view, uint32_t> name_to_id_;
 };
 
 } // namespace ggql

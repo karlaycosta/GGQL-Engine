@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(ggql_engine LANGUAGES CXX)
 
+set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+
 # Requer GCC 14+ para suporte completo a C++23.
 # Passe o compilador na linha de comando se necessário:
 #   cmake -B build -DCMAKE_CXX_COMPILER=g++-14
@@ -61,9 +64,7 @@ add_library(ggql_core STATIC
     src/cli/console.cpp
 )
 target_compile_options(ggql_core PRIVATE
-    $<$<CONFIG:Debug>:-O0 -g>
-    $<$<NOT:$<CONFIG:Debug>>:-O3 -flto=auto>
-    -march=native
+    -O3 -flto=auto -march=native
 )
 target_link_libraries(ggql_core PUBLIC fmt::fmt)
 
@@ -75,9 +76,7 @@ add_library(ggql_storage STATIC
     src/storage/gfa_fm_index.cpp
 )
 target_compile_options(ggql_storage PRIVATE
-    $<$<CONFIG:Debug>:-O0 -g>
-    $<$<NOT:$<CONFIG:Debug>>:-O3 -flto=auto>
-    -march=native -fopenmp -fno-strict-aliasing
+    -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
 )
 target_link_libraries(ggql_storage PUBLIC ggql_core sdsl gbwt libsais tbb gomp pthread)
 
@@ -86,9 +85,7 @@ add_library(ggql_ingest STATIC
     src/ingest/gfa_ingestor.cpp
 )
 target_compile_options(ggql_ingest PRIVATE
-    $<$<CONFIG:Debug>:-O0 -g>
-    $<$<NOT:$<CONFIG:Debug>>:-O3 -flto=auto>
-    -march=native -fopenmp -fno-strict-aliasing
+    -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
 )
 target_link_libraries(ggql_ingest PUBLIC ggql_storage)
 
@@ -98,77 +95,42 @@ add_library(ggql_query STATIC
     src/query/query_evaluator.cpp
 )
 target_compile_options(ggql_query PRIVATE
-    $<$<CONFIG:Debug>:-O0 -g>
-    $<$<NOT:$<CONFIG:Debug>>:-O3 -flto=auto>
-    -march=native
+    -O3 -flto=auto -march=native
 )
 target_link_libraries(ggql_query PUBLIC ggql_ingest pegtl)
 
-# ── ggql_engine_dev ──────────────────────────────────────
-# Driver de integração: parser + QueryPlanner + topologia CSR + Metadados binário.
-# Executar: ./build/ggql_engine_dev
-add_executable(ggql_engine_dev src/ggql_engine_dev.cpp)
-target_compile_options(ggql_engine_dev PRIVATE
-    $<$<CONFIG:Debug>:-O0 -g>
-    $<$<NOT:$<CONFIG:Debug>>:-O2>
-    -march=native -fopenmp
-)
-target_link_libraries(ggql_engine_dev PRIVATE ggql_query)
 
 # ── ggql_repl ────────────────────────────────────────────
 # REPL interativo: parse GGQL + QueryPlanner + ingest GFA.
 # Uso: ./build/ggql_repl [--gfa <arquivo.gfa>] [--idx <dir>] [--threads N]
 add_executable(ggql_repl src/repl/ggql_repl.cpp)
 target_compile_options(ggql_repl PRIVATE
-    $<$<CONFIG:Debug>:-O0 -g>
-    $<$<NOT:$<CONFIG:Debug>>:-O2>
-    -march=native -fopenmp
+    -O3 -flto=auto -march=native -fopenmp
 )
+target_link_options(ggql_repl PRIVATE -flto=auto)
 target_link_libraries(ggql_repl PRIVATE ggql_query)
 
 # ── bench_gbwt ─────────────────────────────────────────
 # Benchmark vg-equivalent: remapeia IDs MPHF → sequenciais por componente,
 # reduz sigma do DynamicGBWT de ~85M para ~M_i, habilita paralelismo efetivo.
 # Uso: ./build/bench_gbwt <arquivo.gfa> [threads] [max_paths]
-add_executable(bench_gbwt src/storage/bench_gbwt.cpp)
+add_executable(bench_gbwt src/bench_gbwt.cpp)
 target_compile_options(bench_gbwt PRIVATE
-    $<$<CONFIG:Debug>:-O0 -g>
-    $<$<NOT:$<CONFIG:Debug>>:-O3 -flto=auto>
-    -march=native -fopenmp -fno-strict-aliasing
+    -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
 )
-target_link_options(bench_gbwt PRIVATE $<$<NOT:$<CONFIG:Debug>>:-flto=auto>)
+target_link_options(bench_gbwt PRIVATE -flto=auto)
 target_link_libraries(bench_gbwt PRIVATE ggql_ingest)
 
-# ── bench_fm_index ───────────────────────────────────────
-# Benchmark de performance do FM-Index: construção e busca exata.
-# Uso: ./build/bench_fm_index <arquivo.gfa> [threads] [kmer_size] [num_searches]
-add_executable(bench_fm_index src/storage/bench_fm_index.cpp)
-target_compile_options(bench_fm_index PRIVATE
-    $<$<CONFIG:Debug>:-O0 -g>
-    $<$<NOT:$<CONFIG:Debug>>:-O3 -flto=auto>
-    -march=native -fopenmp
-)
-target_link_libraries(bench_fm_index PRIVATE ggql_ingest)
 
-# ── test_fm_index_minimal ────────────────────────────────
-# Reproducer standalone para bugs no FM-Index (texto pequeno em RAM).
-add_executable(test_fm_index_minimal src/storage/test_fm_index_minimal.cpp)
-target_compile_options(test_fm_index_minimal PRIVATE
-    $<$<CONFIG:Debug>:-O0 -g>
-    $<$<NOT:$<CONFIG:Debug>>:-O3 -flto=auto>
-    -march=native -fopenmp
-)
-target_link_libraries(test_fm_index_minimal PRIVATE ggql_ingest)
 
 # ── ggql_ffi (Dart/Flutter Integration) ──────────────────
 # Biblioteca compartilhada (.so/.dll/.dylib) para uso via Dart FFI.
 # Encapsula instâncias C++ com extern "C" e ponteiros opacos.
 add_library(ggql_ffi SHARED src/ffi/ggql_ffi.cpp)
 target_compile_options(ggql_ffi PRIVATE
-    $<$<CONFIG:Debug>:-O0 -g>
-    $<$<NOT:$<CONFIG:Debug>>:-O3 -flto=auto>
-    -march=native -fopenmp -fPIC
+    -O3 -flto=auto -march=native -fopenmp -fPIC
 )
+target_link_options(ggql_ffi PRIVATE -flto=auto)
 target_link_libraries(ggql_ffi PRIVATE ggql_query)
 
 # ── Testes unitários do ingestor (ARCH-5) ────────────────────────────────────

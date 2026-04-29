@@ -101,6 +101,89 @@ GgqlIngestStats ggql_ingestor_ingest(
 // Reseta o ingestor
 void ggql_ingestor_reset(GgqlIngestorHandle handle);
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// API DE QUERY — Engine + Resultado
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Handles opacos para o engine e para resultados de query.
+typedef void* GgqlEngineHandle;
+typedef void* GgqlResultHandle;
+
+// Tipos de célula retornados por ggql_result_cell_type().
+typedef enum {
+    GGQL_TYPE_NULL   = 0,  // campo ausente / NULL
+    GGQL_TYPE_INT    = 1,  // int64_t
+    GGQL_TYPE_DOUBLE = 2,  // double
+    GGQL_TYPE_STRING = 3,  // const char*
+} GgqlCellType;
+
+// ── Criação do engine ──────────────────────────────────────────────────────────
+
+// Carrega o engine a partir de um diretório de cache gerado por ggql_ingestor_ingest().
+// Carrega metadados e FM-Index do disco. Topologia fica NULL (suficiente para a
+// maioria das queries — FIND TIP/REPEAT/BUBBLE/EDGE/PATH requerem topologia).
+// Retorna NULL em caso de erro; consulte ggql_engine_last_error().
+GgqlEngineHandle ggql_engine_load(const char* cache_dir);
+
+// Cria o engine a partir de um ingestor que já concluiu ggql_ingestor_ingest().
+// Usa a topologia em memória do ingestor e carrega metadados + FM-Index do cache_dir.
+// Retorna NULL em caso de erro.
+// IMPORTANTE: o ingestor deve permanecer vivo enquanto o engine existir (a topologia
+// é um ponteiro não-proprietário).
+GgqlEngineHandle ggql_engine_create(GgqlIngestorHandle ingestor, const char* cache_dir);
+
+// Destroi o engine. Não destrói o ingestor.
+void ggql_engine_destroy(GgqlEngineHandle engine);
+
+// Retorna a mensagem de erro da última chamada que falhou (ggql_engine_load,
+// ggql_engine_create, ggql_engine_execute). Válida até a próxima chamada FFI.
+const char* ggql_engine_last_error(GgqlEngineHandle engine);
+
+// ── Execução de query ──────────────────────────────────────────────────────────
+
+// Executa uma query GGQL com paginação.
+//   query  — string GGQL terminada em '\0' (sem LIMIT/OFFSET se usar os parâmetros)
+//   limit  — 0 usa o default FFI (100 linhas por página)
+//   offset — 0 = primeira página; N = pular N linhas antes de emitir
+//
+// Retorna NULL em caso de erro de parse ou execução.
+// O chamador DEVE liberar com ggql_result_free().
+// Thread-safe: múltiplas queries simultâneas em threads diferentes são seguras.
+GgqlResultHandle ggql_engine_execute(
+    GgqlEngineHandle engine,
+    const char*      query,
+    uint32_t         limit,
+    uint32_t         offset
+);
+
+// ── Metadados do resultado ─────────────────────────────────────────────────────
+
+int64_t ggql_result_row_count       (GgqlResultHandle result);  // linhas neste batch
+int64_t ggql_result_col_count       (GgqlResultHandle result);  // colunas
+int64_t ggql_result_total_hits      (GgqlResultHandle result);  // matches (até 1M)
+bool    ggql_result_total_truncated (GgqlResultHandle result);  // contagem parou em 1M?
+bool    ggql_result_safety_limit_hit(GgqlResultHandle result);  // safety atingido?
+
+// Nome da coluna col ∈ [0, col_count). Válido até ggql_result_free().
+const char* ggql_result_col_name(GgqlResultHandle result, int32_t col);
+
+// ── Acesso por célula ──────────────────────────────────────────────────────────
+//
+// row ∈ [0, row_count)   col ∈ [0, col_count)
+// Chame ggql_result_cell_type() primeiro para saber qual acessor usar.
+// Usar o acessor errado retorna 0 / NULL.
+
+GgqlCellType ggql_result_cell_type  (GgqlResultHandle result, int32_t row, int32_t col);
+int64_t      ggql_result_cell_int   (GgqlResultHandle result, int32_t row, int32_t col);
+double       ggql_result_cell_double(GgqlResultHandle result, int32_t row, int32_t col);
+
+// Ponteiro de string válido até ggql_result_free(). Copie se precisar reter.
+const char*  ggql_result_cell_string(GgqlResultHandle result, int32_t row, int32_t col);
+
+// Libera o resultado. Após essa chamada todos os ponteiros obtidos do resultado
+// são inválidos.
+void ggql_result_free(GgqlResultHandle result);
+
 #ifdef __cplusplus
 }
 #endif

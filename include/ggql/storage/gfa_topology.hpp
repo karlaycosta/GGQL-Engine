@@ -378,6 +378,42 @@ class GfaCsrTopology {
         return path_names_[path_id];
     }
 
+    // Retorna IDs internos de nós (sem bit de orientação) na ordem do path.
+    // Retorna vetor vazio se path_id está fora do intervalo ou gBWT não disponível.
+    // Complexidade: O(L) onde L = número de nós no path.
+    std::vector<uint64_t> path_nodes(size_t path_id) const;
+
+    // ── Cache de estatísticas de path (node_count + bp_length) ───────────────
+    //
+    // Pré-computado no ingest e persistido em path_stats.bin.
+    // Elimina o path_nodes() no loop de plan_paths — O(1) por walk.
+    //
+    // lengths: span de GfaMetadataStore::lengths_[] (mesmos IDs internos).
+    // Usa extração GBWT pós-build. Para datasets grandes prefira
+    // set_path_stats() com stats pré-computados das sequências em RAM.
+    void build_path_stats(std::span<const uint32_t> lengths);
+
+    // Atribui stats pré-computados diretamente, sem traversal GBWT.
+    // Chamado pelo ingestor quando as sequências ainda estão em RAM
+    // (antes de build_path_index_parallel consumir os GbwtGroups).
+    void set_path_stats(std::vector<uint32_t> nc, std::vector<int64_t> bp) noexcept {
+        path_node_counts_ = std::move(nc);
+        path_bp_lengths_  = std::move(bp);
+    }
+
+    bool has_path_stats() const noexcept {
+        return !path_node_counts_.empty() &&
+               path_node_counts_.size() == path_names_.size();
+    }
+
+    uint32_t path_node_count(size_t path_id) const noexcept {
+        return path_id < path_node_counts_.size() ? path_node_counts_[path_id] : 0;
+    }
+
+    int64_t path_bp_length(size_t path_id) const noexcept {
+        return path_id < path_bp_lengths_.size() ? path_bp_lengths_[path_id] : 0;
+    }
+
   private:
     // ── Threshold de paralelismo ─────────────────────────────────────────────
     // Abaixo deste valor o overhead do fork/join OpenMP (~0.5 ms) supera o
@@ -404,6 +440,10 @@ class GfaCsrTopology {
     std::vector<std::unique_ptr<gbwt::GBWT>> gbwts_;
     std::vector<size_t> gbwt_offsets_;
     std::vector<std::string> path_names_;
+
+    // Cache de estatísticas de path (persistido em path_stats.bin)
+    std::vector<uint32_t> path_node_counts_;
+    std::vector<int64_t>  path_bp_lengths_;
 
     // ── Helpers privados (implementados no .cpp) ─────────────────────────────
 

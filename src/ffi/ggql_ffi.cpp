@@ -1,16 +1,49 @@
 #include "ffi/ggql_ffi.h"
 #include "ggql/cli/console.hpp"
 #include "ggql/ingest/gfa_ingestor.hpp"
+#include "ggql/ingest/gfa_metadata_store.hpp"
+#include "ggql/query/ggql_grammar.hpp"
+#include "ggql/query/query_planner.hpp"
+#include "ggql/storage/gfa_fm_index.hpp"
 
 #include <cstring>
+#include <memory>
 #include <string>
+#include <variant>
 
 using namespace ggql;
 
 namespace {
 
-// Ponte cli::Event → GgqlEvent. Buffer local p/ copiar string_views em
-// C-strings NULL-terminadas (as views do cli não garantem terminação em nul).
+// ── Engine wrapper ────────────────────────────────────────────────────────────
+//
+// Armazena os três backends e o planner. Os backends são proprietários dos dados;
+// o ponteiro `topology` pode ser nulo (sem topologia = sem FIND TIP/EDGE/etc).
+
+struct GgqlEngineWrapper {
+    GfaMetadataStore metadata;
+    GfaSequenceIndex fm_index;
+    const GfaCsrTopology* topology = nullptr;  // não-proprietário; pode ser null
+    std::unique_ptr<QueryPlanner> planner;
+    std::string last_error;
+};
+
+// ── Result wrapper ────────────────────────────────────────────────────────────
+//
+// Encapsula QueryResult. As strings em result.flat[] e result.columns[]
+// ficam vivas até ggql_result_free(). Os ponteiros C retornados pelos acessores
+// apontam diretamente para o std::string interno — zero cópias extras.
+
+struct GgqlResultWrapper {
+    QueryResult result;
+};
+
+// ── Default de limit na FFI ───────────────────────────────────────────────────
+static constexpr uint32_t kFfiDefaultLimit = 100;
+
+// ── Ponte cli::Event → GgqlEvent ─────────────────────────────────────────────
+// Buffer local p/ copiar string_views em C-strings NULL-terminadas
+// (as views do cli não garantem terminação em nul).
 struct EventBridge {
     GgqlEventCallback fn;
     void* user_data;
@@ -158,6 +191,207 @@ GgqlIngestStats ggql_ingestor_ingest(
     }
 
     return stats;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FFI de Query — Engine
+// ══════════════════════════════════════════════════════════════════════════════
+
+// thread_local para mensagens de erro de funções que não têm handle de engine.
+thread_local std::string engine_create_error;
+
+GgqlEngineHandle ggql_engine_load(const char* cache_dir) {
+    if (!cache_dir) {
+        engine_create_error = "cache_dir não pode ser NULL";
+        return nullptr;
+    }
+    try {
+        auto* w = new GgqlEngineWrapper();
+        w->metadata.load(std::string(cache_dir));
+        try {
+            w->fm_index.load(std::string(cache_dir));
+        } catch (...) {
+            // FM-Index ausente é tolerado — queries de k-mer simplesmente falharão.
+        }
+        w->planner = std::make_unique<QueryPlanner>(
+            nullptr,
+            &w->metadata,
+            w->fm_index.is_loaded() ? &w->fm_index : nullptr
+        );
+        return w;
+    } catch (const std::exception& e) {
+        engine_create_error = std::string("ggql_engine_load: ") + e.what();
+        return nullptr;
+    } catch (...) {
+        engine_create_error = "ggql_engine_load: erro desconhecido";
+        return nullptr;
+    }
+}
+
+GgqlEngineHandle ggql_engine_create(GgqlIngestorHandle ingestor, const char* cache_dir) {
+    if (!ingestor || !cache_dir) {
+        engine_create_error = "ingestor e cache_dir não podem ser NULL";
+        return nullptr;
+    }
+    try {
+        auto* w = new GgqlEngineWrapper();
+        w->topology = static_cast<GfaIngestorMmapParallel*>(ingestor)->topology();
+        w->metadata.load(std::string(cache_dir));
+        try {
+            w->fm_index.load(std::string(cache_dir));
+        } catch (...) {}
+        w->planner = std::make_unique<QueryPlanner>(
+            w->topology,
+            &w->metadata,
+            w->fm_index.is_loaded() ? &w->fm_index : nullptr
+        );
+        return w;
+    } catch (const std::exception& e) {
+        engine_create_error = std::string("ggql_engine_create: ") + e.what();
+        return nullptr;
+    } catch (...) {
+        engine_create_error = "ggql_engine_create: erro desconhecido";
+        return nullptr;
+    }
+}
+
+void ggql_engine_destroy(GgqlEngineHandle engine) {
+    delete static_cast<GgqlEngineWrapper*>(engine);
+}
+
+const char* ggql_engine_last_error(GgqlEngineHandle engine) {
+    if (!engine) { return engine_create_error.c_str(); }
+    return static_cast<GgqlEngineWrapper*>(engine)->last_error.c_str();
+}
+
+GgqlResultHandle ggql_engine_execute(
+    GgqlEngineHandle engine,
+    const char*      query_str,
+    uint32_t         limit,
+    uint32_t         offset
+) {
+    if (!engine || !query_str) { return nullptr; }
+    auto* w = static_cast<GgqlEngineWrapper*>(engine);
+
+    // Parse da query
+    auto parsed = grammar::parse_ggql(query_str);
+    if (!parsed) {
+        w->last_error = std::move(parsed.error());
+        return nullptr;
+    }
+
+    // Injeta limit/offset nos campos do AST se não foram escritos na query.
+    // Convenção: usar parâmetros FFI, não LIMIT/OFFSET na string.
+    const uint32_t effective_limit  = (limit  == 0) ? kFfiDefaultLimit : limit;
+    const uint32_t effective_offset = offset;
+
+    std::visit([&](auto& q) {
+        using T = std::decay_t<decltype(q)>;
+        if constexpr (std::is_same_v<T, FindQuery>) {
+            if (!q.limit.has_value())  { q.limit  = effective_limit;  }
+            if (!q.offset.has_value() && effective_offset > 0) {
+                q.offset = effective_offset;
+            }
+        } else if constexpr (std::is_same_v<T, SearchKmerQuery>) {
+            if (!q.limit.has_value()) { q.limit = effective_limit; }
+        }
+    }, parsed.value());
+
+    if (!w->planner) {
+        w->last_error = "engine não inicializado corretamente";
+        return nullptr;
+    }
+    auto exec = w->planner->execute(parsed.value());
+    if (!exec) {
+        w->last_error = std::move(exec.error());
+        return nullptr;
+    }
+
+    auto* r = new GgqlResultWrapper{std::move(exec.value())};
+    return r;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FFI de Query — Acessores de resultado
+// ══════════════════════════════════════════════════════════════════════════════
+
+int64_t ggql_result_row_count(GgqlResultHandle result) {
+    if (!result) { return 0; }
+    return static_cast<int64_t>(static_cast<GgqlResultWrapper*>(result)->result.row_count);
+}
+
+int64_t ggql_result_col_count(GgqlResultHandle result) {
+    if (!result) { return 0; }
+    return static_cast<int64_t>(static_cast<GgqlResultWrapper*>(result)->result.columns.size());
+}
+
+int64_t ggql_result_total_hits(GgqlResultHandle result) {
+    if (!result) { return 0; }
+    return static_cast<int64_t>(static_cast<GgqlResultWrapper*>(result)->result.total_hits);
+}
+
+bool ggql_result_total_truncated(GgqlResultHandle result) {
+    if (!result) { return false; }
+    return static_cast<GgqlResultWrapper*>(result)->result.total_hits_truncated;
+}
+
+bool ggql_result_safety_limit_hit(GgqlResultHandle result) {
+    if (!result) { return false; }
+    return static_cast<GgqlResultWrapper*>(result)->result.safety_limit_hit;
+}
+
+const char* ggql_result_col_name(GgqlResultHandle result, int32_t col) {
+    if (!result) { return nullptr; }
+    const auto& cols = static_cast<GgqlResultWrapper*>(result)->result.columns;
+    if (col < 0 || static_cast<size_t>(col) >= cols.size()) { return nullptr; }
+    return cols[static_cast<size_t>(col)].c_str();
+}
+
+// Índice linear em flat[]: row * col_count + col
+static inline const Value* get_cell(const GgqlResultWrapper* w, int32_t row, int32_t col) {
+    const auto& r = w->result;
+    const size_t ncols = r.columns.size();
+    if (row < 0 || col < 0
+        || static_cast<size_t>(row) >= r.row_count
+        || static_cast<size_t>(col) >= ncols) {
+        return nullptr;
+    }
+    return &r.flat[static_cast<size_t>(row) * ncols + static_cast<size_t>(col)];
+}
+
+GgqlCellType ggql_result_cell_type(GgqlResultHandle result, int32_t row, int32_t col) {
+    if (!result) { return GGQL_TYPE_NULL; }
+    const Value* v = get_cell(static_cast<GgqlResultWrapper*>(result), row, col);
+    if (!v) { return GGQL_TYPE_NULL; }
+    if (std::holds_alternative<int64_t>(*v))    { return GGQL_TYPE_INT;    }
+    if (std::holds_alternative<double>(*v))     { return GGQL_TYPE_DOUBLE; }
+    if (std::holds_alternative<std::string>(*v)){ return GGQL_TYPE_STRING; }
+    return GGQL_TYPE_NULL;
+}
+
+int64_t ggql_result_cell_int(GgqlResultHandle result, int32_t row, int32_t col) {
+    if (!result) { return 0; }
+    const Value* v = get_cell(static_cast<GgqlResultWrapper*>(result), row, col);
+    if (!v || !std::holds_alternative<int64_t>(*v)) { return 0; }
+    return std::get<int64_t>(*v);
+}
+
+double ggql_result_cell_double(GgqlResultHandle result, int32_t row, int32_t col) {
+    if (!result) { return 0.0; }
+    const Value* v = get_cell(static_cast<GgqlResultWrapper*>(result), row, col);
+    if (!v || !std::holds_alternative<double>(*v)) { return 0.0; }
+    return std::get<double>(*v);
+}
+
+const char* ggql_result_cell_string(GgqlResultHandle result, int32_t row, int32_t col) {
+    if (!result) { return nullptr; }
+    const Value* v = get_cell(static_cast<GgqlResultWrapper*>(result), row, col);
+    if (!v || !std::holds_alternative<std::string>(*v)) { return nullptr; }
+    return std::get<std::string>(*v).c_str();
+}
+
+void ggql_result_free(GgqlResultHandle result) {
+    delete static_cast<GgqlResultWrapper*>(result);
 }
 
 } // extern "C"

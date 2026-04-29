@@ -8,14 +8,15 @@
 //   ─────────────┼────────────────────────────────────┼──────────────
 //   TIP          │ GfaCsrTopology::find_tips()        │ ✅
 //   REPEAT       │ GfaCsrTopology::find_repeats()     │ ✅
-//   BUBBLE       │ GfaCsrTopology::find_bubbles()     │ ✅
+//   BUBBLE       │ GfaCsrTopology::find_bubbles()     │ ⚠️  (→ snarls Phase 2)
 //   SEGMENT      │ GfaMetadataStore (binário .idx)    │ ✅
-//   EDGE         │ (não implementado)                 │ ❌ Phase 2
-//   PATH         │ (não implementado)                 │ ❌ Phase 2
+//   EDGE         │ GfaCsrTopology::out_neighbors()    │ ✅
+//   PATH         │ GfaCsrTopology::path_nodes()       │ ✅
 //   SEARCH KMER  │ FM-Index                           │ ✅
 //
 // Implementação: src/query/query_planner.cpp + query_evaluator.cpp
 
+#include <array>
 #include <expected>
 #include <span>
 #include <string>
@@ -31,17 +32,46 @@
 
 namespace ggql {
 
-// ─── Tipos de resultado ───────────────────────────────────────────────────────
+// ─── RowFields ────────────────────────────────────────────────────────────────
+//
+// Mapa inline sem alocação de heap — usado exclusivamente para avaliação de
+// cláusulas WHERE dentro de plan_*(). Máximo de 6 campos (SEGMENT tem 5).
+// As chaves são string_view apontando para literais estáticos ("id", "name"…).
 
-using RowFields = std::unordered_map<std::string, Value>;
+struct RowFields {
+    static constexpr size_t kMaxFields = 6;
+    std::array<std::string_view, kMaxFields> keys{};
+    std::array<Value,            kMaxFields> vals{};
+    size_t                                   count = 0;
+
+    void insert(std::string_view k, Value v) noexcept {
+        keys[count] = k;
+        vals[count] = std::move(v);
+        ++count;
+    }
+
+    [[nodiscard]] const Value* find(std::string_view key) const noexcept {
+        for (size_t i = 0; i < count; ++i) {
+            if (keys[i] == key) { return &vals[i]; }
+        }
+        return nullptr;
+    }
+};
+
+// ─── Tipos de resultado ───────────────────────────────────────────────────────
 
 /// Cache pré-computado: kmer → conjunto de segment IDs que o contêm.
 using KmerCache = std::unordered_map<std::string, std::unordered_set<uint64_t>>;
 
+// Resultado de uma consulta em layout colunar row-major.
+// flat[row * columns.size() + col] dá o valor da célula (row, col).
 struct QueryResult {
     std::vector<std::string> columns;
-    std::vector<RowFields>   rows;
+    std::vector<Value>       flat;
+    size_t                   row_count  = 0;
     size_t                   total_hits = 0;
+    bool   total_hits_truncated = false;  // true se total_hits parou em kMaxTotalHitsCount
+    bool   safety_limit_hit     = false;  // true se sem LIMIT explícito e > kSafetyHardLimit
 
     /// Formata como tabela ASCII alinhada (útil para REPL / debug).
     [[nodiscard]] std::string format_table() const;
@@ -70,6 +100,8 @@ class QueryPlanner {
     [[nodiscard]] std::expected<QueryResult, std::string> plan_repeats(const FindQuery& q) const;
     [[nodiscard]] std::expected<QueryResult, std::string> plan_bubbles(const FindQuery& q) const;
     [[nodiscard]] std::expected<QueryResult, std::string> plan_segments(const FindQuery& q) const;
+    [[nodiscard]] std::expected<QueryResult, std::string> plan_edges(const FindQuery& q) const;
+    [[nodiscard]] std::expected<QueryResult, std::string> plan_paths(const FindQuery& q) const;
 
     [[nodiscard]] bool eval_condition(const ConditionExpr& cond, const RowFields& row,
                                       const KmerCache* cache = nullptr) const noexcept;
@@ -78,10 +110,6 @@ class QueryPlanner {
 
     [[nodiscard]] static bool compare_values(const Value& lhs, Operator op,
                                              const Value& rhs) noexcept;
-    [[nodiscard]] static QueryResult project(std::vector<RowFields> rows,
-                                             const std::vector<std::string>& return_fields,
-                                             std::span<const std::string_view> all_columns,
-                                             size_t total_hits = 0);
 
     const GfaCsrTopology*   topology_  = nullptr;
     const GfaMetadataStore* metadata_  = nullptr;

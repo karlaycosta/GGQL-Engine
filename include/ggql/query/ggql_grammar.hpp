@@ -46,6 +46,8 @@ struct kw_search : kw<TAO_PEGTL_STRING("SEARCH")> {};
 struct kw_kmer : kw<TAO_PEGTL_STRING("KMER")> {};
 struct kw_where : kw<TAO_PEGTL_STRING("WHERE")> {};
 struct kw_return : kw<TAO_PEGTL_STRING("RETURN")> {};
+struct kw_limit : kw<TAO_PEGTL_STRING("LIMIT")> {};
+struct kw_offset : kw<TAO_PEGTL_STRING("OFFSET")> {};
 struct kw_and : kw<TAO_PEGTL_STRING("AND")> {};
 struct kw_or : kw<TAO_PEGTL_STRING("OR")> {};
 struct kw_segment : kw<TAO_PEGTL_STRING("SEGMENT")> {};
@@ -57,7 +59,8 @@ struct kw_repeat : kw<TAO_PEGTL_STRING("REPEAT")> {};
 
 /// Guarda: todas as palavras reservadas reunidas.
 /// Usada em not_at<> para impedir que fields/return_fields casem keywords.
-struct keyword_any : peg::sor<kw_find, kw_search, kw_kmer, kw_where, kw_return, kw_and, kw_or,
+struct keyword_any : peg::sor<kw_find, kw_search, kw_kmer, kw_where, kw_return, kw_limit,
+                              kw_offset, kw_and, kw_or,
                               kw_segment, kw_edge, kw_path, kw_bubble, kw_tip, kw_repeat> {};
 
 // ─── Tipo de entidade ─────────────────────────────────────────────────────────
@@ -130,16 +133,29 @@ struct where_clause
 struct comma_sep : peg::seq<ws, peg::one<','>, ws> {};
 struct return_clause : peg::seq<kw_return, ws, peg::list<return_field, comma_sep>> {};
 
+// ─── Cláusulas LIMIT / OFFSET ─────────────────────────────────────────────────
+
+struct limit_val  : peg::plus<peg::digit> {};
+struct offset_val : peg::plus<peg::digit> {};
+struct limit_clause  : peg::seq<kw_limit,  ws, limit_val>  {};
+struct offset_clause : peg::seq<kw_offset, ws, offset_val> {};
+/// LIMIT N [OFFSET M] — OFFSET sem LIMIT é rejeitado no parse
+struct limit_offset_clause
+    : peg::seq<limit_clause, peg::opt<peg::seq<ws, offset_clause>>> {};
+
 // ─── Statements ───────────────────────────────────────────────────────────────
 
-struct find_stmt : peg::seq<kw_find, ws, entity_type, peg::opt<peg::seq<ws, where_clause>>,
-                            peg::opt<peg::seq<ws, return_clause>>> {};
+struct find_stmt : peg::seq<kw_find, ws, entity_type,
+                            peg::opt<peg::seq<ws, where_clause>>,
+                            peg::opt<peg::seq<ws, return_clause>>,
+                            peg::opt<peg::seq<ws, limit_offset_clause>>> {};
 
 /// Conteúdo do k-mer em SEARCH KMER "..."
 struct kmer_arg : peg::star<peg::not_one<'"'>> {};
 
 struct search_stmt : peg::seq<kw_search, ws, kw_kmer, ws, peg::one<'"'>, kmer_arg, peg::one<'"'>,
-                              peg::opt<peg::seq<ws, return_clause>>> {};
+                              peg::opt<peg::seq<ws, return_clause>>,
+                              peg::opt<peg::seq<ws, limit_clause>>> {};
 
 /// Regra raiz — uma única query, sem conteúdo residual
 struct query : peg::seq<ws, peg::sor<find_stmt, search_stmt>, ws, peg::eof> {};
@@ -157,6 +173,8 @@ struct ParseState {
     // Valor temporário de uma condição WHERE: inteiro, double ou string (zero-copy).
     std::variant<int64_t, double, std::string_view> tmp_value{int64_t{0}};
     std::string_view tmp_fn_arg;
+    std::optional<uint32_t> tmp_limit;
+    std::optional<uint32_t> tmp_offset;
 
     // ── acumuladores ─────────────────────────────────────────────────────────
     std::vector<ConditionExpr> where_conditions;
@@ -331,6 +349,26 @@ template <> struct action<kmer_arg> {
     }
 };
 
+// ── limit_val ─────────────────────────────────────────────────────────────────
+template <> struct action<limit_val> {
+    template <typename In> static void apply(const In& in, ParseState& s) {
+        const auto sv = in.string_view();
+        uint32_t v = 0;
+        std::from_chars(sv.data(), sv.data() + sv.size(), v);
+        s.tmp_limit = v;
+    }
+};
+
+// ── offset_val ────────────────────────────────────────────────────────────────
+template <> struct action<offset_val> {
+    template <typename In> static void apply(const In& in, ParseState& s) {
+        const auto sv = in.string_view();
+        uint32_t v = 0;
+        std::from_chars(sv.data(), sv.data() + sv.size(), v);
+        s.tmp_offset = v;
+    }
+};
+
 // ── find_stmt: monta o FindQuery final ────────────────────────────────────────
 template <> struct action<find_stmt> {
     template <typename In> static void apply(const In&, ParseState& s) {
@@ -346,6 +384,10 @@ template <> struct action<find_stmt> {
         }
 
         fq.return_fields = std::move(s.return_fields);
+        fq.limit  = s.tmp_limit;
+        fq.offset = s.tmp_offset;
+        s.tmp_limit  = std::nullopt;
+        s.tmp_offset = std::nullopt;
         s.result = std::move(fq);
     }
 };
@@ -356,6 +398,8 @@ template <> struct action<search_stmt> {
         SearchKmerQuery sq;
         sq.kmer = std::move(s.kmer_str);
         sq.return_fields = std::move(s.return_fields);
+        sq.limit = s.tmp_limit;
+        s.tmp_limit = std::nullopt;
         s.result = std::move(sq);
     }
 };

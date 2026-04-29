@@ -1128,6 +1128,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
     stats.node_count = res_.mphf->nbKeys();
 
     std::vector<char> fm_seq_for_build;
+    // Mantido vivo além do bloco write_db para build_path_stats após GBWT.
+    std::unique_ptr<GfaMetadataStore> store_up;
 
     if (write_db) {
         if (verbose) {
@@ -1135,10 +1137,10 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                                        cli::format_count(records.size())));
         }
         auto t_db0 = clock::now();
-        GfaMetadataStore store;
-        store.init(stats.node_count);
-        store.flush_segments(records);
-        store.save(cache_dir);
+        store_up = std::make_unique<GfaMetadataStore>();
+        store_up->init(stats.node_count);
+        store_up->flush_segments(records);
+        store_up->save(cache_dir);
         auto t_db1 = clock::now();
         stats.elapsed_metadata_s = sec(t_db1 - t_db0).count();
         if (verbose) {
@@ -1149,7 +1151,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
             records.swap(tmp);
         }
         if (build_fm_index) {
-            fm_seq_for_build = store.take_sequences();
+            fm_seq_for_build = store_up->take_sequences();
         }
     }
 
@@ -1310,6 +1312,64 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                 }
             }
 
+            // ── Pré-computa path stats antes do GBWT build ────────────────────────
+            // Lê sequências de in_ram_seqs (RAM) ou de tmp_path (disco sequencial).
+            // Ambas as fontes são muito mais rápidas que build_path_stats() que
+            // re-atravessa o GBWT comprimido (~15 min no HPRC: 4,46B traversais).
+            //
+            // RAM → O(total_nodes) a ~20 GB/s (~1-2 s HPRC).
+            // Disco (tmp_path) → leitura sequencial a ~500 MB/s (~1-2 min HPRC)
+            //                   vs ~15-24 min via GBWT decompression.
+            //
+            // Grupos vazios (in_ram_seqs e tmp_path ambos vazios) são ignorados.
+            std::vector<uint32_t> precomp_nc;
+            std::vector<int64_t>  precomp_bp;
+            bool stats_from_ram = false;
+            if (store_up && res_.topology) {
+                const auto lengths = store_up->lengths_span();
+                precomp_nc.reserve(stats.path_count);
+                precomp_bp.reserve(stats.path_count);
+                for (const auto& g : topo_groups) {
+                    if (!g.in_ram_seqs.empty()) {
+                        // Grupo em RAM: iteração direta — O(nodes) a ~20 GB/s
+                        for (const auto& seq : g.in_ram_seqs) {
+                            precomp_nc.push_back(static_cast<uint32_t>(seq.size()));
+                            int64_t bp = 0;
+                            for (const uint64_t v : seq) {
+                                const uint64_t nid = v >> 1;
+                                if (nid < lengths.size()) {
+                                    bp += static_cast<int64_t>(lengths[nid]);
+                                }
+                            }
+                            precomp_bp.push_back(bp);
+                        }
+                    } else if (!g.tmp_path.empty()) {
+                        // Grupo em disco: leitura sequencial do tmp file (muito mais
+                        // rápido que GBWT decompression). Cada path termina com ENDMARKER.
+                        gbwt::text_buffer_type buf(g.tmp_path, std::ios::in,
+                                                   size_t(64) << 20, node_width);
+                        uint32_t cur_nc = 0;
+                        int64_t  cur_bp = 0;
+                        for (const gbwt::size_type val : buf) {
+                            if (val == gbwt::ENDMARKER) {
+                                precomp_nc.push_back(cur_nc);
+                                precomp_bp.push_back(cur_bp);
+                                cur_nc = 0;
+                                cur_bp = 0;
+                            } else {
+                                const uint64_t nid = static_cast<uint64_t>(val) >> 1;
+                                ++cur_nc;
+                                if (nid < lengths.size()) {
+                                    cur_bp += static_cast<int64_t>(lengths[nid]);
+                                }
+                            }
+                        }
+                    }
+                    // Grupo vazio: sem paths, sem ação
+                }
+                stats_from_ram = true;
+            }
+
             auto t_gbwt0 = clock::now();
             auto gbwt_t = res_.topology->build_path_index_parallel(std::move(topo_groups), node_width,
                                                                num_threads);
@@ -1328,6 +1388,26 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                                              cli::format_count(stats.path_count),
                                              ggql::format_size(stats.gbwt_index_size_b),
                                              ggql::format_seconds(stats.elapsed_gbwt_s)));
+            }
+
+            // Aplica path stats: pré-computado (RAM/disco) ou GBWT decompression (fallback)
+            if (store_up) {
+                auto t_ps0 = clock::now();
+                if (stats_from_ram) {
+                    res_.topology->set_path_stats(std::move(precomp_nc), std::move(precomp_bp));
+                } else {
+                    res_.topology->build_path_stats(store_up->lengths_span());
+                }
+                auto t_ps1 = clock::now();
+                if (verbose) {
+                    const double ps_s = sec(t_ps1 - t_ps0).count();
+                    const char* method = stats_from_ram ? "RAM+disco (pré-computado)"
+                                                        : "GBWT decompression (fallback)";
+                    cli::step_ok_end("Path stats",
+                                     fmt::format("{} · {}", method,
+                                                 ggql::format_seconds(ps_s)));
+                }
+                store_up.reset();
             }
         }
     }

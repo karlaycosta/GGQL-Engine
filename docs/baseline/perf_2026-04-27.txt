@@ -1,0 +1,33 @@
+GGQL Performance Baseline
+Data: 2026-04-27 | Build: ca32ad0 | 4 threads
+
+Target (guideline):
+  10W FIND SEGMENT  < 500 ms  →  FALHOU (1,12 s)  — ver nota
+  10W FIND TIP      < 200 ms  →  OK    (173,5 ms)
+  10W FIND REPEAT   < 200 ms  →  OK    (129,7 ms)
+  10W FIND SEG WHERE length > X  < 300 ms  →  FALHOU (1,19 s)  — ver nota
+
+Nota sobre FIND SEGMENT no 10W/100W:
+  O tempo (~1,1–1,9 s) inclui ingest + build do FM-Index (scan de 3–4M segmentos).
+  O custo do próprio filtro é marginal; o bottleneck é a varredura serial do FlatStore.
+  Isso é esperado e será endereçado separadamente (índice de comprimento, pushdown).
+
+──────────────────────────────────────────────────────────────────────────────
+10W — chm13_subset_10w.gfa (3.196.132 segmentos, 3.402.938 links, 10 walks)
+──────────────────────────────────────────────────────────────────────────────
+FIND SEGMENT;                                3.196.132 linhas   1,12 s
+FIND TIP;                                       16.603 linhas   173,5 ms
+FIND REPEAT;                                   187.715 linhas   129,7 ms
+FIND SEGMENT WHERE length > 1000;                3.314 linhas   1,19 s
+FIND SEGMENT WHERE depth >= 2.0;                     0 linhas   1,26 s
+FIND SEGMENT WHERE length > 100 AND depth > 1.5;     0 linhas   1,30 s
+
+──────────────────────────────────────────────────────────────────────────────
+100W — chm13_subset_100w.gfa (4.294.760 segmentos, 5.025.175 links, 100 walks)
+──────────────────────────────────────────────────────────────────────────────
+FIND SEGMENT;                                4.294.760 linhas   1,56 s
+FIND TIP;                                       17.624 linhas   224,7 ms
+FIND REPEAT;                                   667.756 linhas   281,5 ms
+FIND SEGMENT WHERE length > 1000;                3.728 linhas   1,52 s
+FIND SEGMENT WHERE depth >= 2.0;                     0 linhas   1,89 s
+FIND SEGMENT WHERE length > 100 AND depth > 1.5;     0 linhas   1,78 s

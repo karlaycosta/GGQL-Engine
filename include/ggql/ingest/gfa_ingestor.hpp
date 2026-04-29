@@ -23,15 +23,15 @@
 //   9. In-RAM threshold per-bin por sigma
 //  10. fmt::format para nomes de paths (C++23)
 
-#include "ggql/cli/console.hpp"
+// #include "ggql/cli/console.hpp"
 #include "ggql/cli/progress_tracker.hpp"
 #include "ggql/ingest/gfa_metadata_store.hpp"
 #include "ggql/ingest/gbwt_group.hpp"
 #include "ggql/storage/gfa_topology.hpp"
 
-#include <algorithm>
+// #include <algorithm>
 #include <array>
-#include <atomic>
+// #include <atomic>
 #include <bit>
 #include <charconv>
 #include <chrono>
@@ -48,7 +48,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <utility>
+// #include <utility>
 #include <vector>
 
 #include "mphf/BooPHF.h"
@@ -359,20 +359,32 @@ class GfaIngestorMmapParallel {
                 continue;
             }
 
+            // Normaliza para maiúsculas para comparação (GFA spec não padroniza caixa)
+            const char c0   = static_cast<char>(sv[0] & ~0x20);
+            const char c1   = static_cast<char>(sv[1] & ~0x20);
             const char type = sv[3];
             std::string_view val = sv.substr(5);
-            if (sv[0] == 'R' && sv[1] == 'C' && type == 'i') {
+
+            // RC:i: / rc:i: — read count (Bandage, vg, hifiasm)
+            if (c0 == 'R' && c1 == 'C' && type == 'i') {
                 int32_t v{};
                 if (std::from_chars(val.data(), val.data() + val.size(), v).ec == std::errc{}) {
                     out_rc = v;
                 }
-            } else if (sv[0] == 'D' && sv[1] == 'P' && type == 'f') {
+            // DP:f: / dp:f: — depth float (minigraph, minimap2)
+            } else if (c0 == 'D' && c1 == 'P' && type == 'f') {
                 float v{};
                 if (std::from_chars(val.data(), val.data() + val.size(), v).ec == std::errc{}) {
                     out_dp = v;
                 }
-            } else if (sv[0] == 'L' && sv[1] == 'N' && type == 'i') {
-                // LN:i — comprimento explícito (presente quando SEQ é '*')
+            // DP:i: / dp:i: — depth int (algumas ferramentas emitem inteiro)
+            } else if (c0 == 'D' && c1 == 'P' && type == 'i') {
+                int32_t v{};
+                if (std::from_chars(val.data(), val.data() + val.size(), v).ec == std::errc{}) {
+                    out_dp = static_cast<float>(v);
+                }
+            // LN:i: / ln:i: — comprimento explícito (presente quando SEQ é '*')
+            } else if (c0 == 'L' && c1 == 'N' && type == 'i') {
                 uint32_t v{};
                 if (std::from_chars(val.data(), val.data() + val.size(), v).ec == std::errc{}) {
                     out_ln = v;

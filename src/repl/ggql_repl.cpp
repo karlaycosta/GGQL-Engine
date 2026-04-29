@@ -184,7 +184,7 @@ static void load_gfa(Session& sess, const std::string& gfa_path, int threads,
                                              /*verbose=*/false, /*save_metada*/ true,
                                              /*build_topology=*/true,
                                              /*build_fm_index=*/true,
-                                             /*max_gbwt_paths=*/0,
+                                             /*max_gbwt_paths=*/1'000'000,
                                              /*keep_gbwt_tmp=*/false, idx_path);
 
     if (!result) {

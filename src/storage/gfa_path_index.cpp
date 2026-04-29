@@ -568,6 +568,23 @@ void GfaCsrTopology::save(const std::string& dir) const {
             throw std::runtime_error("[topology::save] Erro de I/O ao escrever topology.bin");
         }
     }
+    // Salva cache de estatísticas de path (node_count + bp_length por path)
+    if (has_path_stats()) {
+        std::ofstream out(dir + "/path_stats.bin", std::ios::binary);
+        if (!out) {
+            throw std::runtime_error("[topology::save] Falha ao abrir path_stats.bin");
+        }
+        const uint64_t n = static_cast<uint64_t>(path_node_counts_.size());
+        out.write(reinterpret_cast<const char*>(&n), sizeof(n));
+        out.write(reinterpret_cast<const char*>(path_node_counts_.data()),
+                  static_cast<std::streamsize>(n * sizeof(uint32_t)));
+        out.write(reinterpret_cast<const char*>(path_bp_lengths_.data()),
+                  static_cast<std::streamsize>(n * sizeof(int64_t)));
+        if (!out) {
+            throw std::runtime_error("[topology::save] Erro de I/O ao escrever path_stats.bin");
+        }
+    }
+
     cli::ok("índice salvo", dir);
 }
 
@@ -711,6 +728,27 @@ void GfaCsrTopology::load(const std::string& dir) {
     // Invalida caches de offsets (reconstruídos lazily na próxima consulta)
     offsets_cache_fwd_.clear();
     offsets_cache_bwd_.clear();
+
+    // Carrega estatísticas de path (opcional — ausente em índices antigos, fallback gracioso)
+    {
+        std::ifstream in(dir + "/path_stats.bin", std::ios::binary);
+        if (in) {
+            uint64_t n = 0;
+            in.read(reinterpret_cast<char*>(&n), sizeof(n));
+            if (in && n == static_cast<uint64_t>(path_names_.size())) {
+                path_node_counts_.resize(static_cast<size_t>(n));
+                path_bp_lengths_.resize(static_cast<size_t>(n));
+                in.read(reinterpret_cast<char*>(path_node_counts_.data()),
+                        static_cast<std::streamsize>(n * sizeof(uint32_t)));
+                in.read(reinterpret_cast<char*>(path_bp_lengths_.data()),
+                        static_cast<std::streamsize>(n * sizeof(int64_t)));
+                if (!in) {
+                    path_node_counts_.clear();
+                    path_bp_lengths_.clear();
+                }
+            }
+        }
+    }
 
     cli::step_ok("índice carregado", dir);
 }

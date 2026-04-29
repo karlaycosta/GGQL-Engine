@@ -55,7 +55,7 @@ GGQL Engine is organized in **four independent static libraries**. Each layer re
 │    QueryPlanner · GGQL Grammar (PEGTL) · AST (std::variant C++23)  │
 ├─────────────────────────────────────────────────────────────────────┤
 │  ggql_ingest                                                        │
-│    GfaIngestorMmapParallel · GfaMetadataStore (SQLite)              │
+│    GfaIngestorMmapParallel · GfaMetadataStore (binary SoA)          │
 │    BooPHF MPHF · LSD Radix Sort · gBWT streaming writer            │
 ├─────────────────────────────────────────────────────────────────────┤
 │  ggql_storage                                                       │
@@ -78,7 +78,7 @@ GGQL Engine is organized in **four independent static libraries**. Each layer re
 | **CSR** | `sdsl::sd_vector<>` (Elias-Fano) offsets + `uint32_t` edge arrays | Bidirectional adjacency; O(1) degree and neighbors |
 | **gBWT** | `gbwt::GBWT` — r-index (Sirén 2020) | Haplotype / path index; O(r) space where r = BWT runs |
 | **FM-Index** | BWT + OccBlock AoS + bitmap-sampled locate | k-mer search over segment sequences |
-| **Metadata** | SQLite with predicate pushdown | Segment attributes: length, depth, read_count |
+| **Metadata** | Binary Struct-of-Arrays + local index (`metadata.bin`) | Segment attributes: length, depth, read_count, name, sequence |
 
 ---
 
@@ -94,7 +94,7 @@ GGQL Engine is organized in **four independent static libraries**. Each layer re
 | **gBWT streaming** | Nodes written to disk during parse via `text_buffer_type`; construction never materializes paths in RAM |
 | **MPHF lookup** | BooPHF — name → internal ID in O(1), ~2.5 bits/key |
 | **FM-Index k-mer search** | BWT + OccBlock; `search_kmer()` + sampled `locate()` |
-| **SQLite pushdown** | `WHERE` clauses on SEGMENT fully translated to SQL when possible |
+| **Local binary index** | Metadata persisted as `metadata.bin` / `metadata_strings.bin` / `metadata_seqs.bin`; loaded once, queried in RAM |
 | **PEGTL grammar** | Typed PEG parser; `std::variant`-based AST; zero dynamic dispatch in hot path |
 | **Interactive REPL** | Multi-line input, `.load`, `.stats`, `.help`, batch mode via pipe |
 | **Dart FFI** | `extern "C"` bindings in `src/ffi/ggql_ffi.cpp` |
@@ -127,7 +127,7 @@ value       ::= <integer> | "<string>"
 | `TIP` | `id`, `in_degree`, `out_degree` | CSR topology |
 | `REPEAT` | `id`, `in_degree`, `out_degree` | CSR topology |
 | `BUBBLE` | `source`, `sink`, `branch_count` | CSR topology |
-| `SEGMENT` | `id`, `name`, `length`, `read_count`, `depth` | SQLite (with pushdown) |
+| `SEGMENT` | `id`, `name`, `length`, `read_count`, `depth` | In-memory metadata (binary index) |
 | `EDGE` / `PATH` | — | Phase 2 |
 
 ### Examples

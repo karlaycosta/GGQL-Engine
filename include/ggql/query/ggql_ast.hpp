@@ -58,17 +58,20 @@ struct WhereClause {
 
 // ─── Queries ──────────────────────────────────────────────────────────────────
 
-/// FIND <entity> [WHERE ...] [RETURN ...]
+/// FIND <entity> [WHERE ...] [RETURN ...] [LIMIT N [OFFSET M]]
 struct FindQuery {
     EntityType entity = EntityType::SEGMENT;
     std::optional<WhereClause> where;
     std::vector<std::string> return_fields;
+    std::optional<uint32_t> limit;   // máximo de linhas em flat[]
+    std::optional<uint32_t> offset;  // linhas a pular antes de emitir
 };
 
-/// SEARCH KMER "<seq>" [RETURN ...]
+/// SEARCH KMER "<seq>" [RETURN ...] [LIMIT N]
 struct SearchKmerQuery {
     std::string kmer;
     std::vector<std::string> return_fields;
+    std::optional<uint32_t> limit;
 };
 
 using GgqlQuery = std::variant<FindQuery, SearchKmerQuery>;

@@ -694,4 +694,59 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
     return out;
 }
 
+// ── path_nodes ────────────────────────────────────────────────────────────────
+//
+// Extrai a sequência de IDs internos de nós de um path via gBWT.
+// O gBWT armazena cada nó como (node_id << 1) | orient_bit — mesmo encoding
+// que E_fwd_/E_bwd_. Fazemos >> 1 para obter o ID interno limpo.
+
+std::vector<uint64_t> GfaCsrTopology::path_nodes(size_t global_path_id) const {
+    if (gbwts_.empty() || gbwt_offsets_.empty() || global_path_id >= path_names_.size()) {
+        return {};
+    }
+
+    // Localiza o shard que contém este path usando busca binária em gbwt_offsets_.
+    // gbwt_offsets_[i] = primeiro path_id global do shard i.
+    auto it = std::upper_bound(gbwt_offsets_.begin(), gbwt_offsets_.end(), global_path_id);
+    if (it == gbwt_offsets_.begin()) { return {}; }
+    --it;
+
+    const size_t shard    = static_cast<size_t>(std::distance(gbwt_offsets_.begin(), it));
+    const size_t local_id = global_path_id - *it;
+
+    if (shard >= gbwts_.size() || !gbwts_[shard]) { return {}; }
+    if (local_id >= static_cast<size_t>(gbwts_[shard]->sequences())) { return {}; }
+
+    const auto seq = gbwts_[shard]->extract(static_cast<gbwt::size_type>(local_id));
+
+    std::vector<uint64_t> nodes;
+    nodes.reserve(seq.size());
+    for (const auto enc : seq) {
+        if (enc == gbwt::ENDMARKER) { continue; }
+        nodes.push_back(static_cast<uint64_t>(enc) >> 1); // strip orient bit
+    }
+    return nodes;
+}
+
+// ── build_path_stats ─────────────────────────────────────────────────────────
+//
+// Itera todos os paths via GBWT uma única vez para pré-computar node_count e
+// comprimento em bp por path. Custo idêntico ao loop de plan_paths, mas pago
+// apenas no ingest — queries posteriores usam acesso O(1) aos arrays.
+
+void GfaCsrTopology::build_path_stats(std::span<const uint32_t> lengths) {
+    const size_t n = path_names_.size();
+    path_node_counts_.resize(n);
+    path_bp_lengths_.resize(n);
+    for (size_t pid = 0; pid < n; ++pid) {
+        const auto nodes = path_nodes(pid);
+        path_node_counts_[pid] = static_cast<uint32_t>(nodes.size());
+        int64_t total = 0;
+        for (const uint64_t nid : nodes) {
+            if (nid < lengths.size()) { total += static_cast<int64_t>(lengths[nid]); }
+        }
+        path_bp_lengths_[pid] = total;
+    }
+}
+
 } // namespace ggql

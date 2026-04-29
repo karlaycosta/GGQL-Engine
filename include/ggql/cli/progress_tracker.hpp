@@ -60,20 +60,31 @@ struct ProgressTracker {
             ? std::chrono::time_point<std::chrono::steady_clock>(std::chrono::nanoseconds(now_ns))
             : std::chrono::steady_clock::now();
         const double elapsed_s = std::chrono::duration<double>(now - start_time).count();
-        if (elapsed_s > 0.001 || is_done) {
-            const double rate = current / (elapsed_s > 0.001 ? elapsed_s : 0.001);
-            const double remaining_s = is_done ? 0.0 : ((total_bytes - current) / rate);
-            const double percent =
-                (static_cast<double>(std::min(current, total_bytes)) / total_bytes) * 100.0;
-            cli::step_progress(phase_name, percent, remaining_s,
-                               rate / (rate_divisor > 0.0 ? rate_divisor : 1.0), unit);
-        }
+        // Usa 0.0001s como piso para evitar divisão por zero; não descarta eventos
+        // de fases rápidas (o throttle de 500ms já evita spam).
+        const double safe_elapsed = elapsed_s > 0.0001 ? elapsed_s : 0.0001;
+        const double rate = current / safe_elapsed;
+        const double remaining_s = is_done ? 0.0 : ((total_bytes - current) / rate);
+        const double percent =
+            (static_cast<double>(std::min(current, total_bytes)) / total_bytes) * 100.0;
+        cli::step_progress(phase_name, percent, remaining_s,
+                           rate / (rate_divisor > 0.0 ? rate_divisor : 1.0), unit);
     }
 
     void finish() {
-        if (verbose) {
-            cli::step_progress_finish();
+        if (!verbose) {
+            return;
         }
+        // Emite sempre um resumo final com 100% e rate real, independente de quantos
+        // eventos intermediários dispararam. Sem isso, fases rápidas (Release -O3)
+        // completam em < 500ms e o usuário não vê nenhum dado.
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed_s = std::chrono::duration<double>(now - start_time).count();
+        const double safe_elapsed = elapsed_s > 0.0001 ? elapsed_s : 0.0001;
+        const double total = static_cast<double>(total_bytes);
+        const double rate = (total / safe_elapsed) / (rate_divisor > 0.0 ? rate_divisor : 1.0);
+        cli::step_progress(phase_name, 100.0, 0.0, rate, unit);
+        cli::step_progress_finish();
     }
 };
 
