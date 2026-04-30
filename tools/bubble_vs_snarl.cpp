@@ -86,5 +86,12 @@ int main(int argc, char* argv[]) {
     std::printf("snarls (find_all_snarls_vgstyle, refactor):  %lu  (em %.3f s)\n",
                 static_cast<unsigned long>(snarls_vgstyle.size()), sec_vg);
 
+    // ── 5. find_all_snarls_sese (algoritmo Billi/Johnson 1994) ───────────────
+    const auto t3 = clk::now();
+    auto snarls_sese = ggql::snarl_decomposition::find_all_snarls_sese(topo, 1);
+    const double sec_sese = std::chrono::duration<double>(clk::now() - t3).count();
+    std::printf("snarls (find_all_snarls_sese, Billi/SESE):   %lu  (em %.3f s)\n",
+                static_cast<unsigned long>(snarls_sese.size()), sec_sese);
+
     return 0;
 }

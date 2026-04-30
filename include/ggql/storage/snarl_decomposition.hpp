@@ -57,5 +57,15 @@ std::vector<SnarlRecord> find_all_snarls(const GfaCsrTopology& topo,
 std::vector<SnarlRecord> find_all_snarls_vgstyle(const GfaCsrTopology& topo,
                                                   int num_threads = 1);
 
+// Variante baseada em algoritmo SESE (Single-Entry-Single-Exit) do Billi
+// (at-cg/billi, Bhat/Mahajan/Jain 2025). Adaptação de Johnson 1994 para
+// bidirected graphs. Linear time O(N+E), 15× mais rápido que vg em
+// panbubble detection segundo paper.
+//
+// Versão minimal: sem hairpins, sem dual edges. Detecta SESE regions
+// via cycle equivalence (top_bracket, size). API compatível com SnarlRecord.
+std::vector<SnarlRecord> find_all_snarls_sese(const GfaCsrTopology& topo,
+                                               int num_threads = 1);
+
 } // namespace snarl_decomposition
 } // namespace ggql
