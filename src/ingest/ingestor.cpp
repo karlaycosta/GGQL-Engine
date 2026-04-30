@@ -1276,19 +1276,22 @@ GfaIngestorMmapParallel::complete_with_gbwt(
         return stats;
     }
 
-    // Constrói gBWT a partir dos grupos coletados. Não fazemos remap nem
-    // repartition — a topology em cache já tem IDs sequenciais por componente
-    // (foi processada pelo Pass1 original quando foi criada), e os grupos do
-    // Pass2 paths-only já chegam com encoding final via parse_w/p_line.
+    // Build serial (1 thread) na Fase 2: o build_path_index_parallel paralelo
+    // requer repartition por componente para evitar `Sources X and Y both
+    // have node Z` no merge. Como paths podem atravessar componentes (típico
+    // de metaFlye e similares — paths são walks pré-collapse), o repartition
+    // não é seguro aqui. O modo serial usa um único GBWTBuilder, sem merge.
+    // Trade-off: paralelismo perdido na construção do gBWT, mas Pass1/CSR/
+    // metadata já foram pulados (que era o ganho real da Fase 2).
     if (verbose) {
-        cli::phase(5, fmt::format("gBWT paralelo · {} paths em {} grupos",
+        cli::phase(5, fmt::format("gBWT serial (Fase 2) · {} paths em {} grupos",
                                   cli::format_count(stats.path_count),
                                   pass2.gbwt_groups.size()));
     }
-    const auto t_gb0 = clock::now();
     const uint8_t node_width = pass2.node_width;
+    const auto t_gb0 = clock::now();
     auto gbwt_t = res_.topology->build_path_index_parallel(
-        std::move(pass2.gbwt_groups), node_width, num_threads);
+        std::move(pass2.gbwt_groups), node_width, /*num_threads=*/1);
     const auto t_gb1 = clock::now();
     stats.elapsed_gbwt_s = gbwt_t.wall_s;
     stats.gbwt_cpu_avg_s = gbwt_t.cpu_avg_s;
