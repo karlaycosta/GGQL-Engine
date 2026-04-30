@@ -520,6 +520,54 @@ filter_top_level_snarls(const GfaCsrTopology& topo,
     return out;
 }
 
+// ── Helper Fase 5b: ordena boundary nodes via DFS no componente ──────────
+//
+// Inspirado no vg `cycles_in_cactus()`: faz DFS no sub-grafo restrito ao
+// componente 3-EC, ordenando os boundary sides pela ordem de descoberta.
+// Isso aproxima `next_along_cycle` do vg, gerando pairs consecutivos no
+// "ciclo natural" do componente em vez de ordem arbitrária por node_id.
+//
+// Para cada componente, retorna boundary sides em ordem DFS.
+static std::vector<uint64_t>
+dfs_order_boundaries(const BiedgedGraph& bg,
+                     const std::vector<uint32_t>& side_to_comp,
+                     uint32_t target_comp,
+                     const std::vector<uint64_t>& boundary_sides) {
+    if (boundary_sides.empty()) { return {}; }
+
+    std::vector<uint8_t> in_boundary(bg.num_sides(), 0);
+    for (uint64_t s : boundary_sides) { in_boundary[s] = 1; }
+
+    std::vector<uint64_t> ordered;
+    ordered.reserve(boundary_sides.size());
+
+    // DFS começando do primeiro boundary
+    std::vector<uint8_t> visited(bg.num_sides(), 0);
+    std::vector<uint64_t> stk;
+    stk.push_back(boundary_sides.front());
+    visited[boundary_sides.front()] = 1;
+
+    while (!stk.empty()) {
+        const uint64_t s = stk.back();
+        stk.pop_back();
+        if (in_boundary[s]) { ordered.push_back(s); }
+        for (uint64_t v : bg.adj[static_cast<size_t>(s)]) {
+            // Restringe ao componente atual
+            if (side_to_comp[v] == target_comp && !visited[v]) {
+                visited[v] = 1;
+                stk.push_back(v);
+            }
+        }
+    }
+    // Fallback: se DFS não cobriu todos boundaries, adiciona os restantes
+    for (uint64_t s : boundary_sides) {
+        bool found = false;
+        for (uint64_t o : ordered) { if (o == s) { found = true; break; } }
+        if (!found) { ordered.push_back(s); }
+    }
+    return ordered;
+}
+
 // ── Fase 5: Cactus tree completo via 3-edge-connectivity (Paten 2018 §3) ───
 //
 // Implementação fiel do framework Paten 2018 §3 (cactus graph):
@@ -645,7 +693,23 @@ find_snarls_via_3ec(const GfaCsrTopology& topo,
         // Filtros: internal_node_count >= 1 (descarta degenerados)
         if (internal < 1) { continue; }
 
-        std::sort(bd_nodes.begin(), bd_nodes.end());
+        // ── Fase 5b: ordering DFS-based (alinhado com vg next_along_cycle)
+        // Em vez de sort(node_id) que gera pairs sem semântica de
+        // adjacência no cycle, fazer DFS dentro do componente 3-EC para
+        // identificar a ordem natural dos boundary sides. Pairs consecutivos
+        // nessa ordem são semanticamente adjacentes no ciclo do cactus.
+        auto ordered_sides = dfs_order_boundaries(bg, side_to_comp, c, bds);
+
+        // Mapeia sides ordenados → node IDs únicos (preserva ordem DFS)
+        std::vector<uint64_t> ordered_nodes;
+        ordered_nodes.reserve(ordered_sides.size());
+        std::unordered_set<uint64_t> seen_nodes;
+        for (uint64_t s : ordered_sides) {
+            const uint64_t v = s >> 1;
+            if (seen_nodes.insert(v).second) { ordered_nodes.push_back(v); }
+        }
+        if (ordered_nodes.size() < 2) { continue; }
+
         const auto emit = [&](uint64_t src, uint64_t snk) {
             if (src == snk) { return; }
             SnarlRecord rec{};
@@ -660,12 +724,12 @@ find_snarls_via_3ec(const GfaCsrTopology& topo,
             out.push_back(rec);
         };
 
-        if (bd_nodes.size() <= 4) {
-            for (size_t i = 0; i + 1 < bd_nodes.size(); ++i) {
-                emit(bd_nodes[i], bd_nodes[i + 1]);
+        if (ordered_nodes.size() <= 4) {
+            for (size_t i = 0; i + 1 < ordered_nodes.size(); ++i) {
+                emit(ordered_nodes[i], ordered_nodes[i + 1]);
             }
         } else {
-            emit(bd_nodes.front(), bd_nodes.back());
+            emit(ordered_nodes.front(), ordered_nodes.back());
         }
     }
 
