@@ -17,8 +17,8 @@ if [[ ! -x "$BILLI" ]]; then
     exit 1
 fi
 
-printf "%-40s %-12s %-12s %-12s %s\n" "test" "billi(BB+HP)" "ggql_paten" "ggql_sese" "ggql_vgstyle"
-printf "%-40s %-12s %-12s %-12s %s\n" "----" "------------" "----------" "---------" "------------"
+printf "%-40s %-13s %-7s %-7s %-9s %s\n" "test" "billi(BB+HP)" "paten" "sese" "vgstyle" "wrapper"
+printf "%-40s %-13s %-7s %-7s %-9s %s\n" "----" "-------------" "-----" "----" "-------" "-------"
 
 for gfa in $(find "$TESTDIR" -name "*.gfa" | sort); do
     name="$(basename "$gfa" .gfa)"
@@ -41,11 +41,12 @@ for gfa in $(find "$TESTDIR" -name "*.gfa" | sort); do
         continue
     fi
 
-    # Roda nossas 3 implementações via bubble_vs_snarl
-    bvs_out=$("$BVS" "$real_idx" 2>&1)
+    # Roda nossas 4 implementações via bubble_vs_snarl
+    bvs_out=$(GGQL_BILLI_PATH="$BILLI" "$BVS" "$real_idx" 2>&1)
     paten=$(echo "$bvs_out" | grep -oP "F1\+F2\): +\K\d+")
     sese=$(echo "$bvs_out" | grep -oP "Billi/SESE\): +\K\d+")
     vgstyle=$(echo "$bvs_out" | grep -oP "vgstyle, refactor\): +\K\d+")
+    wrapper=$(echo "$bvs_out" | grep -oP "billi, wrapper\): +\K\d+")
 
-    printf "%-40s %-12s %-12s %-12s %s\n" "$label" "${billi_total}(${bb}/${hp})" "${paten:-0}" "${sese:-0}" "${vgstyle:-0}"
+    printf "%-40s %-13s %-7s %-7s %-9s %s\n" "$label" "${billi_total}(${bb}/${hp})" "${paten:-0}" "${sese:-0}" "${vgstyle:-0}" "${wrapper:-0}"
 done

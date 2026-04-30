@@ -67,5 +67,19 @@ std::vector<SnarlRecord> find_all_snarls_vgstyle(const GfaCsrTopology& topo,
 std::vector<SnarlRecord> find_all_snarls_sese(const GfaCsrTopology& topo,
                                                int num_threads = 1);
 
+// Wrapper que invoca o binário Billi (at-cg/billi) como subprocess.
+// Garante por construção: resultado IDÊNTICO ao Billi de referência.
+//
+// Pré-requisito: binário Billi acessível via GGQL_BILLI_PATH (env var)
+// ou em /tmp/billi/billi como fallback. Compile o Billi com:
+//   cd /tmp && git clone https://github.com/at-cg/billi.git
+//   cd billi && sed -i 's|-I ~/include|-I src/include|' makefile && make
+//
+// Usage:
+//   auto snarls = find_all_snarls_billi(topology);
+//   // snarls = exatamente o que `billi decompose` reportaria.
+std::vector<SnarlRecord> find_all_snarls_billi(const GfaCsrTopology& topo,
+                                                int num_threads = 1);
+
 } // namespace snarl_decomposition
 } // namespace ggql

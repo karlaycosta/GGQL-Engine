@@ -93,5 +93,12 @@ int main(int argc, char* argv[]) {
     std::printf("snarls (find_all_snarls_sese, Billi/SESE):   %lu  (em %.3f s)\n",
                 static_cast<unsigned long>(snarls_sese.size()), sec_sese);
 
+    // ── 6. find_all_snarls_billi (wrapper subprocess do Billi) ───────────────
+    const auto t4 = clk::now();
+    auto snarls_billi = ggql::snarl_decomposition::find_all_snarls_billi(topo, 1);
+    const double sec_billi = std::chrono::duration<double>(clk::now() - t4).count();
+    std::printf("snarls (find_all_snarls_billi, wrapper):     %lu  (em %.3f s)\n",
+                static_cast<unsigned long>(snarls_billi.size()), sec_billi);
+
     return 0;
 }
