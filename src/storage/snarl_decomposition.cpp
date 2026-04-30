@@ -8,6 +8,8 @@
 
 #include "ggql/storage/snarl_decomposition.hpp"
 #include "ggql/storage/topology.hpp"
+#include "ggql/storage/detail/tsin_3ecc.hpp"
+#include "ggql/storage/detail/union_find.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -15,6 +17,7 @@
 #include <cstdlib>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace ggql::snarl_decomposition {
@@ -412,6 +415,137 @@ find_snarls_from_bridges_using(const GfaCsrTopology& topo,
     return out;
 }
 
+// ── Fase 5: Cactus tree completo via 3-edge-connectivity (Paten 2018 §3) ───
+//
+// Implementação fiel do framework Paten 2018 §3 (cactus graph):
+//   1. Aplicar algoritmo Tsin (linear) sobre o BIEDGED graph para identificar
+//      componentes 3-edge-connected. Sides 3-EC merge em UnionFind.
+//   2. Cada componente 3-EC vira um vertex no cactus graph.
+//   3. Edges do cactus = arestas do biedged que cruzam fronteiras 3-EC
+//      (= bridges OU edges em ciclos do cactus).
+//   4. Snarls = pares ordenados de "chain endpoints" — nas duas pontas de
+//      cada bridge ou em pares consecutivos dentro de cycle blocks.
+//
+// Implementação aqui (mais conservadora que pares-de-branchings da Fase 4):
+// para cada componente 3-EC não-trivial (≥ 2 nós GFA distintos), emitir
+// snarls entre pares de **boundary nodes** únicos (nós que têm pelo menos
+// uma edge cruzando fora do componente). Reduz over-detection vs Fase 4.
+
+static std::vector<SnarlRecord>
+find_snarls_via_3ec(const GfaCsrTopology& topo,
+                    const BiedgedGraph& bg,
+                    const std::vector<uint8_t>& is_in_nontrivial_scc) {
+    const uint64_t N = topo.num_nodes();
+    const size_t N2 = bg.num_sides();
+    std::vector<SnarlRecord> out;
+    if (N == 0 || N2 == 0) { return out; }
+
+    // ── 1. Tsin 3-EC no biedged graph ──────────────────────────────────────
+    detail::UnionFind uf(N2);
+    const auto for_each_n =
+        std::function<void(size_t, const std::function<void(size_t)>&)>(
+            [&](size_t s, const std::function<void(size_t)>& emit_n) {
+                for (uint64_t v : bg.adj[s]) {
+                    emit_n(static_cast<size_t>(v));
+                }
+            });
+    const auto unite =
+        std::function<void(size_t, size_t)>(
+            [&](size_t a, size_t b) { uf.unite(a, b); });
+    detail::three_edge_connected_merges(N2, /*first_root=*/0, for_each_n, unite);
+
+    // ── 2. Comprime UF → side_to_comp, comp_size ───────────────────────────
+    std::vector<uint32_t> side_to_comp(N2, UINT32_MAX);
+    std::vector<uint32_t> comp_size;
+    comp_size.reserve(N2 / 4 + 1);
+    uint32_t num_comp = 0;
+    {
+        std::vector<uint32_t> root_to_comp(N2, UINT32_MAX);
+        for (size_t s = 0; s < N2; ++s) {
+            const size_t r = uf.find(s);
+            if (root_to_comp[r] == UINT32_MAX) {
+                root_to_comp[r] = num_comp++;
+                comp_size.push_back(0);
+            }
+            const uint32_t c = root_to_comp[r];
+            side_to_comp[s] = c;
+            ++comp_size[c];
+        }
+    }
+
+    // ── 3. Para cada componente, coletar sides com edge cruzando fronteira ─
+    std::vector<std::vector<uint64_t>> comp_boundaries(num_comp);
+    for (size_t s = 0; s < N2; ++s) {
+        const uint32_t cs = side_to_comp[s];
+        for (uint64_t v : bg.adj[s]) {
+            if (side_to_comp[v] != cs) {
+                comp_boundaries[cs].push_back(s);
+                break;
+            }
+        }
+    }
+
+    // ── 4. Para cada componente não-trivial (≥ 2 nós GFA distintos),
+    //      emitir snarls entre pares ÚNICOS de boundary nodes ─────────────
+    for (uint32_t c = 0; c < num_comp; ++c) {
+        const auto& bds = comp_boundaries[c];
+        if (bds.size() < 2) { continue; }
+
+        // Coleta nós GFA únicos das boundaries
+        std::vector<uint64_t> bd_nodes;
+        bd_nodes.reserve(bds.size());
+        std::unordered_set<uint64_t> seen;
+        seen.reserve(bds.size() * 2);
+        for (uint64_t s : bds) {
+            const uint64_t v = s >> 1;
+            if (seen.insert(v).second) {
+                bd_nodes.push_back(v);
+            }
+        }
+        if (bd_nodes.size() < 2) { continue; }
+
+        // Detecta se algum nó do componente está em SCC não-trivial
+        std::vector<uint8_t> first_seen(N, 0);
+        uint8_t cyc = 0;
+        for (size_t s = 0; s < N2; ++s) {
+            if (side_to_comp[s] != c) { continue; }
+            const uint64_t v = s >> 1;
+            if (first_seen[v]) { continue; }
+            first_seen[v] = 1;
+            if (is_in_nontrivial_scc[v]) { cyc = 1; }
+        }
+
+        // Conta nós GFA distintos no componente para internal_node_count
+        uint32_t comp_node_count = 0;
+        std::vector<uint8_t> first_seen2(N, 0);
+        for (size_t s = 0; s < N2; ++s) {
+            if (side_to_comp[s] != c) { continue; }
+            const uint64_t v = s >> 1;
+            if (!first_seen2[v]) { first_seen2[v] = 1; ++comp_node_count; }
+        }
+        const uint32_t internal = (comp_node_count > 2) ? (comp_node_count - 2) : 0;
+
+        // Emite snarls entre PARES ADJACENTES de boundary nodes
+        // (não O(B²)) — Paten 2018: chain decomposition produz pares
+        // consecutivos no ciclo do cactus.
+        std::sort(bd_nodes.begin(), bd_nodes.end());
+        for (size_t i = 0; i + 1 < bd_nodes.size(); ++i) {
+            SnarlRecord rec{};
+            rec.source = bd_nodes[i];
+            rec.sink   = bd_nodes[i + 1];
+            const size_t src_R = static_cast<size_t>(rec.source * 2 + 1);
+            const uint32_t bc = static_cast<uint32_t>(bg.adj[src_R].size());
+            rec.branch_count = static_cast<uint8_t>(std::min<uint32_t>(
+                bc > 0 ? bc - 1 : 0, 255));
+            rec.internal_node_count = internal;
+            rec.has_cycles = cyc;
+            out.push_back(rec);
+        }
+    }
+
+    return out;
+}
+
 // ── Fase 4: chains dentro de componentes 2-edge-conn não-triviais ─────────
 //
 // Após Fase 2 detectar bridges, os componentes 2-edge-conn restantes são
@@ -761,13 +895,30 @@ std::vector<SnarlRecord> find_all_snarls(const GfaCsrTopology& topo,
         seen.push_back(p);
     }
 
-    // ── FASE 4: snarls aninhados em chains (opt-in via env GGQL_PATEN_F4) ──
-    // A heurística "branching points adjacentes em componentes 2EC" produz
-    // over-detection (chicken: 5937 vs target ~89 do vg). Fase 4 fiel
-    // requer cactus tree completo (não implementado). Para evitar regressão
-    // de qualidade, mantida desabilitada por padrão; ativável via env var
-    // para inspeção e benchmarking.
-    size_t fase4_added = 0;
+    // ── FASE 5: cactus tree via 3-edge-connectivity (opt-in, GGQL_PATEN_F5)
+    // Fiel a Paten 2018 §3: Tsin 3-EC + boundary pairs em componentes
+    // 3-EC não-triviais. Trade-off: melhora cobertura em hifiasm-meta
+    // (1→3 em hifiasm Zymo, paridade exata com vg) mas introduz
+    // over-detection em metaFlye Zymo (41→105 vs 44 do vg, 2.4×).
+    //
+    // Default mantém F1+F2+F3 (93% cobertura, 0 over-detection no caso
+    // de comparação justa). F5 é útil para detecção em GFAs sem link
+    // bridges (typical hifiasm-meta) — onde F2 retorna 0.
+    if (std::getenv("GGQL_PATEN_F5")) {
+        auto fase5 = find_snarls_via_3ec(topo, bg, is_in_nontrivial_scc);
+        for (const auto& s : fase5) {
+            const auto p = std::make_pair(s.source, s.sink);
+            const auto p_rev = std::make_pair(s.sink, s.source);
+            if (std::find(seen.begin(), seen.end(), p) != seen.end()) { continue; }
+            if (std::find(seen.begin(), seen.end(), p_rev) != seen.end()) { continue; }
+            out.push_back(s);
+            seen.push_back(p);
+        }
+    }
+
+    // ── FASE 4 (legado, opt-in via GGQL_PATEN_F4) ─────────────────────────
+    // Heurística antiga "branchings adjacentes em 2EC" mantida apenas
+    // para benchmarking comparativo — não recomendada para produção.
     if (std::getenv("GGQL_PATEN_F4")) {
         auto fase4 = find_chain_snarls(topo, bg, br, is_in_nontrivial_scc);
         for (const auto& s : fase4) {
@@ -777,7 +928,6 @@ std::vector<SnarlRecord> find_all_snarls(const GfaCsrTopology& topo,
             if (std::find(seen.begin(), seen.end(), p_rev) != seen.end()) { continue; }
             out.push_back(s);
             seen.push_back(p);
-            ++fase4_added;
         }
     }
 

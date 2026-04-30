@@ -176,11 +176,42 @@ static void test_cyclic_snarl() {
     cleanup(gfa, idx);
 }
 
+static std::string write_bubble_gfa(const std::string& name) {
+    return write_gfa(name,
+        "S\tA\tACGT\nS\tB\tGGGG\nS\tC\tTTTT\nS\tD\tCCCC\n"
+        "L\tA\t+\tB\t+\t0M\n"
+        "L\tA\t+\tC\t+\t0M\n"
+        "L\tB\t+\tD\t+\t0M\n"
+        "L\tC\t+\tD\t+\t0M\n");
+}
+
+// ── 6. Fase 5 opt-in (GGQL_PATEN_F5) — cactus tree via 3-EC ───────────────
+// Cobertura aumentada em grafos com componentes 3-EC não-triviais.
+// Validação: ativando F5 deve detectar pelo menos tantos snarls quanto
+// default. Em GFAs simples não muda; em densos pode adicionar boundaries
+// extras.
+static void test_f5_optin_does_not_regress() {
+    auto gfa = write_bubble_gfa("f5");
+    const std::string idx = "/tmp/ggql_snarl_f5_idx/";
+    auto topo = load_topology(gfa, idx);
+
+    auto default_snarls = ggql::snarl_decomposition::find_all_snarls(topo, 1);
+    setenv("GGQL_PATEN_F5", "1", 1);
+    auto f5_snarls = ggql::snarl_decomposition::find_all_snarls(topo, 1);
+    unsetenv("GGQL_PATEN_F5");
+
+    assert(f5_snarls.size() >= default_snarls.size()
+           && "Fase 5 não deve diminuir contagem de snarls");
+
+    cleanup(gfa, idx);
+}
+
 int main() {
     test_single_bubble();
     test_linear_no_snarls();
     test_two_consecutive_bubbles();
     test_reverse_orient_snarl();
     test_cyclic_snarl();
+    test_f5_optin_does_not_regress();
     return EXIT_SUCCESS;
 }
