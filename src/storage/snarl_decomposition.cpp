@@ -324,31 +324,12 @@ SCCDecomp compute_scc(const GfaCsrTopology& topo) {
 //   - has_cycles: 1 se algum nó interno está em SCC não-trivial do grafo
 //                 dirigido original
 static std::vector<SnarlRecord>
-find_snarls_from_bridges(const GfaCsrTopology& topo,
-                         const std::vector<uint8_t>& is_in_nontrivial_scc) {
+find_snarls_from_bridges_using(const GfaCsrTopology& topo,
+                               const BiedgedGraph& bg,
+                               const Bridges& br,
+                               const std::vector<uint8_t>& is_in_nontrivial_scc) {
     const uint64_t N = topo.num_nodes();
     if (N == 0) { return {}; }
-
-    auto links = extract_link_records(topo);
-    BiedgedGraph bg(N, links);
-    auto br = find_bridges_2ec(bg);
-
-    if (std::getenv("GGQL_DEBUG_BIEDGED")) {
-        size_t spine_bridges = 0, link_bridges = 0;
-        for (const auto& [a, b] : br.bridges) {
-            if ((a >> 1) == (b >> 1)) ++spine_bridges;
-            else ++link_bridges;
-        }
-        std::fprintf(stderr,
-                     "[debug biedged] N=%lu links=%lu sides=%lu bridges=%lu (spine=%lu link=%lu) 2EC_comps=%u\n",
-                     static_cast<unsigned long>(N),
-                     static_cast<unsigned long>(links.size()),
-                     static_cast<unsigned long>(bg.num_sides()),
-                     static_cast<unsigned long>(br.bridges.size()),
-                     static_cast<unsigned long>(spine_bridges),
-                     static_cast<unsigned long>(link_bridges),
-                     br.num_components_2ec);
-    }
     (void)is_in_nontrivial_scc;  // referenciado em comp_has_cycle abaixo
 
     // Tamanho de cada componente 2-edge-conn (em nós GFA distintos).
@@ -426,6 +407,99 @@ find_snarls_from_bridges(const GfaCsrTopology& topo,
         rec.has_cycles = comp_has_cycle[comp_id];
 
         out.push_back(rec);
+    }
+
+    return out;
+}
+
+// ── Fase 4: chains dentro de componentes 2-edge-conn não-triviais ─────────
+//
+// Após Fase 2 detectar bridges, os componentes 2-edge-conn restantes são
+// "cycles" no cactus tree. Snarls aninhados dentro desses cycles correspondem
+// a pairs de "branching points" — sides com grau ≥ 3 no grafo biedged
+// (degree=2 = "linear" no cycle; degree≥3 = ponto de bifurcação interna).
+//
+// Aproximação Paten 2018 simplificada:
+//   Para cada componente 2EC com ≥ 2 nós GFA distintos:
+//     1. Coletar branching sides (adj.size() > 2)
+//     2. Emitir 1 snarl por par adjacente de branchings na ordem do componente
+//        (= snarls aninhados sequenciais)
+//
+// Custo: O(C × B²) onde C=#componentes, B=#branchings/componente.
+// Em metagenomas densos, B tipicamente <= 50 → factível.
+
+static std::vector<SnarlRecord>
+find_chain_snarls(const GfaCsrTopology& topo,
+                  const BiedgedGraph& bg,
+                  const Bridges& br,
+                  const std::vector<uint8_t>& is_in_nontrivial_scc) {
+    const uint64_t N = topo.num_nodes();
+    std::vector<SnarlRecord> out;
+    if (N == 0) { return out; }
+
+    // 1. Agrupa sides por componente 2-edge-conn
+    std::vector<std::vector<uint64_t>> comp_to_sides(br.num_components_2ec);
+    for (uint64_t s = 0; s < bg.num_sides(); ++s) {
+        const uint32_t c = br.component_2ec[s];
+        comp_to_sides[c].push_back(s);
+    }
+
+    // 2. Para cada componente com ≥ 4 sides distintos (= 2+ nós GFA),
+    //    identificar branching points e emitir snarls par-a-par.
+    for (uint32_t c = 0; c < br.num_components_2ec; ++c) {
+        const auto& sides = comp_to_sides[c];
+        if (sides.size() < 4) { continue; }
+
+        // Conta nós GFA distintos no componente
+        std::vector<uint64_t> gfa_nodes;
+        gfa_nodes.reserve(sides.size() / 2);
+        {
+            std::vector<uint8_t> seen(N, 0);
+            for (uint64_t s : sides) {
+                const uint64_t v = s >> 1;
+                if (!seen[v]) { seen[v] = 1; gfa_nodes.push_back(v); }
+            }
+        }
+        if (gfa_nodes.size() < 2) { continue; }
+
+        // Branching sides: degree ≥ 3 no biedged
+        std::vector<uint64_t> branchings;
+        branchings.reserve(sides.size() / 4);
+        for (uint64_t s : sides) {
+            if (bg.adj[static_cast<size_t>(s)].size() >= 3) {
+                branchings.push_back(s);
+            }
+        }
+        if (branchings.size() < 2) { continue; }
+
+        // Marca se algum nó do componente está em SCC não-trivial (cycle)
+        uint8_t cyc = 0;
+        for (uint64_t v : gfa_nodes) {
+            if (is_in_nontrivial_scc[v]) { cyc = 1; break; }
+        }
+
+        // Para evitar explosão O(B²), emitir snarls apenas entre branchings
+        // ADJACENTES (consecutivos na ordem que aparecem no componente).
+        // Aproximação Paten: cada par adjacente de branchings define um nível
+        // da chain. Cobertura aproximada de aninhamento sequencial sem o
+        // custo de cactus tree completo.
+        const size_t B = branchings.size();
+        for (size_t i = 0; i + 1 < B; ++i) {
+            const uint64_t na = branchings[i]     >> 1;
+            const uint64_t nb = branchings[i + 1] >> 1;
+            if (na == nb) { continue; }
+
+            SnarlRecord rec{};
+            rec.source = std::min(na, nb);
+            rec.sink   = std::max(na, nb);
+            const size_t src_R = static_cast<size_t>(rec.source * 2 + 1);
+            const uint32_t bc = static_cast<uint32_t>(bg.adj[src_R].size());
+            rec.branch_count = static_cast<uint8_t>(std::min<uint32_t>(
+                bc > 0 ? bc - 1 : 0, 255));
+            rec.internal_node_count = static_cast<uint32_t>(gfa_nodes.size() - 2);
+            rec.has_cycles = cyc;
+            out.push_back(rec);
+        }
     }
 
     return out;
@@ -649,7 +723,29 @@ std::vector<SnarlRecord> find_all_snarls(const GfaCsrTopology& topo,
 
     // ── FASE 2: bridges no bidirected graph ─────────────────────────────────
     // Captura snarls que envolvem orientação reversa (~70% dos snarls do vg).
-    auto fase2 = find_snarls_from_bridges(topo, is_in_nontrivial_scc);
+    // Reusa bg + br também na Fase 4 para evitar recomputação.
+    auto links = extract_link_records(topo);
+    BiedgedGraph bg(N, links);
+    auto br = find_bridges_2ec(bg);
+
+    if (std::getenv("GGQL_DEBUG_BIEDGED")) {
+        size_t spine_bridges = 0, link_bridges = 0;
+        for (const auto& [a, b] : br.bridges) {
+            if ((a >> 1) == (b >> 1)) ++spine_bridges;
+            else ++link_bridges;
+        }
+        std::fprintf(stderr,
+                     "[debug biedged] N=%lu links=%lu sides=%lu bridges=%lu (spine=%lu link=%lu) 2EC_comps=%u\n",
+                     static_cast<unsigned long>(N),
+                     static_cast<unsigned long>(links.size()),
+                     static_cast<unsigned long>(bg.num_sides()),
+                     static_cast<unsigned long>(br.bridges.size()),
+                     static_cast<unsigned long>(spine_bridges),
+                     static_cast<unsigned long>(link_bridges),
+                     br.num_components_2ec);
+    }
+
+    auto fase2 = find_snarls_from_bridges_using(topo, bg, br, is_in_nontrivial_scc);
 
     // Merge deduplicado por (source, sink). Em conflito, manter o registro
     // da Fase 1 (mais preciso para internal_node_count via topological sweep).
@@ -663,6 +759,26 @@ std::vector<SnarlRecord> find_all_snarls(const GfaCsrTopology& topo,
         if (std::find(seen.begin(), seen.end(), p_rev) != seen.end()) { continue; }
         out.push_back(s);
         seen.push_back(p);
+    }
+
+    // ── FASE 4: snarls aninhados em chains (opt-in via env GGQL_PATEN_F4) ──
+    // A heurística "branching points adjacentes em componentes 2EC" produz
+    // over-detection (chicken: 5937 vs target ~89 do vg). Fase 4 fiel
+    // requer cactus tree completo (não implementado). Para evitar regressão
+    // de qualidade, mantida desabilitada por padrão; ativável via env var
+    // para inspeção e benchmarking.
+    size_t fase4_added = 0;
+    if (std::getenv("GGQL_PATEN_F4")) {
+        auto fase4 = find_chain_snarls(topo, bg, br, is_in_nontrivial_scc);
+        for (const auto& s : fase4) {
+            const auto p = std::make_pair(s.source, s.sink);
+            const auto p_rev = std::make_pair(s.sink, s.source);
+            if (std::find(seen.begin(), seen.end(), p) != seen.end()) { continue; }
+            if (std::find(seen.begin(), seen.end(), p_rev) != seen.end()) { continue; }
+            out.push_back(s);
+            seen.push_back(p);
+            ++fase4_added;
+        }
     }
 
     // ── FASE 3: snarls cíclicos via SCCs não-triviais ──────────────────────
