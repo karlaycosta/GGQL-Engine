@@ -24,6 +24,7 @@
 #include <fmt/color.h>
 #include <fmt/core.h>
 #include <ggql/ingest/ingestor.hpp>
+#include <ggql/ingest/profile.hpp>
 #include <ggql/query/grammar.hpp>
 #include <ggql/query/query_planner.hpp>
 #include <ggql/utils.hpp>
@@ -64,6 +65,7 @@ struct Session {
 
     std::string idx_path;
     std::string gfa_path;
+    ggql::IngestProfile profile = ggql::IngestProfile::Pangenome;
 
     [[nodiscard]] bool has_data() const noexcept { return planner != nullptr; }
 };
@@ -157,6 +159,7 @@ static void print_stats(const Session& sess) {
 // ─── Carregamento de GFA ──────────────────────────────────────────────────────
 
 static void load_gfa(Session& sess, const std::string& gfa_path, int threads,
+                     ggql::IngestProfile profile = ggql::IngestProfile::Pangenome,
                      const std::string& idx_path_override = "") {
     namespace fs = std::filesystem;
 
@@ -173,19 +176,25 @@ static void load_gfa(Session& sess, const std::string& gfa_path, int threads,
         std::filesystem::create_directories(std::filesystem::path(idx_path).parent_path());
     }
 
+    const auto pf = ggql::flags_for(profile);
+
     fmt::println("  Carregando {} ...", gfa_path);
     fmt::println("  MetadadosIdx : {}", idx_path);
     fmt::println("  Threads      : {}", threads);
+    fmt::println("  Perfil       : {}", ggql::name_of(profile));
 
     sess.ingestor.reset();
 
     const auto result = sess.ingestor.ingest(gfa_path, threads,
                                              /*gamma=*/2.0,
-                                             /*verbose=*/false, /*save_metada*/ true,
-                                             /*build_topology=*/true,
-                                             /*build_fm_index=*/true,
+                                             /*verbose=*/false,
+                                             pf.save_metadata,
+                                             pf.build_topology,
+                                             pf.build_fm_index,
                                              /*max_gbwt_paths=*/1'000'000,
-                                             /*keep_gbwt_tmp=*/false, idx_path);
+                                             /*keep_gbwt_tmp=*/false, idx_path,
+                                             pf.build_gbwt,
+                                             pf.build_snarls);
 
     if (!result) {
         fmt::println(stderr, "  Erro no ingest: {}", result.error());
@@ -294,7 +303,7 @@ static void repl_loop(Session& sess, int threads) {
                 if (path.empty()) {
                     fmt::println(stderr, "  Uso: .load <arquivo.gfa>");
                 } else {
-                    load_gfa(sess, path, threads);
+                    load_gfa(sess, path, threads, sess.profile);
                 }
             } else {
                 fmt::println(stderr, "  Comando desconhecido: {}  (tente .help)", trimmed);
@@ -354,6 +363,9 @@ struct Args {
     std::string idx_path;
     int threads = 4;
     bool help = false;
+    ggql::IngestProfile profile = ggql::IngestProfile::Pangenome;
+    bool profile_err = false;
+    std::string profile_err_val;
 };
 
 static Args parse_args(int argc, char** argv) {
@@ -370,6 +382,15 @@ static Args parse_args(int argc, char** argv) {
             if (ec != std::errc{}) {
                 a.threads = 4; // fallback: padrão
             }
+        } else if ((arg == "--profile" || arg == "-p") && i + 1 < argc) {
+            const std::string_view pv{argv[++i]};
+            auto parsed = ggql::parse_profile(pv);
+            if (!parsed) {
+                a.profile_err = true;
+                a.profile_err_val = pv;
+            } else {
+                a.profile = *parsed;
+            }
         } else if (arg == "--help" || arg == "-h") {
             a.help = true;
         } else {
@@ -384,6 +405,11 @@ static void usage(const char* prog) {
                "  -g, --gfa <arquivo.gfa>    carrega e indexa o arquivo GFA\n"
                "  -i, --idx <dir>            abre diretório de cache/metadata binário\n"
                "  -t, --threads <N>          threads para ingest (padrão: 4)\n"
+               "  -p, --profile <name>       perfil de ingestão (padrão: pangenome)\n"
+               "                              pangenome     — tudo habilitado\n"
+               "                              metagenomics  — sem gBWT, sem snarls\n"
+               "                              assembly      — sem gBWT, com snarls\n"
+               "                              comparative   — com gBWT, sem snarls\n"
                "  -h, --help                 esta mensagem\n",
                prog);
 }
@@ -417,14 +443,21 @@ int main(int argc, char** argv) {
         usage(argv[0]);
         return 0;
     }
+    if (args.profile_err) {
+        fmt::println(stderr,
+                     "Perfil desconhecido: '{}'  (use: pangenome|metagenomics|assembly|comparative)",
+                     args.profile_err_val);
+        return 1;
+    }
 
     print_banner();
 
     Session sess;
+    sess.profile = args.profile;
 
     // ── Carrega GFA se fornecido pela linha de comando ─────────────────────────
     if (!args.gfa_path.empty()) {
-        load_gfa(sess, args.gfa_path, args.threads, args.idx_path);
+        load_gfa(sess, args.gfa_path, args.threads, args.profile, args.idx_path);
     } else if (!args.idx_path.empty()) {
         // Apenas IDX em cache — sem topologia CSR no momento a não ser que lida num save state
         sess.idx_path = args.idx_path;

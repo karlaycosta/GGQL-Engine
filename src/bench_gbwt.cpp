@@ -13,6 +13,7 @@
 
 #include "ggql/cli/console.hpp"
 #include "ggql/ingest/ingestor.hpp"
+#include "ggql/ingest/profile.hpp"
 
 #include <chrono>
 #include <fmt/color.h>
@@ -39,20 +40,36 @@ static size_t read_process_rss_kb() {
 }
 
 int main(int argc, char* argv[]) {
-    // Coleta args posicionais, ignora flags (--quiet/-q).
+    // Coleta args posicionais e flags (--quiet/-q, --profile/-p <name>).
     bool quiet = false;
+    ggql::IngestProfile profile = ggql::IngestProfile::Pangenome;
     std::vector<const char*> pos;
     for (int i = 1; i < argc; ++i) {
         std::string_view a{argv[i]};
         if (a == "--quiet" || a == "-q") {
             quiet = true;
+        } else if ((a == "--profile" || a == "-p") && i + 1 < argc) {
+            const std::string_view pv{argv[++i]};
+            auto parsed = ggql::parse_profile(pv);
+            if (!parsed) {
+                fmt::println(stderr,
+                             "Perfil desconhecido: '{}'  (use: pangenome|metagenomics|assembly|comparative)",
+                             pv);
+                return 1;
+            }
+            profile = *parsed;
         } else {
             pos.push_back(argv[i]);
         }
     }
 
     if (pos.empty()) {
-        fmt::println(stderr, "Uso: bench_gbwt <arquivo.gfa> [threads] [max_paths] [--quiet|-q]");
+        fmt::println(stderr,
+                     "Uso: bench_gbwt <arquivo.gfa> [threads] [max_paths] [--quiet|-q] [--profile|-p <name>]\n"
+                     "  --profile pangenome     (default) tudo habilitado\n"
+                     "  --profile metagenomics  sem gBWT, sem snarls\n"
+                     "  --profile assembly      sem gBWT, com snarls\n"
+                     "  --profile comparative   com gBWT, sem snarls");
         return 1;
     }
 
@@ -64,10 +81,12 @@ int main(int argc, char* argv[]) {
     const size_t max_paths = (max_p_arg == 0) ? std::numeric_limits<size_t>::max() : max_p_arg;
 
     const std::string cache_dir = path + ".idx";
+    const auto pf = ggql::flags_for(profile);
 
     cli::title("bench_gbwt · GfaCsrTopology gBWT");
     cli::kv("Arquivo", path);
     cli::kv("Threads", std::to_string(threads));
+    cli::kv("Perfil", std::string(ggql::name_of(profile)));
     cli::kv("Max paths", (max_p_arg == 0) ? "ilimitado" : std::to_string(max_p_arg));
     cli::kv("Cache idx", cache_dir);
 
@@ -76,14 +95,16 @@ int main(int argc, char* argv[]) {
     ggql::GfaIngestorMmapParallel ingestor;
 
     auto res = ingestor.ingest(path, threads,
-                               2.0,   // gamma padrão MPHF
-                               !quiet, // verbose
-                               true,  // save_metadata
-                               true,  // build_topology
-                               true,  // build_fm_index
+                               2.0,             // gamma padrão MPHF
+                               !quiet,          // verbose
+                               pf.save_metadata,
+                               pf.build_topology,
+                               pf.build_fm_index,
                                max_paths,
-                               false, // keep_gbwt_tmp
-                               cache_dir);
+                               false,           // keep_gbwt_tmp
+                               cache_dir,
+                               pf.build_gbwt,
+                               pf.build_snarls);
 
     if (!res) {
         cli::blank();
