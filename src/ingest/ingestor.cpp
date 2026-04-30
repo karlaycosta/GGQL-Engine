@@ -985,11 +985,52 @@ GfaIngestorMmapParallel::load_index(const std::string& dir, std::optional<uint64
 // ARCH-3 — auxiliares do orquestrador ingest()
 // ══════════════════════════════════════════════════════════════════════════════
 
+// FASE 1 — upgrade incremental de cache.
+// Quando o cache em disco cobre tudo exceto snarls.bin, derivamos snarls
+// diretamente da topology já carregada (find_snarls_streaming opera apenas
+// na CSR — não precisa do GFA original). Custo HPRC: ~5 s vs ~165 s da
+// reingestão completa.
+IngestStatsParallel GfaIngestorMmapParallel::complete_with_snarls(
+    const std::string& cache_dir,
+    IngestStatsParallel stats, bool verbose,
+    std::chrono::high_resolution_clock::time_point t_start) {
+    using clock = std::chrono::high_resolution_clock;
+    using sec = std::chrono::duration<double>;
+
+    if (!res_.topology) {
+        return stats; // proteção; caller já validou
+    }
+    try {
+        const auto t0 = clock::now();
+        std::vector<SnarlRecord> snarls;
+        snarls.reserve(1024);
+        find_snarls_streaming(*res_.topology,
+                              [&](const SnarlRecord& r) { snarls.push_back(r); });
+        const auto count = snarls.size();
+        res_.topology->set_snarls(std::move(snarls));
+        res_.topology->save_snarls_only(cache_dir);
+        if (verbose) {
+            cli::step_ok_end(
+                "Snarls (FIND BUBBLE)",
+                fmt::format("{} snarls em {}",
+                            cli::format_count(count),
+                            ggql::format_seconds(sec(clock::now() - t0).count())));
+        }
+    } catch (const std::exception& e) {
+        fmt::print(stderr,
+                   "  [snarls] AVISO: falha ao computar snarls — FIND BUBBLE indisponível: {}\n",
+                   e.what());
+    }
+    stats.elapsed_total_s = sec(clock::now() - t_start).count();
+    return stats;
+}
+
 std::optional<IngestStatsParallel>
 GfaIngestorMmapParallel::try_cache_fast(const std::string& cache_dir, uint64_t file_sz,
                                         int64_t file_mtime_ns, bool save_metadata,
                                         bool build_fm_index, bool build_gbwt, bool build_snarls,
-                                        bool verbose, bool& out_skip) {
+                                        bool verbose, bool& out_skip,
+                                        bool& out_complete_snarls_only) {
     auto res = load_index(cache_dir, std::nullopt, file_sz, file_mtime_ns);
     if (!res) {
         return std::nullopt;
@@ -1006,12 +1047,20 @@ GfaIngestorMmapParallel::try_cache_fast(const std::string& cache_dir, uint64_t f
         }
         return *res;
     }
-    // gbwt/snarls ausentes não podem ser produzidos via skip_pass1 path
-    // (que apenas regrava metadata/fm_index). Força ingestão completa.
-    if (!gbwt_ok || !snarls_ok) {
+    // FASE 1: só snarls ausente, tudo o resto presente → derivar da CSR já
+    // carregada sem reler o GFA. Caller completa com find_snarls_streaming.
+    if (meta_ok && fm_ok && gbwt_ok && !snarls_ok && res_.topology) {
+        out_complete_snarls_only = true;
         if (verbose) {
-            cli::step_info(fmt::format("cache incompleto ({}) — re-ingestão completa",
-                                       !gbwt_ok ? "gbwts.bin" : "snarls.bin"));
+            cli::step_info("cache parcial (só snarls falta) — completando incrementalmente");
+        }
+        return *res;
+    }
+    // gbwt ausente: requer W/P-lines do GFA — re-ingestão completa (Fase 2 não
+    // implementada ainda).
+    if (!gbwt_ok) {
+        if (verbose) {
+            cli::step_info("cache incompleto (gbwts.bin) — re-ingestão completa");
         }
         return std::nullopt;
     }
@@ -1025,7 +1074,8 @@ GfaIngestorMmapParallel::try_cache_fast(const std::string& cache_dir, uint64_t f
 std::optional<IngestStatsParallel>
 GfaIngestorMmapParallel::try_cache_hash(const std::string& cache_dir, bool save_metadata,
                                         bool build_gbwt, bool build_snarls,
-                                        bool verbose, uint64_t& out_hash, bool& out_skip) {
+                                        bool verbose, uint64_t& out_hash, bool& out_skip,
+                                        bool& out_complete_snarls_only) {
     out_hash = XXH64(res_.mmap->data, res_.mmap->size, 0);
     res_.mmap.reset();
 
@@ -1044,10 +1094,16 @@ GfaIngestorMmapParallel::try_cache_hash(const std::string& cache_dir, bool save_
         }
         return *res;
     }
-    if (!gbwt_ok || !snarls_ok) {
+    if (meta_ok && gbwt_ok && !snarls_ok && res_.topology) {
+        out_complete_snarls_only = true;
         if (verbose) {
-            cli::step_info(fmt::format("cache incompleto ({}) — re-ingestão completa",
-                                       !gbwt_ok ? "gbwts.bin" : "snarls.bin"));
+            cli::step_info("cache parcial (só snarls falta) — completando incrementalmente");
+        }
+        return *res;
+    }
+    if (!gbwt_ok) {
+        if (verbose) {
+            cli::step_info("cache incompleto (gbwts.bin) — re-ingestão completa");
         }
         return std::nullopt;
     }
@@ -1566,10 +1622,15 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
         cli::step_info("cache dir", cache_dir);
     }
 
+    bool complete_snarls_only = false;
+
     // ── fast path O(1): mtime + size ─────────────────────────────────────────
     if (auto cached = try_cache_fast(cache_dir, file_sz, file_mtime_ns, save_metadata,
                                      build_fm_index, build_gbwt, build_snarls,
-                                     verbose, skip_pass1)) {
+                                     verbose, skip_pass1, complete_snarls_only)) {
+        if (complete_snarls_only) {
+            cached = complete_with_snarls(cache_dir, *cached, verbose, t_start);
+        }
         return *cached;
     }
 
@@ -1586,7 +1647,11 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
     // ── verificação por hash XXH64 (só se mtime não casou) ───────────────────
     if (!skip_pass1) {
         if (auto cached = try_cache_hash(cache_dir, save_metadata, build_gbwt, build_snarls,
-                                         verbose, gfa_hash, skip_pass1)) {
+                                         verbose, gfa_hash, skip_pass1,
+                                         complete_snarls_only)) {
+            if (complete_snarls_only) {
+                cached = complete_with_snarls(cache_dir, *cached, verbose, t_start);
+            }
             return *cached;
         }
         // try_cache_hash fechou mmap_data_; reabrir para pass1

@@ -426,6 +426,12 @@ class GfaCsrTopology {
 
     void set_snarls(std::vector<SnarlRecord> s) noexcept { snarls_ = std::move(s); }
 
+    // Persiste apenas snarls.bin no diretório (sem reescrever os outros
+    // arquivos de cache). Usado pelo upgrade incremental: quando o usuário
+    // sobe de um perfil sem snarls (metagenomics/comparative) para um com
+    // snarls (assembly/pangenome), evita reescrever CSR/EF/gBWT já em disco.
+    void save_snarls_only(const std::string& dir) const;
+
   private:
     // ── Threshold de paralelismo ─────────────────────────────────────────────
     // Abaixo deste valor o overhead do fork/join OpenMP (~0.5 ms) supera o

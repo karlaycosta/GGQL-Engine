@@ -205,6 +205,61 @@ static void test_profile_parsing() {
     assert(name_of(IngestProfile::Metagenomics) == "metagenomics");
 }
 
+// ── 7. Upgrade incremental: comparative → pangenome só roda snarls ─────────
+// Cache de comparative tem gBWT mas não snarls. Subir para pangenome deve
+// completar APENAS snarls sem reler o GFA (Fase 1 do upgrade incremental).
+// Validação: elapsed_io1_s == 0 indica que Pass1 foi pulado.
+static std::string write_bubble_gfa(const std::string& name) {
+    const std::string path = "/tmp/ggql_profiles_" + name + ".gfa";
+    std::ofstream f(path);
+    // Bolha simples: A → {B,C} → D, mais um path A,B,D
+    f << "S\tA\tACGT\n"
+      << "S\tB\tGGGG\n"
+      << "S\tC\tTTTT\n"
+      << "S\tD\tCCCC\n"
+      << "L\tA\t+\tB\t+\t0M\n"
+      << "L\tA\t+\tC\t+\t0M\n"
+      << "L\tB\t+\tD\t+\t0M\n"
+      << "L\tC\t+\tD\t+\t0M\n"
+      << "P\tp1\tA+,B+,D+\t*\n";
+    return path;
+}
+
+static void test_incremental_snarls_upgrade() {
+    auto gfa = write_bubble_gfa("incr");
+    const std::string idx = "/tmp/ggql_profiles_incr_idx/";
+    fs::remove_all(idx);
+
+    // 1ª: comparative (gBWT sim, snarls não)
+    {
+        const auto pf = ggql::flags_for(ggql::IngestProfile::Comparative);
+        ggql::GfaIngestorMmapParallel ing;
+        auto res = ing.ingest(gfa, 1, 2.0, false,
+                              pf.save_metadata, pf.build_topology, pf.build_fm_index,
+                              1000, false, idx, pf.build_gbwt, pf.build_snarls);
+        assert(res.has_value());
+        assert(fs::exists(idx + "/gbwts.bin"));
+        assert(!fs::exists(idx + "/snarls.bin"));
+    }
+
+    // 2ª: pangenome — só snarls falta. Deve completar incrementalmente.
+    {
+        const auto pf = ggql::flags_for(ggql::IngestProfile::Pangenome);
+        ggql::GfaIngestorMmapParallel ing;
+        auto res = ing.ingest(gfa, 1, 2.0, false,
+                              pf.save_metadata, pf.build_topology, pf.build_fm_index,
+                              1000, false, idx, pf.build_gbwt, pf.build_snarls);
+        assert(res.has_value());
+        assert(fs::exists(idx + "/snarls.bin"));
+        // Pass1/Pass2 não devem ter rodado — elapsed_io1_s == 0 prova que o
+        // path foi cache + complete_with_snarls, não reingestão completa.
+        assert(res->elapsed_io1_s == 0.0
+               && "upgrade comparative→pangenome não deve reler GFA");
+    }
+
+    cleanup(gfa, idx);
+}
+
 int main() {
     test_validation_gbwt_requires_topology();
     test_validation_snarls_requires_topology();
@@ -213,5 +268,6 @@ int main() {
     test_cache_invalidates_on_gbwt_upgrade();
     test_cache_hit_when_flags_match();
     test_profile_parsing();
+    test_incremental_snarls_upgrade();
     return EXIT_SUCCESS;
 }

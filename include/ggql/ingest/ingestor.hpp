@@ -465,19 +465,32 @@ class GfaIngestorMmapParallel {
                    uint64_t file_sz, int64_t file_mtime_ns,
                    bool save_metadata, bool build_fm_index,
                    bool build_gbwt, bool build_snarls,
-                   bool verbose, bool& out_skip);
+                   bool verbose, bool& out_skip,
+                   bool& out_complete_snarls_only);
 
     // Computa hash XXH64 de mmap_data_ (reseta mmap_data_) e verifica cache por hash.
     // Retorna stats em hit completo; nullopt em miss ou hit parcial.
     // Define out_hash e out_skip=true em hit parcial. mmap_data_ fica fechado ao retornar.
+    // Define out_complete_snarls_only=true quando o cache cobre tudo exceto
+    // snarls; nesse caso retorna *res (não nullopt) e o caller deve completar
+    // com find_snarls_streaming antes de retornar (cache em RAM permanece).
     std::optional<IngestStatsParallel>
     try_cache_hash(const std::string& cache_dir,
                    bool save_metadata, bool build_gbwt, bool build_snarls,
-                   bool verbose, uint64_t& out_hash, bool& out_skip);
+                   bool verbose, uint64_t& out_hash, bool& out_skip,
+                   bool& out_complete_snarls_only);
 
     // Ingestão completa (Pass1 + MPHF + Union-Find + Pass2 + topologia + save).
     // Pré-condição: mmap_data_ está aberto.
     // skip_pass1=true → salta Pass1 (MPHF já no cache), executa apenas Pass2.
+    // FASE 1 do upgrade incremental de cache: completa snarls.bin a partir
+    // da topology já carregada em res_.topology, sem reler o GFA. Atualiza
+    // stats.elapsed_total_s e grava snarls.bin no cache_dir.
+    IngestStatsParallel complete_with_snarls(
+        const std::string& cache_dir,
+        IngestStatsParallel stats, bool verbose,
+        std::chrono::high_resolution_clock::time_point t_start);
+
     std::expected<IngestStatsParallel, std::string>
     run_full_ingest(int num_threads, double gamma, bool verbose,
                     bool save_metadata, bool build_topology,

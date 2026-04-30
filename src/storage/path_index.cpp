@@ -586,21 +586,31 @@ void GfaCsrTopology::save(const std::string& dir) const {
     }
 
     // Salva snarls (FIND BUBBLE) — só grava se foi populado pelo ingestor
-    if (!snarls_.empty()) {
-        std::ofstream out(dir + "/snarls.bin", std::ios::binary);
-        if (!out) {
-            throw std::runtime_error("[topology::save] Falha ao abrir snarls.bin");
-        }
-        const uint64_t n = static_cast<uint64_t>(snarls_.size());
-        out.write(reinterpret_cast<const char*>(&n), sizeof(n));
-        out.write(reinterpret_cast<const char*>(snarls_.data()),
-                  static_cast<std::streamsize>(n * sizeof(SnarlRecord)));
-        if (!out) {
-            throw std::runtime_error("[topology::save] Erro de I/O ao escrever snarls.bin");
-        }
-    }
+    save_snarls_only(dir);
 
     cli::ok("índice salvo", dir);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// save_snarls_only — grava apenas snarls.bin, sem reescrever CSR/gBWT/etc.
+// ════════════════════════════════════════════════════════════════════════════
+void GfaCsrTopology::save_snarls_only(const std::string& dir) const {
+    if (snarls_.empty()) { return; }
+
+    namespace fs = std::filesystem;
+    fs::create_directories(dir);
+
+    std::ofstream out(dir + "/snarls.bin", std::ios::binary);
+    if (!out) {
+        throw std::runtime_error("[topology::save_snarls_only] Falha ao abrir snarls.bin");
+    }
+    const uint64_t n = static_cast<uint64_t>(snarls_.size());
+    out.write(reinterpret_cast<const char*>(&n), sizeof(n));
+    out.write(reinterpret_cast<const char*>(snarls_.data()),
+              static_cast<std::streamsize>(n * sizeof(SnarlRecord)));
+    if (!out) {
+        throw std::runtime_error("[topology::save_snarls_only] Erro de I/O em snarls.bin");
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
