@@ -218,6 +218,15 @@ class GfaIngestorMmapParallel {
     //                     ::unlink(st.gbwt_tmp_path.c_str()).
     //   cache_dir       — subdiretório (relativo ao pai de filepath) onde os
     //                     arquivos de cache são lidos/gravados (padrão: ".idx/").
+    //   build_gbwt      — se true (padrão), constrói o índice gBWT de paths
+    //                     quando há W/P-lines coletadas. Requer build_topology.
+    //                     false → economiza RAM e tempo em perfis sem queries
+    //                     de path (ex: metagenômica). Path stats também são
+    //                     puladas.
+    //   build_snarls    — se true (padrão), detecta snarls via 3-ECC + cactus
+    //                     após a topologia ser construída. Requer build_topology.
+    //                     Custo: ~5 GB de RAM no HPRC (24 B/nó). false →
+    //                     desabilita FIND BUBBLE mas economiza RAM significativa.
     //
     // Retorno:
     //   std::expected com IngestStatsParallel em caso de sucesso, ou uma
@@ -226,7 +235,8 @@ class GfaIngestorMmapParallel {
     ingest(const std::string& filepath, int num_threads = 1, double gamma = 2.0,
            bool verbose = true, bool save_metadata = true, bool build_topology = false,
            bool build_fm_index = false, size_t max_gbwt_paths = 0, bool keep_gbwt_tmp = false,
-           const std::string& cache_dir = ".idx/");
+           const std::string& cache_dir = ".idx/",
+           bool build_gbwt = true, bool build_snarls = true);
 
     // Retorna ponteiro para a topologia CSR construída (nullptr se build_topology=false)
     GfaCsrTopology* topology() noexcept { return res_.topology.get(); }
@@ -472,6 +482,7 @@ class GfaIngestorMmapParallel {
                     bool save_metadata, bool build_topology,
                     bool build_fm_index, size_t max_gbwt_paths,
                     bool keep_gbwt_tmp, const std::string& cache_dir,
+                    bool build_gbwt, bool build_snarls,
                     uint64_t file_sz, int64_t file_mtime_ns,
                     uint64_t gfa_hash, bool skip_pass1,
                     std::chrono::high_resolution_clock::time_point t_start);

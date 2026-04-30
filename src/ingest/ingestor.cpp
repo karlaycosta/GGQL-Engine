@@ -1035,12 +1035,13 @@ GfaIngestorMmapParallel::try_cache_hash(const std::string& cache_dir, bool save_
 std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_full_ingest(
     int num_threads, double gamma, bool verbose, bool save_metadata, bool build_topology,
     bool build_fm_index, size_t max_gbwt_paths, bool keep_gbwt_tmp, const std::string& cache_dir,
+    bool build_gbwt, bool build_snarls,
     uint64_t file_sz, int64_t file_mtime_ns, uint64_t gfa_hash, bool skip_pass1,
     std::chrono::high_resolution_clock::time_point t_start) {
     using clock = std::chrono::high_resolution_clock;
     using sec = std::chrono::duration<double>;
 
-    const bool do_early_remap = build_topology && (max_gbwt_paths > 0);
+    const bool do_early_remap = build_topology && build_gbwt && (max_gbwt_paths > 0);
 
     Pass1Result pass1;
     auto t0 = clock::now();
@@ -1116,7 +1117,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
         }
         cli::phase(2, fmt::format("Passada 2 paralela — {}", suffix));
     }
-    const bool collect_paths = (max_gbwt_paths > 0) && build_topology;
+    const bool collect_paths = (max_gbwt_paths > 0) && build_topology && build_gbwt;
     auto pass2_ = process_data_parallel(num_threads, write_db, build_topology, collect_paths,
                                         max_gbwt_paths, verbose);
     auto& stats = pass2_.stats;
@@ -1215,7 +1216,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
         }
 
         GfaCsrTopology::RemapResult remap_res;
-        if (!gbwt_groups.empty() && !do_early_remap) {
+        if (build_gbwt && !gbwt_groups.empty() && !do_early_remap) {
             auto t_remap0 = clock::now();
             remap_res = res_.topology->make_component_remap(num_threads);
             res_.topology->remap_node_ids(remap_res.remap);
@@ -1281,7 +1282,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
             }
         }
 
-        if (!gbwt_groups.empty()) {
+        if (build_gbwt && !gbwt_groups.empty()) {
             const size_t total_paths = stats.path_count;
             if (verbose) {
                 cli::phase(5, fmt::format("gBWT paralelo · {} paths em {} grupos",
@@ -1449,7 +1450,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
         // Roda após GBWT/FM-Index para que estruturas pesadas do 3-ECC já tenham
         // espaço; ainda assim, find_snarls_streaming aloca ~5 GB no HPRC (24 B
         // por nó em TsinNode + UF + cactus). Single-thread por enquanto.
-        if (res_.topology) {
+        if (build_snarls && res_.topology) {
             try {
                 auto t_snarls0 = clock::now();
                 std::vector<SnarlRecord> snarls;
@@ -1501,7 +1502,8 @@ std::expected<IngestStatsParallel, std::string>
 GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, double gamma,
                                 bool verbose, bool save_metadata, bool build_topology,
                                 bool build_fm_index, size_t max_gbwt_paths, bool keep_gbwt_tmp,
-                                const std::string& cache_dir) {
+                                const std::string& cache_dir,
+                                bool build_gbwt, bool build_snarls) {
     using clock = std::chrono::high_resolution_clock;
 
     if (num_threads <= 0) {
@@ -1565,7 +1567,8 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
 
     // ── ingestão completa (pass1 + MPHF + pass2 + topologia + save) ──────────
     return run_full_ingest(num_threads, gamma, verbose, save_metadata, build_topology,
-                           build_fm_index, max_gbwt_paths, keep_gbwt_tmp, cache_dir, file_sz,
+                           build_fm_index, max_gbwt_paths, keep_gbwt_tmp, cache_dir,
+                           build_gbwt, build_snarls, file_sz,
                            file_mtime_ns, gfa_hash, skip_pass1, t_start);
 }
 
