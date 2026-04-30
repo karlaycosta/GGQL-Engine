@@ -10,6 +10,7 @@ set(INGEST_TEST_SRCS
     test_ingestor_manifest.cpp
     test_ingestor_parse.cpp
     test_ingestor_profiles.cpp
+    test_snarl_decomposition.cpp
 )
 
 foreach(src ${INGEST_TEST_SRCS})

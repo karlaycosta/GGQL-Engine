@@ -74,6 +74,7 @@ add_library(ggql_storage STATIC
     src/storage/graph_algorithms.cpp
     src/storage/path_index.cpp
     src/storage/fm_index.cpp
+    src/storage/snarl_decomposition.cpp
 )
 target_compile_options(ggql_storage PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
@@ -120,6 +121,16 @@ target_compile_options(bench_gbwt PRIVATE
 )
 target_link_options(bench_gbwt PRIVATE -flto=auto)
 target_link_libraries(bench_gbwt PRIVATE ggql_ingest)
+
+# ── bubble_vs_snarl (diagnóstico) ─────────────────────────
+# Tool de diagnóstico que compara find_snarls_streaming (cactus) com
+# find_bubbles (Onodera 2013) no mesmo .idx. Usado para validar
+# discrepâncias contra ferramentas externas (vg snarls, BubbleGun).
+add_executable(bubble_vs_snarl tools/bubble_vs_snarl.cpp)
+target_compile_options(bubble_vs_snarl PRIVATE
+    -O3 -march=native -fopenmp -fno-strict-aliasing
+)
+target_link_libraries(bubble_vs_snarl PRIVATE ggql_storage)
 
 
 
