@@ -79,5 +79,12 @@ int main(int argc, char* argv[]) {
                     static_cast<unsigned long>(total_internal));
     }
 
+    // ── 4. find_all_snarls_vgstyle (refactor inspirado em vg) ────────────────
+    const auto t2 = clk::now();
+    auto snarls_vgstyle = ggql::snarl_decomposition::find_all_snarls_vgstyle(topo, 1);
+    const double sec_vg = std::chrono::duration<double>(clk::now() - t2).count();
+    std::printf("snarls (find_all_snarls_vgstyle, refactor):  %lu  (em %.3f s)\n",
+                static_cast<unsigned long>(snarls_vgstyle.size()), sec_vg);
+
     return 0;
 }
