@@ -50,5 +50,12 @@ namespace snarl_decomposition {
 std::vector<SnarlRecord> find_all_snarls(const GfaCsrTopology& topo,
                                          int num_threads = 1);
 
+// Variante alinhada ao algoritmo vg `IntegratedSnarlFinder` (em construção).
+// Implementa cycles_in_cactus + bridge forest + decomposição recursiva.
+// Retorna SnarlRecord para compat de API.
+// Stub atual — preenchido em chunks incrementais.
+std::vector<SnarlRecord> find_all_snarls_vgstyle(const GfaCsrTopology& topo,
+                                                  int num_threads = 1);
+
 } // namespace snarl_decomposition
 } // namespace ggql

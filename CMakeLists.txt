@@ -75,6 +75,7 @@ add_library(ggql_storage STATIC
     src/storage/path_index.cpp
     src/storage/fm_index.cpp
     src/storage/snarl_decomposition.cpp
+    src/storage/snarl_decomposition_vgstyle.cpp
 )
 target_compile_options(ggql_storage PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
