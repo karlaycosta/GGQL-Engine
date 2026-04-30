@@ -371,23 +371,47 @@ static std::vector<SnarlRecord> decompose_via_stack(
             }
         }
 
-        for (size_t i = 0; i + 1 < W; ++i) {
-            const uint64_t inbound  = cycle_walk[i];
-            const uint64_t outbound = cycle_walk[i + 1];
-            const uint64_t na = inbound  >> 1;
-            const uint64_t nb = outbound >> 1;
-            if (na == nb) { continue; } // unary snarl rejected (vg style)
+        // Política vg-aligned:
+        //   - Cycles curtos (W <= 3): emit todos pares consecutivos
+        //     (cobre snarls aninhados em chains pequenas)
+        //   - Cycles longos (W > 3): emit apenas 1 snarl representativo
+        //     (primeiro e último do walk — vg emite estrutura de chain
+        //     toplevel única; aninhados emergem da decomposição recursiva
+        //     que ainda não implementamos completamente)
+        if (W <= 3) {
+            for (size_t i = 0; i + 1 < W; ++i) {
+                const uint64_t inbound  = cycle_walk[i];
+                const uint64_t outbound = cycle_walk[i + 1];
+                const uint64_t na = inbound  >> 1;
+                const uint64_t nb = outbound >> 1;
+                if (na == nb) { continue; }
 
-            SnarlRecord rec{};
-            rec.source = std::min(na, nb);
-            rec.sink   = std::max(na, nb);
-            const size_t src_R = static_cast<size_t>(rec.source * 2 + 1);
-            const uint32_t bc = static_cast<uint32_t>(bg_adj[src_R].size());
-            rec.branch_count = static_cast<uint8_t>(std::min<uint32_t>(
-                bc > 0 ? bc - 1 : 0, 255));
-            rec.internal_node_count = internal;
-            rec.has_cycles = cyc;
-            out.push_back(rec);
+                SnarlRecord rec{};
+                rec.source = std::min(na, nb);
+                rec.sink   = std::max(na, nb);
+                const size_t src_R = static_cast<size_t>(rec.source * 2 + 1);
+                const uint32_t bc = static_cast<uint32_t>(bg_adj[src_R].size());
+                rec.branch_count = static_cast<uint8_t>(std::min<uint32_t>(
+                    bc > 0 ? bc - 1 : 0, 255));
+                rec.internal_node_count = internal;
+                rec.has_cycles = cyc;
+                out.push_back(rec);
+            }
+        } else {
+            const uint64_t na = cycle_walk.front() >> 1;
+            const uint64_t nb = cycle_walk.back()  >> 1;
+            if (na != nb) {
+                SnarlRecord rec{};
+                rec.source = std::min(na, nb);
+                rec.sink   = std::max(na, nb);
+                const size_t src_R = static_cast<size_t>(rec.source * 2 + 1);
+                const uint32_t bc = static_cast<uint32_t>(bg_adj[src_R].size());
+                rec.branch_count = static_cast<uint8_t>(std::min<uint32_t>(
+                    bc > 0 ? bc - 1 : 0, 255));
+                rec.internal_node_count = internal;
+                rec.has_cycles = cyc;
+                out.push_back(rec);
+            }
         }
         (void)side_to_comp; (void)cid;
     }
