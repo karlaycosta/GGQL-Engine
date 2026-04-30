@@ -1270,7 +1270,12 @@ GfaIngestorMmapParallel::complete_with_gbwt(
 
     if (pass2.gbwt_groups.empty()) {
         if (verbose) {
-            cli::step_info("Sem W/P-lines no GFA — nada para construir");
+            cli::step_info("Sem W/P-lines no GFA — pulando construção de gBWT");
+        }
+        // Mesmo sem paths, snarls (se solicitado) ainda devem ser computados
+        // a partir da topology em cache. Não retorna cedo aqui.
+        if (build_snarls && !std::filesystem::exists(cache_dir + "/snarls.bin")) {
+            stats = complete_with_snarls(cache_dir, std::move(stats), verbose, t_start);
         }
         stats.elapsed_total_s = sec(clock::now() - t_start).count();
         return stats;
