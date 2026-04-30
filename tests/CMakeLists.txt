@@ -9,6 +9,7 @@ set(INGEST_TEST_SRCS
     test_ingestor_binpack.cpp
     test_ingestor_manifest.cpp
     test_ingestor_parse.cpp
+    test_ingestor_profiles.cpp
 )
 
 foreach(src ${INGEST_TEST_SRCS})

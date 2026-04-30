@@ -98,6 +98,40 @@ GgqlIngestStats ggql_ingestor_ingest(
     void* user_data
 );
 
+// ── Perfis de ingestão ───────────────────────────────────────────────────────
+// Mapeia casos de uso biológicos a um subconjunto de estruturas a construir.
+// Documentação: docs/ingest_profiles.md
+typedef enum {
+    GGQL_PROFILE_PANGENOME    = 0, // tudo habilitado (default)
+    GGQL_PROFILE_METAGENOMICS = 1, // sem gBWT, sem snarls
+    GGQL_PROFILE_ASSEMBLY     = 2, // sem gBWT, com snarls
+    GGQL_PROFILE_COMPARATIVE  = 3, // com gBWT, sem snarls
+} GgqlIngestProfile;
+
+// Resolve um nome textual ("pangenome", "metagenomics", "assembly", "comparative",
+// ou aliases curtos: "pan", "meta", "asm", "comp") para o enum.
+// Retorna -1 em nome inválido. *out preenchido apenas em sucesso.
+int32_t ggql_profile_from_name(const char* name, GgqlIngestProfile* out);
+
+// Retorna o nome canônico (aponta para string estática). NULL em enum inválido.
+const char* ggql_profile_name(GgqlIngestProfile p);
+
+// Variante de ggql_ingestor_ingest que recebe perfil pronto. Equivalente a
+// chamar ggql_ingestor_ingest com os flags derivados de `profile`.
+GgqlIngestStats ggql_ingestor_ingest_with_profile(
+    GgqlIngestorHandle handle,
+    const char* filepath,
+    int num_threads,
+    double gamma,
+    bool verbose,
+    GgqlIngestProfile profile,
+    size_t max_gbwt_paths,
+    bool keep_gbwt_tmp,
+    const char* cache_dir,
+    GgqlEventCallback event_cb,
+    void* user_data
+);
+
 // Reseta o ingestor
 void ggql_ingestor_reset(GgqlIngestorHandle handle);
 

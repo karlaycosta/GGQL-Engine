@@ -2,6 +2,7 @@
 #include "ggql/cli/console.hpp"
 #include "ggql/ingest/ingestor.hpp"
 #include "ggql/ingest/metadata_store.hpp"
+#include "ggql/ingest/profile.hpp"
 #include "ggql/query/grammar.hpp"
 #include "ggql/query/query_planner.hpp"
 #include "ggql/storage/fm_index.hpp"
@@ -104,7 +105,9 @@ void ggql_ingestor_reset(GgqlIngestorHandle handle) {
 // diferentes sobrescrevam a error_message de outra.
 thread_local std::string last_error_message;
 
-GgqlIngestStats ggql_ingestor_ingest(
+namespace {
+
+GgqlIngestStats do_ingest_ffi(
     GgqlIngestorHandle handle,
     const char* filepath,
     int num_threads,
@@ -113,6 +116,8 @@ GgqlIngestStats ggql_ingestor_ingest(
     bool save_metadata,
     bool build_topology,
     bool build_fm_index,
+    bool build_gbwt,
+    bool build_snarls,
     size_t max_gbwt_paths,
     bool keep_gbwt_tmp,
     const char* cache_dir,
@@ -149,7 +154,9 @@ GgqlIngestStats ggql_ingestor_ingest(
             build_fm_index,
             max_gbwt_paths,
             keep_gbwt_tmp,
-            std::string(cache_dir)
+            std::string(cache_dir),
+            build_gbwt,
+            build_snarls
         );
 
         if (result.has_value()) {
@@ -191,6 +198,73 @@ GgqlIngestStats ggql_ingestor_ingest(
     }
 
     return stats;
+}
+
+} // namespace
+
+GgqlIngestStats ggql_ingestor_ingest(
+    GgqlIngestorHandle handle,
+    const char* filepath,
+    int num_threads,
+    double gamma,
+    bool verbose,
+    bool save_metadata,
+    bool build_topology,
+    bool build_fm_index,
+    size_t max_gbwt_paths,
+    bool keep_gbwt_tmp,
+    const char* cache_dir,
+    GgqlEventCallback event_cb,
+    void* user_data
+) {
+    // API legada: gBWT e snarls seguem build_topology (todos acoplados, como
+    // era antes da separação). Para controle granular, use
+    // ggql_ingestor_ingest_with_profile.
+    return do_ingest_ffi(handle, filepath, num_threads, gamma, verbose,
+                         save_metadata, build_topology, build_fm_index,
+                         /*build_gbwt=*/build_topology,
+                         /*build_snarls=*/build_topology,
+                         max_gbwt_paths, keep_gbwt_tmp, cache_dir,
+                         event_cb, user_data);
+}
+
+GgqlIngestStats ggql_ingestor_ingest_with_profile(
+    GgqlIngestorHandle handle,
+    const char* filepath,
+    int num_threads,
+    double gamma,
+    bool verbose,
+    GgqlIngestProfile profile,
+    size_t max_gbwt_paths,
+    bool keep_gbwt_tmp,
+    const char* cache_dir,
+    GgqlEventCallback event_cb,
+    void* user_data
+) {
+    const auto pf = flags_for(static_cast<IngestProfile>(profile));
+    return do_ingest_ffi(handle, filepath, num_threads, gamma, verbose,
+                         pf.save_metadata, pf.build_topology, pf.build_fm_index,
+                         pf.build_gbwt, pf.build_snarls,
+                         max_gbwt_paths, keep_gbwt_tmp, cache_dir,
+                         event_cb, user_data);
+}
+
+int32_t ggql_profile_from_name(const char* name, GgqlIngestProfile* out) {
+    if (!name || !out) { return -1; }
+    auto parsed = parse_profile(std::string_view(name));
+    if (!parsed) { return -1; }
+    *out = static_cast<GgqlIngestProfile>(*parsed);
+    return 0;
+}
+
+const char* ggql_profile_name(GgqlIngestProfile p) {
+    switch (p) {
+    case GGQL_PROFILE_PANGENOME:    return "pangenome";
+    case GGQL_PROFILE_METAGENOMICS: return "metagenomics";
+    case GGQL_PROFILE_ASSEMBLY:     return "assembly";
+    case GGQL_PROFILE_COMPARATIVE:  return "comparative";
+    }
+    return nullptr;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

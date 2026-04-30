@@ -505,18 +505,18 @@ void GfaCsrTopology::save(const std::string& dir) const {
     sdsl::store_to_file(ef_fwd_, dir + "/ef_fwd.sdsl");
     sdsl::store_to_file(ef_bwd_, dir + "/ef_bwd.sdsl");
 
-    // Salva gBWTs — conta apenas não-nulos (FIX BUG 6)
-    {
+    // Salva gBWTs — apenas se houver pelo menos um (não-nulo). Sem isso, ingest
+    // com build_gbwt=false ainda criaria gbwts.bin vazio, derrotando a
+    // validação de cache em try_cache_* (que checa fs::exists para decidir se
+    // o flag build_gbwt=true requer regeneração).
+    uint64_t n_valid = 0;
+    for (const auto& g : gbwts_) {
+        if (g) { ++n_valid; }
+    }
+    if (n_valid > 0) {
         std::ofstream out(dir + "/gbwts.bin", std::ios::binary);
         if (!out) {
             throw std::runtime_error("[topology::save] Falha ao abrir gbwts.bin");
-        }
-        // Conta apenas ponteiros não-nulos para evitar desserialização incorreta no load
-        uint64_t n_valid = 0;
-        for (const auto& g : gbwts_) {
-            if (g) {
-                ++n_valid;
-            }
         }
         out.write(reinterpret_cast<const char*>(&n_valid), sizeof(n_valid));
         for (const auto& g : gbwts_) {

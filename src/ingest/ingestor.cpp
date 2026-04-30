@@ -1006,6 +1006,15 @@ GfaIngestorMmapParallel::try_cache_fast(const std::string& cache_dir, uint64_t f
         }
         return *res;
     }
+    // gbwt/snarls ausentes não podem ser produzidos via skip_pass1 path
+    // (que apenas regrava metadata/fm_index). Força ingestão completa.
+    if (!gbwt_ok || !snarls_ok) {
+        if (verbose) {
+            cli::step_info(fmt::format("cache incompleto ({}) — re-ingestão completa",
+                                       !gbwt_ok ? "gbwts.bin" : "snarls.bin"));
+        }
+        return std::nullopt;
+    }
     out_skip = true;
     if (verbose) {
         cli::step_info("cache RAM ok (mtime) — prosseguindo para Passada 2 (metadata)");
@@ -1034,6 +1043,13 @@ GfaIngestorMmapParallel::try_cache_hash(const std::string& cache_dir, bool save_
             cli::step_ok_end("cache hit (hash) — carregado");
         }
         return *res;
+    }
+    if (!gbwt_ok || !snarls_ok) {
+        if (verbose) {
+            cli::step_info(fmt::format("cache incompleto ({}) — re-ingestão completa",
+                                       !gbwt_ok ? "gbwts.bin" : "snarls.bin"));
+        }
+        return std::nullopt;
     }
     out_skip = true;
     if (verbose) {
@@ -1518,6 +1534,10 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
 
     if (num_threads <= 0) {
         return std::unexpected("num_threads deve ser positivo");
+    }
+    if (!build_topology && (build_gbwt || build_snarls)) {
+        return std::unexpected(
+            "build_gbwt/build_snarls requerem build_topology=true (ambos dependem da CSR)");
     }
 
 #ifdef _OPENMP
