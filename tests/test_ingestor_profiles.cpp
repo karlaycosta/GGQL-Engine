@@ -260,6 +260,85 @@ static void test_incremental_snarls_upgrade() {
     cleanup(gfa, idx);
 }
 
+// ── 8. Upgrade incremental Fase 2: metagenomics → comparative ──────────────
+// Cache de metagenomics não tem gBWT. Subir para comparative deve fazer Pass2
+// paths-only (sem reconstruir MPHF/topology/metadata/fm_index).
+// Validação: elapsed_io1_s == 0 e elapsed_topology_s == 0 indicam que MPHF e
+// CSR não foram reconstruídos.
+static void test_incremental_gbwt_upgrade() {
+    auto gfa = write_bubble_gfa("incr_gbwt");
+    const std::string idx = "/tmp/ggql_profiles_incr_gbwt_idx/";
+    fs::remove_all(idx);
+
+    // 1ª: metagenomics (sem gBWT, sem snarls)
+    {
+        const auto pf = ggql::flags_for(ggql::IngestProfile::Metagenomics);
+        ggql::GfaIngestorMmapParallel ing;
+        auto res = ing.ingest(gfa, 1, 2.0, false,
+                              pf.save_metadata, pf.build_topology, pf.build_fm_index,
+                              0, false, idx, pf.build_gbwt, pf.build_snarls);
+        assert(res.has_value());
+        assert(!fs::exists(idx + "/gbwts.bin"));
+    }
+
+    // 2ª: comparative (gBWT sim, snarls não) — Fase 2.
+    {
+        const auto pf = ggql::flags_for(ggql::IngestProfile::Comparative);
+        ggql::GfaIngestorMmapParallel ing;
+        auto res = ing.ingest(gfa, 1, 2.0, false,
+                              pf.save_metadata, pf.build_topology, pf.build_fm_index,
+                              1000, false, idx, pf.build_gbwt, pf.build_snarls);
+        assert(res.has_value());
+        assert(fs::exists(idx + "/gbwts.bin"));
+        assert(res->path_count == 1);
+        // Pass1 NÃO rodou — elapsed_io1_s e elapsed_topology_s zerados.
+        assert(res->elapsed_io1_s == 0.0
+               && "Pass2 paths-only não deve reconstruir MPHF");
+        assert(res->elapsed_topology_s == 0.0
+               && "Pass2 paths-only não deve reconstruir CSR");
+        // Pass2 rodou — elapsed_ingest_s > 0.
+        assert(res->elapsed_ingest_s > 0.0
+               && "Pass2 paths-only deve ser executado");
+    }
+
+    cleanup(gfa, idx);
+}
+
+// ── 9. Upgrade incremental: metagenomics → pangenome ───────────────────────
+// Caso composto: precisa Fase 2 (gBWT) seguida de Fase 1 (snarls), ambos
+// derivados da topology em cache, sem reler segmentos/links do GFA.
+static void test_incremental_meta_to_pangenome() {
+    auto gfa = write_bubble_gfa("incr_full");
+    const std::string idx = "/tmp/ggql_profiles_incr_full_idx/";
+    fs::remove_all(idx);
+
+    // 1ª: metagenomics
+    {
+        const auto pf = ggql::flags_for(ggql::IngestProfile::Metagenomics);
+        ggql::GfaIngestorMmapParallel ing;
+        auto res = ing.ingest(gfa, 1, 2.0, false,
+                              pf.save_metadata, pf.build_topology, pf.build_fm_index,
+                              0, false, idx, pf.build_gbwt, pf.build_snarls);
+        assert(res.has_value());
+    }
+
+    // 2ª: pangenome — Fase 2 + Fase 1.
+    {
+        const auto pf = ggql::flags_for(ggql::IngestProfile::Pangenome);
+        ggql::GfaIngestorMmapParallel ing;
+        auto res = ing.ingest(gfa, 1, 2.0, false,
+                              pf.save_metadata, pf.build_topology, pf.build_fm_index,
+                              1000, false, idx, pf.build_gbwt, pf.build_snarls);
+        assert(res.has_value());
+        assert(fs::exists(idx + "/gbwts.bin"));
+        assert(fs::exists(idx + "/snarls.bin"));
+        assert(res->elapsed_io1_s == 0.0);
+        assert(res->elapsed_topology_s == 0.0);
+    }
+
+    cleanup(gfa, idx);
+}
+
 int main() {
     test_validation_gbwt_requires_topology();
     test_validation_snarls_requires_topology();
@@ -269,5 +348,7 @@ int main() {
     test_cache_hit_when_flags_match();
     test_profile_parsing();
     test_incremental_snarls_upgrade();
+    test_incremental_gbwt_upgrade();
+    test_incremental_meta_to_pangenome();
     return EXIT_SUCCESS;
 }

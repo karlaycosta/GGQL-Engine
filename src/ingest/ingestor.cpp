@@ -1025,12 +1025,114 @@ IngestStatsParallel GfaIngestorMmapParallel::complete_with_snarls(
     return stats;
 }
 
+// FASE 2 — upgrade incremental de cache.
+// Cache cobre MPHF + topology + metadata + (fm_index opcional), mas falta
+// gbwts.bin. Em vez de re-Pass1+Pass2 completos, fazemos um Pass2 paths-only
+// (sem coletar segmentos/links — esses já estão em disco) e reconstruímos
+// apenas o gBWT. Custo HPRC estimado: ~30 s vs ~165 s da reingestão completa.
+//
+// Pré-condição: res_.mmap, res_.mphf, res_.topology e remap_ já carregados.
+std::expected<IngestStatsParallel, std::string>
+GfaIngestorMmapParallel::complete_with_gbwt(
+    const std::string& /*filepath*/, const std::string& cache_dir,
+    int num_threads, size_t max_gbwt_paths, bool build_snarls,
+    bool verbose, IngestStatsParallel stats,
+    std::chrono::high_resolution_clock::time_point t_start) {
+    using clock = std::chrono::high_resolution_clock;
+    using sec = std::chrono::duration<double>;
+
+    if (!res_.mmap || !res_.mphf || !res_.topology) {
+        return std::unexpected("complete_with_gbwt: pré-condição inválida (cache não carregado)");
+    }
+
+    // bin_packing não é persistido — reseta para que process_data_parallel
+    // use num_threads bins simples (sem bin packing por componente).
+    num_bins_packed_ = 0;
+    bin_sigma_.clear();
+    comp_to_bin_.clear();
+
+    if (verbose) {
+        cli::phase(2, "Pass2 paths-only — coletando W/P-lines do GFA");
+    }
+    const auto t_p2_0 = clock::now();
+    const size_t mp = (max_gbwt_paths == 0) ? std::numeric_limits<size_t>::max() : max_gbwt_paths;
+    auto pass2 = process_data_parallel(num_threads,
+                                       /*collect_records=*/false,
+                                       /*collect_links=*/false,
+                                       /*collect_paths=*/true,
+                                       mp, verbose);
+    const auto t_p2_1 = clock::now();
+    stats.elapsed_ingest_s = sec(t_p2_1 - t_p2_0).count();
+    stats.path_count = pass2.stats.path_count;
+    stats.node_count = res_.topology->num_nodes();
+
+    if (pass2.gbwt_groups.empty()) {
+        if (verbose) {
+            cli::step_info("Sem W/P-lines no GFA — nada para construir");
+        }
+        stats.elapsed_total_s = sec(clock::now() - t_start).count();
+        return stats;
+    }
+
+    // Constrói gBWT a partir dos grupos coletados. Não fazemos remap nem
+    // repartition — a topology em cache já tem IDs sequenciais por componente
+    // (foi processada pelo Pass1 original quando foi criada), e os grupos do
+    // Pass2 paths-only já chegam com encoding final via parse_w/p_line.
+    if (verbose) {
+        cli::phase(5, fmt::format("gBWT paralelo · {} paths em {} grupos",
+                                  cli::format_count(stats.path_count),
+                                  pass2.gbwt_groups.size()));
+    }
+    const auto t_gb0 = clock::now();
+    const uint8_t node_width = pass2.node_width;
+    auto gbwt_t = res_.topology->build_path_index_parallel(
+        std::move(pass2.gbwt_groups), node_width, num_threads);
+    const auto t_gb1 = clock::now();
+    stats.elapsed_gbwt_s = gbwt_t.wall_s;
+    stats.gbwt_cpu_avg_s = gbwt_t.cpu_avg_s;
+    stats.gbwt_cpu_max_s = gbwt_t.cpu_max_s;
+    stats.gbwt_total_nodes = gbwt_t.total_nodes;
+    stats.gbwt_peak_rss_kb = gbwt_t.peak_rss_kb;
+    stats.gbwt_index_size_b = gbwt_t.index_size_b;
+    stats.path_count = res_.topology->path_count();
+    if (verbose) {
+        cli::step_ok_end("gBWT construído",
+                         fmt::format("{} paths · {} · {}",
+                                     cli::format_count(stats.path_count),
+                                     ggql::format_size(stats.gbwt_index_size_b),
+                                     ggql::format_seconds(sec(t_gb1 - t_gb0).count())));
+    }
+
+    // Path stats — usa metadata em cache para lengths.
+    // Reusa o caminho "GBWT decompression" pois não temos mais as sequências.
+    GfaMetadataStore meta;
+    try {
+        meta.load(cache_dir);
+        if (meta.lengths_span().size() == res_.topology->num_nodes()) {
+            res_.topology->build_path_stats(meta.lengths_span());
+        }
+    } catch (...) { /* path_stats fica vazio — ok */ }
+
+    // Salva apenas gbwts.bin + path_stats.bin + topology.bin (não toca
+    // metadata.bin/E_*/ef_*/fm_index.bin).
+    res_.topology->save_gbwt_only(cache_dir);
+
+    // Snarls (se solicitado e ainda não em cache).
+    if (build_snarls && !std::filesystem::exists(cache_dir + "/snarls.bin")) {
+        stats = complete_with_snarls(cache_dir, std::move(stats), verbose, t_start);
+    }
+
+    stats.elapsed_total_s = sec(clock::now() - t_start).count();
+    return stats;
+}
+
 std::optional<IngestStatsParallel>
 GfaIngestorMmapParallel::try_cache_fast(const std::string& cache_dir, uint64_t file_sz,
                                         int64_t file_mtime_ns, bool save_metadata,
                                         bool build_fm_index, bool build_gbwt, bool build_snarls,
                                         bool verbose, bool& out_skip,
-                                        bool& out_complete_snarls_only) {
+                                        bool& out_complete_snarls_only,
+                                        bool& out_complete_gbwt_only) {
     auto res = load_index(cache_dir, std::nullopt, file_sz, file_mtime_ns);
     if (!res) {
         return std::nullopt;
@@ -1056,11 +1158,14 @@ GfaIngestorMmapParallel::try_cache_fast(const std::string& cache_dir, uint64_t f
         }
         return *res;
     }
-    // gbwt ausente: requer W/P-lines do GFA — re-ingestão completa (Fase 2 não
-    // implementada ainda).
-    if (!gbwt_ok) {
+    // FASE 2: só gbwt (e possivelmente snarls) ausente. MPHF + topology +
+    // metadata em cache → caller faz Pass2 paths-only sobre o GFA, sem
+    // reconstruir CSR/EF/metadata. Retornamos nullopt para o caller seguir
+    // o fluxo de abrir mmap.
+    if (meta_ok && fm_ok && !gbwt_ok && res_.topology && res_.mphf) {
+        out_complete_gbwt_only = true;
         if (verbose) {
-            cli::step_info("cache incompleto (gbwts.bin) — re-ingestão completa");
+            cli::step_info("cache parcial (só gBWT falta) — Pass2 paths-only");
         }
         return std::nullopt;
     }
@@ -1075,12 +1180,17 @@ std::optional<IngestStatsParallel>
 GfaIngestorMmapParallel::try_cache_hash(const std::string& cache_dir, bool save_metadata,
                                         bool build_gbwt, bool build_snarls,
                                         bool verbose, uint64_t& out_hash, bool& out_skip,
-                                        bool& out_complete_snarls_only) {
+                                        bool& out_complete_snarls_only,
+                                        bool& out_complete_gbwt_only) {
     out_hash = XXH64(res_.mmap->data, res_.mmap->size, 0);
-    res_.mmap.reset();
+    // NÃO reseta mmap aqui: caller pode precisar para Pass2 paths-only.
+    // O reset original (que existia para liberar RAM) acontecerá quando
+    // load_index falhar e voltarmos para o caller reabrir.
 
     auto res = load_index(cache_dir, out_hash);
     if (!res) {
+        // Cache miss real: fecha mmap (caller reabrirá) e retorna nullopt.
+        res_.mmap.reset();
         return std::nullopt;
     }
 
@@ -1089,24 +1199,29 @@ GfaIngestorMmapParallel::try_cache_hash(const std::string& cache_dir, bool save_
     const bool snarls_ok = !build_snarls  || std::filesystem::exists(cache_dir + "/snarls.bin");
 
     if (meta_ok && gbwt_ok && snarls_ok) {
+        res_.mmap.reset(); // hit completo, mmap não é mais necessário
         if (verbose) {
             cli::step_ok_end("cache hit (hash) — carregado");
         }
         return *res;
     }
     if (meta_ok && gbwt_ok && !snarls_ok && res_.topology) {
+        res_.mmap.reset(); // Fase 1 não usa mmap
         out_complete_snarls_only = true;
         if (verbose) {
             cli::step_info("cache parcial (só snarls falta) — completando incrementalmente");
         }
         return *res;
     }
-    if (!gbwt_ok) {
+    if (meta_ok && !gbwt_ok && res_.topology && res_.mphf) {
+        // FASE 2: mmap permanece aberto para Pass2 paths-only.
+        out_complete_gbwt_only = true;
         if (verbose) {
-            cli::step_info("cache incompleto (gbwts.bin) — re-ingestão completa");
+            cli::step_info("cache parcial (só gBWT falta) — Pass2 paths-only");
         }
         return std::nullopt;
     }
+    res_.mmap.reset();
     out_skip = true;
     if (verbose) {
         cli::step_info("cache RAM ok (hash) — prosseguindo para Passada 2 (metadata)");
@@ -1623,11 +1738,13 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
     }
 
     bool complete_snarls_only = false;
+    bool complete_gbwt_only = false;
 
     // ── fast path O(1): mtime + size ─────────────────────────────────────────
     if (auto cached = try_cache_fast(cache_dir, file_sz, file_mtime_ns, save_metadata,
                                      build_fm_index, build_gbwt, build_snarls,
-                                     verbose, skip_pass1, complete_snarls_only)) {
+                                     verbose, skip_pass1, complete_snarls_only,
+                                     complete_gbwt_only)) {
         if (complete_snarls_only) {
             cached = complete_with_snarls(cache_dir, *cached, verbose, t_start);
         }
@@ -1644,15 +1761,38 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
         cli::step_ok_end("Arquivo mapeado", ggql::format_size(res_.mmap->size));
     }
 
+    // FASE 2: try_cache_fast detectou só gBWT faltando — Pass2 paths-only.
+    // try_cache_hash adiante seria redundante (mtime+size já casou).
+    if (complete_gbwt_only) {
+        return complete_with_gbwt(filepath, cache_dir, num_threads,
+                                  max_gbwt_paths, build_snarls, verbose,
+                                  IngestStatsParallel{}, t_start);
+    }
+
     // ── verificação por hash XXH64 (só se mtime não casou) ───────────────────
     if (!skip_pass1) {
         if (auto cached = try_cache_hash(cache_dir, save_metadata, build_gbwt, build_snarls,
                                          verbose, gfa_hash, skip_pass1,
-                                         complete_snarls_only)) {
+                                         complete_snarls_only, complete_gbwt_only)) {
             if (complete_snarls_only) {
                 cached = complete_with_snarls(cache_dir, *cached, verbose, t_start);
             }
             return *cached;
+        }
+        // Fase 2: mmap continua aberto, MPHF/topology em RAM. Pass2 paths-only.
+        if (complete_gbwt_only) {
+            // O try_cache_hash já consumiu o mmap (XXH64 lê todos os bytes);
+            // reabre antes de Pass2.
+            if (!res_.mmap) {
+                auto mmap_res2 = MmapFileParallel::open(filepath);
+                if (!mmap_res2) {
+                    return std::unexpected(mmap_res2.error());
+                }
+                res_.mmap = std::make_unique<MmapFileParallel>(std::move(*mmap_res2));
+            }
+            return complete_with_gbwt(filepath, cache_dir, num_threads,
+                                      max_gbwt_paths, build_snarls, verbose,
+                                      IngestStatsParallel{}, t_start);
         }
         // try_cache_hash fechou mmap_data_; reabrir para pass1
         auto mmap_res2 = MmapFileParallel::open(filepath);

@@ -592,6 +592,89 @@ void GfaCsrTopology::save(const std::string& dir) const {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// save_gbwt_only — grava apenas gbwts.bin + path_stats.bin (Fase 2 do upgrade
+// incremental). Atualiza topology.bin com os novos gbwt_offsets_/path_names_,
+// sem tocar em E_*/ef_*.
+// ════════════════════════════════════════════════════════════════════════════
+void GfaCsrTopology::save_gbwt_only(const std::string& dir) const {
+    namespace fs = std::filesystem;
+    fs::create_directories(dir);
+
+    // gbwts.bin — só grava se há GBWTs não-nulos
+    uint64_t n_valid = 0;
+    for (const auto& g : gbwts_) {
+        if (g) { ++n_valid; }
+    }
+    if (n_valid > 0) {
+        std::ofstream out(dir + "/gbwts.bin", std::ios::binary);
+        if (!out) {
+            throw std::runtime_error("[topology::save_gbwt_only] Falha ao abrir gbwts.bin");
+        }
+        out.write(reinterpret_cast<const char*>(&n_valid), sizeof(n_valid));
+        for (const auto& g : gbwts_) {
+            if (g) {
+                g->simple_sds_serialize(out);
+            }
+        }
+        if (!out) {
+            throw std::runtime_error("[topology::save_gbwt_only] Erro de I/O em gbwts.bin");
+        }
+    }
+
+    // topology.bin — precisa ser reescrito porque agora contém path_names_
+    // e gbwt_offsets_ atualizados. Reusa o formato existente (num_nodes_ +
+    // gbwt_offsets_ + path_names_ + hash). E_*/ef_* não são tocados.
+    {
+        std::ofstream out(dir + "/topology.bin", std::ios::binary);
+        if (!out) {
+            throw std::runtime_error("[topology::save_gbwt_only] Falha ao abrir topology.bin");
+        }
+        out.write(reinterpret_cast<const char*>(&num_nodes_), sizeof(num_nodes_));
+        ChecksumBuilder cb;
+        cb.add(num_nodes_);
+        const uint64_t n_off = static_cast<uint64_t>(gbwt_offsets_.size());
+        out.write(reinterpret_cast<const char*>(&n_off), sizeof(n_off));
+        cb.add(n_off);
+        for (const size_t off : gbwt_offsets_) {
+            const uint64_t v = static_cast<uint64_t>(off);
+            out.write(reinterpret_cast<const char*>(&v), sizeof(v));
+            cb.add(v);
+        }
+        const uint64_t n_paths = static_cast<uint64_t>(path_names_.size());
+        out.write(reinterpret_cast<const char*>(&n_paths), sizeof(n_paths));
+        cb.add(n_paths);
+        for (const auto& s : path_names_) {
+            const uint64_t slen = static_cast<uint64_t>(s.size());
+            out.write(reinterpret_cast<const char*>(&slen), sizeof(slen));
+            out.write(s.data(), static_cast<std::streamsize>(slen));
+            cb.add(s);
+        }
+        const uint64_t hash = cb.finalize();
+        out.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+        if (!out) {
+            throw std::runtime_error("[topology::save_gbwt_only] Erro de I/O em topology.bin");
+        }
+    }
+
+    // path_stats.bin — opcional
+    if (has_path_stats()) {
+        std::ofstream out(dir + "/path_stats.bin", std::ios::binary);
+        if (!out) {
+            throw std::runtime_error("[topology::save_gbwt_only] Falha ao abrir path_stats.bin");
+        }
+        const uint64_t n = static_cast<uint64_t>(path_node_counts_.size());
+        out.write(reinterpret_cast<const char*>(&n), sizeof(n));
+        out.write(reinterpret_cast<const char*>(path_node_counts_.data()),
+                  static_cast<std::streamsize>(n * sizeof(uint32_t)));
+        out.write(reinterpret_cast<const char*>(path_bp_lengths_.data()),
+                  static_cast<std::streamsize>(n * sizeof(int64_t)));
+        if (!out) {
+            throw std::runtime_error("[topology::save_gbwt_only] Erro de I/O em path_stats.bin");
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // save_snarls_only — grava apenas snarls.bin, sem reescrever CSR/gBWT/etc.
 // ════════════════════════════════════════════════════════════════════════════
 void GfaCsrTopology::save_snarls_only(const std::string& dir) const {

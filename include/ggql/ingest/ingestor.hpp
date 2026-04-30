@@ -466,7 +466,8 @@ class GfaIngestorMmapParallel {
                    bool save_metadata, bool build_fm_index,
                    bool build_gbwt, bool build_snarls,
                    bool verbose, bool& out_skip,
-                   bool& out_complete_snarls_only);
+                   bool& out_complete_snarls_only,
+                   bool& out_complete_gbwt_only);
 
     // Computa hash XXH64 de mmap_data_ (reseta mmap_data_) e verifica cache por hash.
     // Retorna stats em hit completo; nullopt em miss ou hit parcial.
@@ -474,11 +475,15 @@ class GfaIngestorMmapParallel {
     // Define out_complete_snarls_only=true quando o cache cobre tudo exceto
     // snarls; nesse caso retorna *res (não nullopt) e o caller deve completar
     // com find_snarls_streaming antes de retornar (cache em RAM permanece).
+    // Define out_complete_gbwt_only=true quando falta apenas gbwts.bin (e
+    // possivelmente snarls.bin); nesse caso retorna nullopt para o caller
+    // abrir mmap e fazer Pass2 paths-only.
     std::optional<IngestStatsParallel>
     try_cache_hash(const std::string& cache_dir,
                    bool save_metadata, bool build_gbwt, bool build_snarls,
                    bool verbose, uint64_t& out_hash, bool& out_skip,
-                   bool& out_complete_snarls_only);
+                   bool& out_complete_snarls_only,
+                   bool& out_complete_gbwt_only);
 
     // Ingestão completa (Pass1 + MPHF + Union-Find + Pass2 + topologia + save).
     // Pré-condição: mmap_data_ está aberto.
@@ -489,6 +494,18 @@ class GfaIngestorMmapParallel {
     IngestStatsParallel complete_with_snarls(
         const std::string& cache_dir,
         IngestStatsParallel stats, bool verbose,
+        std::chrono::high_resolution_clock::time_point t_start);
+
+    // FASE 2 do upgrade incremental: cache tem MPHF + topology + metadata
+    // mas falta gbwts.bin. Reabre o GFA e faz Pass2 paths-only (sem coletar
+    // segmentos/links — esses já estão em disco), constrói gBWT e grava
+    // gbwts.bin + topology.bin atualizado. Não toca em E_*/ef_*/metadata.bin.
+    // Pré-condição: res_.mphf, res_.topology e remap_ já estão carregados.
+    // Se build_snarls=true e snarls.bin falta, completa snarls após gBWT.
+    std::expected<IngestStatsParallel, std::string> complete_with_gbwt(
+        const std::string& filepath, const std::string& cache_dir,
+        int num_threads, size_t max_gbwt_paths, bool build_snarls,
+        bool verbose, IngestStatsParallel stats,
         std::chrono::high_resolution_clock::time_point t_start);
 
     std::expected<IngestStatsParallel, std::string>

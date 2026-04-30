@@ -432,6 +432,12 @@ class GfaCsrTopology {
     // snarls (assembly/pangenome), evita reescrever CSR/EF/gBWT já em disco.
     void save_snarls_only(const std::string& dir) const;
 
+    // Persiste apenas gbwts.bin + path_stats.bin + offsets relacionados.
+    // Usado pelo upgrade incremental Fase 2 (metagenomics/assembly →
+    // comparative/pangenome): após reconstruir gBWT a partir de Pass2
+    // paths-only, grava só os arquivos do gBWT sem reescrever CSR/metadata.
+    void save_gbwt_only(const std::string& dir) const;
+
   private:
     // ── Threshold de paralelismo ─────────────────────────────────────────────
     // Abaixo deste valor o overhead do fork/join OpenMP (~0.5 ms) supera o
