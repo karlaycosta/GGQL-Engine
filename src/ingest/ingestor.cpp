@@ -10,6 +10,8 @@
 #include "ggql/storage/fm_index.hpp"
 #include "ggql/utils.hpp"
 
+#include <cstring>
+#include <ctime>
 #include <fstream>
 
 #ifdef _OPENMP
@@ -805,10 +807,35 @@ bool GfaIngestorMmapParallel::save_mphf_and_remap(const std::string& dir) {
     return true;
 }
 
+// Deriva o nome canônico do perfil a partir dos flags. Retorna "custom"
+// quando os flags não correspondem exatamente a nenhum perfil pré-definido.
+static const char* profile_name_from_flags(const GfaIngestorMmapParallel::CachedFlags& f) {
+    if ( f.save_metadata &&  f.build_fm_index &&  f.build_topology &&
+         f.build_gbwt    &&  f.build_snarls)        return "pangenome";
+    if ( f.save_metadata &&  f.build_fm_index &&  f.build_topology &&
+        !f.build_gbwt    && !f.build_snarls)        return "metagenomics";
+    if ( f.save_metadata && !f.build_fm_index &&  f.build_topology &&
+        !f.build_gbwt    &&  f.build_snarls)        return "assembly";
+    if ( f.save_metadata && !f.build_fm_index &&  f.build_topology &&
+         f.build_gbwt    && !f.build_snarls)        return "comparative";
+    return "custom";
+}
+
+// ISO-8601 com fuso UTC ("2026-04-30T12:34:56Z"). Independente de locale.
+static std::string iso_utc_now() {
+    const auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm tm{};
+    ::gmtime_r(&t, &tm);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    return std::string(buf);
+}
+
 void GfaIngestorMmapParallel::write_manifest_atomic(const std::string& dir, uint64_t hash,
                                                     uint64_t file_sz, int64_t file_mtime_ns_val,
                                                     uint8_t node_width,
-                                                    const IngestStatsParallel& stats) {
+                                                    const IngestStatsParallel& stats,
+                                                    CachedFlags flags) {
     const std::string tmp_path = dir + "/manifest.tmp";
     {
         std::ofstream out(tmp_path);
@@ -816,7 +843,7 @@ void GfaIngestorMmapParallel::write_manifest_atomic(const std::string& dir, uint
             fmt::print(stderr, "  [cache] AVISO: falha ao criar manifest.tmp\n");
             return;
         }
-        out << "version=3\n"
+        out << "version=4\n"
             << "gfa_hash=" << hash << "\n"
             << "gfa_size=" << file_sz << "\n"
             << "gfa_mtime_ns=" << file_mtime_ns_val << "\n"
@@ -825,13 +852,188 @@ void GfaIngestorMmapParallel::write_manifest_atomic(const std::string& dir, uint
             << "link_count=" << stats.link_count << "\n"
             << "path_count=" << stats.path_count << "\n"
             << "num_components=" << num_components_ << "\n"
-            << "num_bins=" << num_bins_packed_ << "\n";
+            << "num_bins=" << num_bins_packed_ << "\n"
+            << "profile=" << profile_name_from_flags(flags) << "\n"
+            << "indexed_at=" << iso_utc_now() << "\n"
+            << "flag_save_metadata="  << (flags.save_metadata  ? 1 : 0) << "\n"
+            << "flag_build_fm_index=" << (flags.build_fm_index ? 1 : 0) << "\n"
+            << "flag_build_topology=" << (flags.build_topology ? 1 : 0) << "\n"
+            << "flag_build_gbwt="     << (flags.build_gbwt     ? 1 : 0) << "\n"
+            << "flag_build_snarls="   << (flags.build_snarls   ? 1 : 0) << "\n";
     }
     std::error_code ec;
     std::filesystem::rename(tmp_path, dir + "/manifest.txt", ec);
     if (ec) {
         fmt::print(stderr, "  [cache] AVISO: rename manifest falhou: {}\n", ec.message());
     }
+}
+
+// Lê os flags do manifest. Retorna nullopt em manifest ausente ou v3-.
+std::optional<GfaIngestorMmapParallel::CachedFlags>
+GfaIngestorMmapParallel::read_cached_flags(const std::string& dir) const {
+    namespace fs = std::filesystem;
+    if (!fs::exists(dir + "/manifest.txt")) {
+        return std::nullopt;
+    }
+    std::ifstream in(dir + "/manifest.txt");
+    if (!in) { return std::nullopt; }
+
+    int manifest_version = 1;
+    CachedFlags f;
+    bool any_flag_seen = false;
+    auto fc_i = [](std::string_view sv) -> int {
+        int v = 0;
+        std::from_chars(sv.data(), sv.data() + sv.size(), v);
+        return v;
+    };
+
+    std::string line;
+    while (std::getline(in, line)) {
+        std::string_view lv{line};
+        if (lv.starts_with("version=")) {
+            manifest_version = fc_i(lv.substr(8));
+        } else if (lv.starts_with("flag_save_metadata=")) {
+            f.save_metadata = fc_i(lv.substr(19)) != 0; any_flag_seen = true;
+        } else if (lv.starts_with("flag_build_fm_index=")) {
+            f.build_fm_index = fc_i(lv.substr(20)) != 0; any_flag_seen = true;
+        } else if (lv.starts_with("flag_build_topology=")) {
+            f.build_topology = fc_i(lv.substr(20)) != 0; any_flag_seen = true;
+        } else if (lv.starts_with("flag_build_gbwt=")) {
+            f.build_gbwt = fc_i(lv.substr(16)) != 0; any_flag_seen = true;
+        } else if (lv.starts_with("flag_build_snarls=")) {
+            f.build_snarls = fc_i(lv.substr(18)) != 0; any_flag_seen = true;
+        }
+    }
+    if (manifest_version < 4 || !any_flag_seen) {
+        return std::nullopt; // v3 ou anterior: sem flags persistidos
+    }
+    return f;
+}
+
+// Regrava manifest mantendo todas as linhas, exceto as de flags/profile/
+// indexed_at que são substituídas pelos novos valores. Preserva ordem das
+// linhas existentes; se algum campo de flag não estava no manifest (v3),
+// é adicionado no final.
+void GfaIngestorMmapParallel::rewrite_manifest_flags(const std::string& dir,
+                                                     CachedFlags new_flags) const {
+    namespace fs = std::filesystem;
+    if (!fs::exists(dir + "/manifest.txt")) { return; }
+
+    std::vector<std::string> lines;
+    {
+        std::ifstream in(dir + "/manifest.txt");
+        std::string line;
+        while (std::getline(in, line)) {
+            lines.push_back(std::move(line));
+        }
+    }
+
+    auto starts_with = [](const std::string& s, std::string_view pfx) {
+        return s.size() >= pfx.size() && std::memcmp(s.data(), pfx.data(), pfx.size()) == 0;
+    };
+    bool seen_save_meta = false, seen_fm = false, seen_topo = false;
+    bool seen_gbwt = false, seen_snarls = false;
+    bool seen_profile = false, seen_indexed = false, seen_version = false;
+    for (auto& l : lines) {
+        if (starts_with(l, "version=")) {
+            l = "version=4"; seen_version = true;
+        } else if (starts_with(l, "profile=")) {
+            l = std::string("profile=") + profile_name_from_flags(new_flags);
+            seen_profile = true;
+        } else if (starts_with(l, "indexed_at=")) {
+            l = "indexed_at=" + iso_utc_now(); seen_indexed = true;
+        } else if (starts_with(l, "flag_save_metadata=")) {
+            l = std::string("flag_save_metadata=") + (new_flags.save_metadata ? "1" : "0");
+            seen_save_meta = true;
+        } else if (starts_with(l, "flag_build_fm_index=")) {
+            l = std::string("flag_build_fm_index=") + (new_flags.build_fm_index ? "1" : "0");
+            seen_fm = true;
+        } else if (starts_with(l, "flag_build_topology=")) {
+            l = std::string("flag_build_topology=") + (new_flags.build_topology ? "1" : "0");
+            seen_topo = true;
+        } else if (starts_with(l, "flag_build_gbwt=")) {
+            l = std::string("flag_build_gbwt=") + (new_flags.build_gbwt ? "1" : "0");
+            seen_gbwt = true;
+        } else if (starts_with(l, "flag_build_snarls=")) {
+            l = std::string("flag_build_snarls=") + (new_flags.build_snarls ? "1" : "0");
+            seen_snarls = true;
+        }
+    }
+    if (!seen_version) { lines.insert(lines.begin(), "version=4"); }
+    if (!seen_profile) {
+        lines.push_back(std::string("profile=") + profile_name_from_flags(new_flags));
+    }
+    if (!seen_indexed) { lines.push_back("indexed_at=" + iso_utc_now()); }
+    if (!seen_save_meta) {
+        lines.push_back(std::string("flag_save_metadata=") + (new_flags.save_metadata ? "1" : "0"));
+    }
+    if (!seen_fm) {
+        lines.push_back(std::string("flag_build_fm_index=") + (new_flags.build_fm_index ? "1" : "0"));
+    }
+    if (!seen_topo) {
+        lines.push_back(std::string("flag_build_topology=") + (new_flags.build_topology ? "1" : "0"));
+    }
+    if (!seen_gbwt) {
+        lines.push_back(std::string("flag_build_gbwt=") + (new_flags.build_gbwt ? "1" : "0"));
+    }
+    if (!seen_snarls) {
+        lines.push_back(std::string("flag_build_snarls=") + (new_flags.build_snarls ? "1" : "0"));
+    }
+
+    const std::string tmp = dir + "/manifest.tmp";
+    {
+        std::ofstream out(tmp);
+        if (!out) {
+            fmt::print(stderr, "  [cache] AVISO: falha ao criar manifest.tmp em rewrite\n");
+            return;
+        }
+        for (const auto& l : lines) { out << l << '\n'; }
+    }
+    std::error_code ec;
+    fs::rename(tmp, dir + "/manifest.txt", ec);
+    if (ec) {
+        fmt::print(stderr, "  [cache] AVISO: rename manifest falhou em rewrite: {}\n", ec.message());
+    }
+}
+
+// Apaga arquivos órfãos quando o novo perfil é mais restrito que o antigo.
+bool GfaIngestorMmapParallel::prune_cache_for_downgrade(const std::string& dir,
+                                                        CachedFlags old_flags,
+                                                        CachedFlags new_flags,
+                                                        bool verbose) const {
+    namespace fs = std::filesystem;
+    bool removed_any = false;
+    auto try_remove = [&](const char* fname) {
+        std::error_code ec;
+        if (fs::remove(dir + "/" + fname, ec)) {
+            if (verbose) {
+                cli::step_info(fmt::format("downgrade: removeu {}", fname));
+            }
+            removed_any = true;
+        }
+    };
+
+    // FM-Index: agora desabilitado; apaga fm_index.bin
+    if (old_flags.build_fm_index && !new_flags.build_fm_index) {
+        try_remove("fm_index.bin");
+    }
+    // gBWT: agora desabilitado; apaga gbwts.bin + path_stats.bin
+    if (old_flags.build_gbwt && !new_flags.build_gbwt) {
+        try_remove("gbwts.bin");
+        try_remove("path_stats.bin");
+    }
+    // Snarls: agora desabilitado; apaga snarls.bin
+    if (old_flags.build_snarls && !new_flags.build_snarls) {
+        try_remove("snarls.bin");
+    }
+    // Metadata: agora desabilitado; apaga arquivos do MetadataStore
+    if (old_flags.save_metadata && !new_flags.save_metadata) {
+        try_remove("metadata.bin");
+        try_remove("metadata_seqs.bin");
+        try_remove("metadata_strings.bin");
+        try_remove("length_index.bin");
+    }
+    return removed_any;
 }
 
 std::optional<IngestStatsParallel>
@@ -1677,7 +1879,10 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
             fmt::print(stderr, "  [cache] AVISO: falha ao salvar topologia: {}\n", e.what());
         }
         if (save_ok) {
-            write_manifest_atomic(cache_dir, gfa_hash, file_sz, file_mtime_ns, node_width, stats);
+            CachedFlags cf{save_metadata, build_fm_index, build_topology,
+                           build_gbwt, build_snarls};
+            write_manifest_atomic(cache_dir, gfa_hash, file_sz, file_mtime_ns,
+                                  node_width, stats, cf);
         }
     }
 
@@ -1735,6 +1940,20 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
     if (verbose) {
         cli::phase(0, "Verificando cache");
         cli::step_info("cache dir", cache_dir);
+    }
+
+    // Downgrade automático: se o cache existente foi indexado com flags
+    // mais permissivos que os pedidos agora (ex: pangenome → metagenomics),
+    // apaga arquivos órfãos antes de carregar. Reduz RAM no load() já que
+    // topology->load() carrega tudo que está em disco.
+    {
+        const CachedFlags requested{save_metadata, build_fm_index, build_topology,
+                                    build_gbwt, build_snarls};
+        if (auto cached_flags = read_cached_flags(cache_dir); cached_flags.has_value()) {
+            if (prune_cache_for_downgrade(cache_dir, *cached_flags, requested, verbose)) {
+                rewrite_manifest_flags(cache_dir, requested);
+            }
+        }
     }
 
     bool complete_snarls_only = false;

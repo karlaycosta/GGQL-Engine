@@ -187,6 +187,21 @@ class GfaIngestorMmapParallel {
     GfaIngestorMmapParallel() = default;
     ~GfaIngestorMmapParallel() = default;
 
+    // Snapshot dos flags ativos persistido no manifest.
+    // Permite downgrade automático e auditoria do cache existente.
+    struct CachedFlags {
+        bool save_metadata  = true;
+        bool build_fm_index = true;
+        bool build_topology = true;
+        bool build_gbwt     = true;
+        bool build_snarls   = true;
+    };
+
+    // Lê flags do manifest existente. Retorna nullopt se manifest ausente
+    // ou em versão antiga (sem campos de flags). Útil para inspeção do
+    // cache (auditoria/UI), não usado pelo pipeline de ingestão.
+    std::optional<CachedFlags> read_cached_flags(const std::string& dir) const;
+
     // Ingere um arquivo GFA e constrói os índices solicitados.
     //
     // Parâmetros:
@@ -427,9 +442,22 @@ class GfaIngestorMmapParallel {
     [[nodiscard]] bool save_mphf_and_remap(const std::string& dir);
 
     // Grava manifest de forma atômica: escreve em .tmp primeiro, depois rename() atômico.
+    // Inclui timestamp ISO-8601 e flags ativos (v4+).
     void write_manifest_atomic(const std::string& dir, uint64_t hash, uint64_t file_sz,
                                int64_t file_mtime_ns_val, uint8_t node_width,
-                               const IngestStatsParallel& stats);
+                               const IngestStatsParallel& stats,
+                               CachedFlags flags);
+
+    // Apaga arquivos órfãos do cache quando o usuário fez downgrade do
+    // perfil (ex: gBWT estava true, agora é false → remove gbwts.bin).
+    // Retorna true se algo foi removido (caller deve regravar o manifest).
+    bool prune_cache_for_downgrade(const std::string& dir,
+                                   CachedFlags old_flags,
+                                   CachedFlags new_flags, bool verbose) const;
+
+    // Regrava manifest preservando todos os campos exceto os flags e o
+    // perfil (recomputado de new_flags). Atualiza indexed_at para o agora.
+    void rewrite_manifest_flags(const std::string& dir, CachedFlags new_flags) const;
 
     // Tenta carregar o índice do cache.
     //   expected_hash    : hash XXH64 calculado pelo chamador (nullopt = não verificar).

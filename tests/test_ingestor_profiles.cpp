@@ -339,6 +339,90 @@ static void test_incremental_meta_to_pangenome() {
     cleanup(gfa, idx);
 }
 
+// ── 10. Downgrade pangenome → metagenomics apaga gbwts.bin/snarls.bin ──────
+// Manifest deve refletir o novo perfil e os arquivos órfãos devem ser
+// removidos do disco (não basta ignorá-los — o load() carregaria do disco).
+static void test_downgrade_pangenome_to_metagenomics() {
+    auto gfa = write_bubble_gfa("downgrade");
+    const std::string idx = "/tmp/ggql_profiles_downgrade_idx/";
+    fs::remove_all(idx);
+
+    // 1ª: pangenome — cria gbwts.bin + snarls.bin
+    {
+        const auto pf = ggql::flags_for(ggql::IngestProfile::Pangenome);
+        ggql::GfaIngestorMmapParallel ing;
+        auto res = ing.ingest(gfa, 1, 2.0, false,
+                              pf.save_metadata, pf.build_topology, pf.build_fm_index,
+                              1000, false, idx, pf.build_gbwt, pf.build_snarls);
+        assert(res.has_value());
+        assert(fs::exists(idx + "/gbwts.bin"));
+        assert(fs::exists(idx + "/snarls.bin"));
+    }
+
+    // 2ª: metagenomics no MESMO dir — deve apagar gbwts.bin + snarls.bin
+    {
+        const auto pf = ggql::flags_for(ggql::IngestProfile::Metagenomics);
+        ggql::GfaIngestorMmapParallel ing;
+        auto res = ing.ingest(gfa, 1, 2.0, false,
+                              pf.save_metadata, pf.build_topology, pf.build_fm_index,
+                              0, false, idx, pf.build_gbwt, pf.build_snarls);
+        assert(res.has_value());
+        assert(!fs::exists(idx + "/gbwts.bin")
+               && "downgrade deve remover gbwts.bin");
+        assert(!fs::exists(idx + "/snarls.bin")
+               && "downgrade deve remover snarls.bin");
+        // FM-Index continua (metagenomics inclui FM-Index)
+        assert(fs::exists(idx + "/fm_index.bin"));
+    }
+
+    // 3ª: leitura do manifest deve refletir os novos flags
+    {
+        ggql::GfaIngestorMmapParallel ing;
+        auto cf = ing.read_cached_flags(idx);
+        assert(cf.has_value());
+        assert(cf->save_metadata);
+        assert(cf->build_fm_index);
+        assert(cf->build_topology);
+        assert(!cf->build_gbwt && "manifest deve refletir gBWT desabilitado");
+        assert(!cf->build_snarls && "manifest deve refletir snarls desabilitado");
+    }
+
+    cleanup(gfa, idx);
+}
+
+// ── 11. Manifest contém profile + indexed_at ──────────────────────────────────
+static void test_manifest_has_profile_and_timestamp() {
+    auto gfa = write_bubble_gfa("manifest");
+    const std::string idx = "/tmp/ggql_profiles_manifest_idx/";
+    fs::remove_all(idx);
+
+    const auto pf = ggql::flags_for(ggql::IngestProfile::Pangenome);
+    ggql::GfaIngestorMmapParallel ing;
+    auto res = ing.ingest(gfa, 1, 2.0, false,
+                          pf.save_metadata, pf.build_topology, pf.build_fm_index,
+                          1000, false, idx, pf.build_gbwt, pf.build_snarls);
+    assert(res.has_value());
+
+    // Lê manifest cru
+    std::ifstream m(idx + "/manifest.txt");
+    std::string line;
+    bool has_profile = false, has_indexed = false, has_v4 = false;
+    while (std::getline(m, line)) {
+        if (line == "profile=pangenome") { has_profile = true; }
+        else if (line.starts_with("indexed_at=")) {
+            has_indexed = true;
+            // Formato: indexed_at=YYYY-MM-DDTHH:MM:SSZ
+            assert(line.size() == std::string("indexed_at=YYYY-MM-DDTHH:MM:SSZ").size());
+        }
+        else if (line == "version=4") { has_v4 = true; }
+    }
+    assert(has_v4 && "manifest deve estar em version=4");
+    assert(has_profile && "manifest deve ter profile=pangenome");
+    assert(has_indexed && "manifest deve ter indexed_at em ISO-8601");
+
+    cleanup(gfa, idx);
+}
+
 int main() {
     test_validation_gbwt_requires_topology();
     test_validation_snarls_requires_topology();
@@ -350,5 +434,7 @@ int main() {
     test_incremental_snarls_upgrade();
     test_incremental_gbwt_upgrade();
     test_incremental_meta_to_pangenome();
+    test_downgrade_pangenome_to_metagenomics();
+    test_manifest_has_profile_and_timestamp();
     return EXIT_SUCCESS;
 }
