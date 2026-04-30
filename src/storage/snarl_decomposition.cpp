@@ -431,6 +431,106 @@ find_snarls_from_bridges(const GfaCsrTopology& topo,
     return out;
 }
 
+// ── Fase 3: snarls cíclicos via SCCs não-triviais ───────────────────────────
+//
+// Cada SCC com ≥ 2 nós representa um ciclo no grafo dirigido. Os snarls
+// associados são caracterizados por:
+//   - entry: nó da SCC que tem in-edge vinda de fora da SCC
+//   - exit:  nó da SCC que tem out-edge indo para fora da SCC
+//
+// Casos:
+//   1. entry == exit (mesmo nó): snarl "self-loop" (cycle attached). source=sink.
+//   2. entry != exit: snarl com boundaries entry e exit, contendo a SCC interior.
+//   3. múltiplos entries/exits: SCC mais complexa — emitimos um snarl por
+//      par representativo, marcando has_cycles=1.
+//
+// Captura snarls type=2 do vg (cyclic) e snarls em hifiasm-meta (que têm
+// 0 bridges no bidirected mas podem ter SCCs no dirigido).
+static std::vector<SnarlRecord>
+find_cyclic_snarls(const GfaCsrTopology& topo, const SCCDecomp& scc) {
+    const uint64_t N = topo.num_nodes();
+    std::vector<SnarlRecord> out;
+    if (N == 0) { return out; }
+
+    const auto& scc_id   = scc.scc_id;
+    const auto& scc_size = scc.scc_size;
+
+    // Para cada SCC com size >= 2, identifica entry e exit candidates.
+    struct SCCBoundaries {
+        std::vector<uint64_t> entries; // nós da SCC com in-edge externa
+        std::vector<uint64_t> exits;   // nós da SCC com out-edge externa
+        uint32_t              size = 0;
+    };
+    std::vector<SCCBoundaries> sccb(scc.num_scc);
+    for (uint32_t i = 0; i < scc.num_scc; ++i) {
+        sccb[i].size = scc_size[i];
+    }
+
+    for (uint64_t v = 0; v < N; ++v) {
+        const uint32_t sv = scc_id[v];
+        if (scc_size[sv] < 2) { continue; } // só SCCs cíclicas
+
+        // Entry: existe edge (u → v) onde u está em SCC diferente
+        for (uint64_t enc : topo.in_neighbors(v)) {
+            const uint64_t u = GfaCsrTopology::decode(enc).node_id;
+            if (scc_id[u] != sv) {
+                sccb[sv].entries.push_back(v);
+                break;
+            }
+        }
+        // Exit: existe edge (v → w) onde w está em SCC diferente
+        for (uint64_t enc : topo.out_neighbors(v)) {
+            const uint64_t w = GfaCsrTopology::decode(enc).node_id;
+            if (scc_id[w] != sv) {
+                sccb[sv].exits.push_back(v);
+                break;
+            }
+        }
+    }
+
+    // Emite 1 snarl por SCC cíclica representativa
+    for (uint32_t i = 0; i < scc.num_scc; ++i) {
+        const auto& b = sccb[i];
+        if (b.size < 2) { continue; }
+
+        SnarlRecord rec{};
+        rec.has_cycles = 1;
+        rec.internal_node_count = (b.size > 2) ? (b.size - 2) : 0;
+
+        if (!b.entries.empty() && !b.exits.empty()) {
+            // entry/exit válidos — par snarl
+            rec.source = b.entries.front();
+            rec.sink   = b.exits.front();
+            // branch_count = out-degree do source (capado)
+            const auto fwd = topo.out_neighbors(rec.source);
+            rec.branch_count = static_cast<uint8_t>(std::min<size_t>(fwd.size(), 255));
+        } else if (!b.entries.empty()) {
+            // SCC isolada com apenas entry → self-loop snarl
+            rec.source = b.entries.front();
+            rec.sink   = rec.source;
+            const auto fwd = topo.out_neighbors(rec.source);
+            rec.branch_count = static_cast<uint8_t>(std::min<size_t>(fwd.size(), 255));
+        } else {
+            // SCC totalmente isolada (sem entry nem exit externos) — usa
+            // o primeiro nó da SCC como source/sink representativo.
+            // Encontra qualquer nó dessa SCC.
+            uint64_t representative = UINT64_MAX;
+            for (uint64_t v = 0; v < N; ++v) {
+                if (scc_id[v] == i) { representative = v; break; }
+            }
+            if (representative == UINT64_MAX) { continue; }
+            rec.source = representative;
+            rec.sink   = representative;
+            const auto fwd = topo.out_neighbors(representative);
+            rec.branch_count = static_cast<uint8_t>(std::min<size_t>(fwd.size(), 255));
+        }
+
+        out.push_back(rec);
+    }
+
+    return out;
+}
+
 std::vector<SnarlRecord> find_all_snarls(const GfaCsrTopology& topo,
                                          int /*num_threads*/) {
     const uint64_t N = topo.num_nodes();
@@ -563,6 +663,32 @@ std::vector<SnarlRecord> find_all_snarls(const GfaCsrTopology& topo,
         if (std::find(seen.begin(), seen.end(), p_rev) != seen.end()) { continue; }
         out.push_back(s);
         seen.push_back(p);
+    }
+
+    // ── FASE 3: snarls cíclicos via SCCs não-triviais ──────────────────────
+    // Captura snarls type=2 (cyclic) que vg detecta como start_self_reachable.
+    // Também detecta snarls em GFAs hifiasm-meta (com 0 link bridges mas
+    // SCCs cíclicas no grafo dirigido).
+    auto fase3 = find_cyclic_snarls(topo, scc);
+    size_t fase3_added = 0, fase3_dedup = 0;
+    for (const auto& s : fase3) {
+        const auto p = std::make_pair(s.source, s.sink);
+        const auto p_rev = std::make_pair(s.sink, s.source);
+        if (std::find(seen.begin(), seen.end(), p) != seen.end()) { ++fase3_dedup; continue; }
+        if (std::find(seen.begin(), seen.end(), p_rev) != seen.end()) { ++fase3_dedup; continue; }
+        out.push_back(s);
+        seen.push_back(p);
+        ++fase3_added;
+    }
+    if (std::getenv("GGQL_DEBUG_BIEDGED")) {
+        std::fprintf(stderr,
+                     "[debug phases] F1=%lu F2=%lu F3=%lu (new=%lu dedup=%lu) total=%lu\n",
+                     static_cast<unsigned long>(out.size() - fase2.size() - fase3_added),
+                     static_cast<unsigned long>(fase2.size()),
+                     static_cast<unsigned long>(fase3.size()),
+                     static_cast<unsigned long>(fase3_added),
+                     static_cast<unsigned long>(fase3_dedup),
+                     static_cast<unsigned long>(out.size()));
     }
 
     return out;

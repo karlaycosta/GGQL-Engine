@@ -149,10 +149,38 @@ static void test_reverse_orient_snarl() {
     cleanup(gfa, idx);
 }
 
+// ── 5. Fase 3: snarl cíclico via SCC não-trivial ────────────────────────────
+//
+// Grafo com ciclo: A → B → C → B (volta) → D
+//
+// SCC não-trivial = {B, C}. entry = B (vem de A); exit = B ou C (vai para D).
+// Fase 3 detecta isso como snarl com has_cycles=1.
+static void test_cyclic_snarl() {
+    auto gfa = write_gfa("cycle",
+        "S\tA\tACGT\nS\tB\tGGGG\nS\tC\tTTTT\nS\tD\tCCCC\n"
+        "L\tA\t+\tB\t+\t0M\n"
+        "L\tB\t+\tC\t+\t0M\n"
+        "L\tC\t+\tB\t+\t0M\n"
+        "L\tC\t+\tD\t+\t0M\n");
+    const std::string idx = "/tmp/ggql_snarl_cycle_idx/";
+    auto topo = load_topology(gfa, idx);
+
+    auto snarls = ggql::snarl_decomposition::find_all_snarls(topo, 1);
+    bool has_cyclic_snarl = false;
+    for (const auto& s : snarls) {
+        if (s.has_cycles == 1) { has_cyclic_snarl = true; break; }
+    }
+    assert(has_cyclic_snarl
+           && "Fase 3 deve detectar snarl cíclico em SCC não-trivial {B,C}");
+
+    cleanup(gfa, idx);
+}
+
 int main() {
     test_single_bubble();
     test_linear_no_snarls();
     test_two_consecutive_bubbles();
     test_reverse_orient_snarl();
+    test_cyclic_snarl();
     return EXIT_SUCCESS;
 }
