@@ -464,6 +464,7 @@ class GfaIngestorMmapParallel {
     try_cache_fast(const std::string& cache_dir,
                    uint64_t file_sz, int64_t file_mtime_ns,
                    bool save_metadata, bool build_fm_index,
+                   bool build_gbwt, bool build_snarls,
                    bool verbose, bool& out_skip);
 
     // Computa hash XXH64 de mmap_data_ (reseta mmap_data_) e verifica cache por hash.
@@ -471,8 +472,8 @@ class GfaIngestorMmapParallel {
     // Define out_hash e out_skip=true em hit parcial. mmap_data_ fica fechado ao retornar.
     std::optional<IngestStatsParallel>
     try_cache_hash(const std::string& cache_dir,
-                   bool save_metadata, bool verbose,
-                   uint64_t& out_hash, bool& out_skip);
+                   bool save_metadata, bool build_gbwt, bool build_snarls,
+                   bool verbose, uint64_t& out_hash, bool& out_skip);
 
     // Ingestão completa (Pass1 + MPHF + Union-Find + Pass2 + topologia + save).
     // Pré-condição: mmap_data_ está aberto.

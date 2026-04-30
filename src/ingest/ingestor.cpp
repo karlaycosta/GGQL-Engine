@@ -988,14 +988,19 @@ GfaIngestorMmapParallel::load_index(const std::string& dir, std::optional<uint64
 std::optional<IngestStatsParallel>
 GfaIngestorMmapParallel::try_cache_fast(const std::string& cache_dir, uint64_t file_sz,
                                         int64_t file_mtime_ns, bool save_metadata,
-                                        bool build_fm_index, bool verbose, bool& out_skip) {
+                                        bool build_fm_index, bool build_gbwt, bool build_snarls,
+                                        bool verbose, bool& out_skip) {
     auto res = load_index(cache_dir, std::nullopt, file_sz, file_mtime_ns);
     if (!res) {
         return std::nullopt;
     }
 
-    bool fm_ok = !build_fm_index || std::filesystem::exists(cache_dir + "/fm_index.bin");
-    if ((!save_metadata || std::filesystem::exists(cache_dir + "/metadata.bin")) && fm_ok) {
+    const bool meta_ok   = !save_metadata  || std::filesystem::exists(cache_dir + "/metadata.bin");
+    const bool fm_ok     = !build_fm_index || std::filesystem::exists(cache_dir + "/fm_index.bin");
+    const bool gbwt_ok   = !build_gbwt     || std::filesystem::exists(cache_dir + "/gbwts.bin");
+    const bool snarls_ok = !build_snarls   || std::filesystem::exists(cache_dir + "/snarls.bin");
+
+    if (meta_ok && fm_ok && gbwt_ok && snarls_ok) {
         if (verbose) {
             cli::step_ok_end("cache hit (mtime+size) — carregamento instantâneo");
         }
@@ -1010,6 +1015,7 @@ GfaIngestorMmapParallel::try_cache_fast(const std::string& cache_dir, uint64_t f
 
 std::optional<IngestStatsParallel>
 GfaIngestorMmapParallel::try_cache_hash(const std::string& cache_dir, bool save_metadata,
+                                        bool build_gbwt, bool build_snarls,
                                         bool verbose, uint64_t& out_hash, bool& out_skip) {
     out_hash = XXH64(res_.mmap->data, res_.mmap->size, 0);
     res_.mmap.reset();
@@ -1019,7 +1025,11 @@ GfaIngestorMmapParallel::try_cache_hash(const std::string& cache_dir, bool save_
         return std::nullopt;
     }
 
-    if (!save_metadata || std::filesystem::exists(cache_dir + "/metadata.bin")) {
+    const bool meta_ok   = !save_metadata || std::filesystem::exists(cache_dir + "/metadata.bin");
+    const bool gbwt_ok   = !build_gbwt    || std::filesystem::exists(cache_dir + "/gbwts.bin");
+    const bool snarls_ok = !build_snarls  || std::filesystem::exists(cache_dir + "/snarls.bin");
+
+    if (meta_ok && gbwt_ok && snarls_ok) {
         if (verbose) {
             cli::step_ok_end("cache hit (hash) — carregado");
         }
@@ -1538,7 +1548,8 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
 
     // ── fast path O(1): mtime + size ─────────────────────────────────────────
     if (auto cached = try_cache_fast(cache_dir, file_sz, file_mtime_ns, save_metadata,
-                                     build_fm_index, verbose, skip_pass1)) {
+                                     build_fm_index, build_gbwt, build_snarls,
+                                     verbose, skip_pass1)) {
         return *cached;
     }
 
@@ -1554,7 +1565,8 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
 
     // ── verificação por hash XXH64 (só se mtime não casou) ───────────────────
     if (!skip_pass1) {
-        if (auto cached = try_cache_hash(cache_dir, save_metadata, verbose, gfa_hash, skip_pass1)) {
+        if (auto cached = try_cache_hash(cache_dir, save_metadata, build_gbwt, build_snarls,
+                                         verbose, gfa_hash, skip_pass1)) {
             return *cached;
         }
         // try_cache_hash fechou mmap_data_; reabrir para pass1
