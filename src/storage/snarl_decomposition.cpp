@@ -415,6 +415,111 @@ find_snarls_from_bridges_using(const GfaCsrTopology& topo,
     return out;
 }
 
+// ── Fase 6: filtragem hierárquica via containment (Paten 2018 §4) ──────────
+//
+// Calcula o "interior set" de cada snarl (nós entre source e sink via BFS
+// sem cruzar boundaries). Snarl A é descendente de B sse interior(A) ⊆
+// interior(B) ∪ {source(B), sink(B)} e A != B. Reporta apenas top-level.
+//
+// Custo: O(N + E) por snarl para BFS, O(S²) para containment check.
+// Para S < 1000 e snarls pequenos, totalmente viável.
+
+static std::vector<uint64_t>
+compute_snarl_interior(const GfaCsrTopology& topo,
+                       uint64_t source, uint64_t sink) {
+    // BFS bidirecional (forward + backward) parando em sink, sem cruzar
+    // source nem sink na expansão. Conjunto de nós atingíveis = interior.
+    std::vector<uint64_t> interior;
+    if (source == sink) { return interior; }
+
+    std::vector<uint8_t> visited(topo.num_nodes(), 0);
+    visited[source] = 1;
+    visited[sink]   = 1; // sentinela: não cruza
+    std::vector<uint64_t> q;
+    q.push_back(source);
+
+    while (!q.empty()) {
+        const uint64_t u = q.back();
+        q.pop_back();
+        for (uint64_t enc : topo.out_neighbors(u)) {
+            const uint64_t v = GfaCsrTopology::decode(enc).node_id;
+            if (v < topo.num_nodes() && !visited[v]) {
+                visited[v] = 1;
+                interior.push_back(v);
+                q.push_back(v);
+            }
+        }
+        for (uint64_t enc : topo.in_neighbors(u)) {
+            const uint64_t v = GfaCsrTopology::decode(enc).node_id;
+            if (v < topo.num_nodes() && !visited[v]) {
+                visited[v] = 1;
+                interior.push_back(v);
+                q.push_back(v);
+            }
+        }
+    }
+    std::sort(interior.begin(), interior.end());
+    return interior;
+}
+
+// Retorna true sse small_interior está contido em (big_interior ∪ {b_src, b_snk}).
+static bool is_contained(const std::vector<uint64_t>& small_int,
+                          uint64_t small_src, uint64_t small_snk,
+                          const std::vector<uint64_t>& big_int,
+                          uint64_t big_src, uint64_t big_snk) {
+    // small_src e small_snk também precisam estar em big_int (ou serem
+    // os boundaries de B).
+    auto in_big = [&](uint64_t v) {
+        if (v == big_src || v == big_snk) { return true; }
+        return std::binary_search(big_int.begin(), big_int.end(), v);
+    };
+    if (!in_big(small_src) || !in_big(small_snk)) { return false; }
+    for (uint64_t v : small_int) {
+        if (!in_big(v)) { return false; }
+    }
+    return true;
+}
+
+// Aplica filtragem Paten §4 sobre o conjunto de snarls candidatos.
+// Retorna vetor com apenas snarls top-level (sem parent na árvore).
+static std::vector<SnarlRecord>
+filter_top_level_snarls(const GfaCsrTopology& topo,
+                        std::vector<SnarlRecord> candidates) {
+    if (candidates.size() < 2) { return candidates; }
+
+    // Computa interior para cada snarl
+    std::vector<std::vector<uint64_t>> interiors(candidates.size());
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        interiors[i] = compute_snarl_interior(topo,
+                                               candidates[i].source,
+                                               candidates[i].sink);
+    }
+
+    // Para cada par (i, j) com i != j, checa se i está contido em j.
+    // Se sim, marca i como NÃO top-level.
+    std::vector<uint8_t> is_descendant(candidates.size(), 0);
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        for (size_t j = 0; j < candidates.size(); ++j) {
+            if (i == j) { continue; }
+            // i não pode ser descendente se já maior que j em internal_count
+            if (candidates[i].internal_node_count
+                  >= candidates[j].internal_node_count) { continue; }
+            if (is_contained(interiors[i], candidates[i].source, candidates[i].sink,
+                             interiors[j], candidates[j].source, candidates[j].sink)) {
+                is_descendant[i] = 1;
+                break;
+            }
+        }
+    }
+
+    std::vector<SnarlRecord> out;
+    out.reserve(candidates.size());
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (!is_descendant[i]) { out.push_back(candidates[i]); }
+    }
+    return out;
+}
+
 // ── Fase 5: Cactus tree completo via 3-edge-connectivity (Paten 2018 §3) ───
 //
 // Implementação fiel do framework Paten 2018 §3 (cactus graph):
@@ -918,13 +1023,12 @@ std::vector<SnarlRecord> find_all_snarls(const GfaCsrTopology& topo,
 
     // ── FASE 5: cactus tree via 3-edge-connectivity (opt-in, GGQL_PATEN_F5)
     // Fiel a Paten 2018 §3: Tsin 3-EC + boundary pairs em componentes
-    // 3-EC não-triviais. Trade-off: melhora cobertura em hifiasm-meta
-    // (1→3 em hifiasm Zymo, paridade exata com vg) mas introduz
-    // over-detection em metaFlye Zymo (41→105 vs 44 do vg, 2.4×).
+    // 3-EC não-triviais. Útil para detecção em GFAs sem link bridges
+    // (typical hifiasm-meta) — onde F2 retorna 0.
     //
-    // Default mantém F1+F2+F3 (93% cobertura, 0 over-detection no caso
-    // de comparação justa). F5 é útil para detecção em GFAs sem link
-    // bridges (typical hifiasm-meta) — onde F2 retorna 0.
+    // Quando F5 está ativo, a Fase 6 (filtragem hierárquica Paten §4)
+    // é automaticamente aplicada sobre TODO o conjunto de snarls
+    // detectados (F1+F2+F3+F5) para reportar apenas top-level snarls.
     if (std::getenv("GGQL_PATEN_F5")) {
         auto fase5 = find_snarls_via_3ec(topo, bg, is_in_nontrivial_scc);
         for (const auto& s : fase5) {
@@ -934,6 +1038,16 @@ std::vector<SnarlRecord> find_all_snarls(const GfaCsrTopology& topo,
             if (std::find(seen.begin(), seen.end(), p_rev) != seen.end()) { continue; }
             out.push_back(s);
             seen.push_back(p);
+        }
+
+        // Fase 6 — Paten §4 nesting hierarchy: filtra para top-level.
+        // OPT-IN via GGQL_PATEN_F6=1 (independente de F5).
+        // Trade-off: zera over-detection em alguns datasets (ATCC: 11=11
+        // paridade exata) mas pode sub-detectar em outros (chicken: 21 vs 89)
+        // por containment overlap entre snarls siblings que compartilham
+        // nós internos.
+        if (std::getenv("GGQL_PATEN_F6")) {
+            out = filter_top_level_snarls(topo, std::move(out));
         }
     }
 
