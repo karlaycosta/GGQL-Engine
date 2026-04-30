@@ -118,9 +118,41 @@ static void test_two_consecutive_bubbles() {
     cleanup(gfa, idx);
 }
 
+// ── 4. Fase 2: snarl com orientação reversa (Onodera não detecta) ──────────
+//
+// Grafo:
+//    A → B → C
+//        ↓
+//        D ← (reverso)
+//        ↓
+//        E
+//
+// O link B → D é '+' / '-' (entra D pelo lado direito reverso). Onodera,
+// que só olha grafo dirigido forward, não detecta a bolha. Fase 2 (bridges
+// no bidirected graph) deve detectar.
+static void test_reverse_orient_snarl() {
+    auto gfa = write_gfa("rev",
+        "S\tA\tACGT\nS\tB\tGGGG\nS\tC\tTTTT\nS\tD\tCCCC\nS\tE\tAAAA\n"
+        "L\tA\t+\tB\t+\t0M\n"
+        "L\tB\t+\tC\t+\t0M\n"
+        "L\tB\t+\tD\t-\t0M\n"
+        "L\tD\t-\tE\t+\t0M\n"
+        "L\tC\t+\tE\t+\t0M\n");
+    const std::string idx = "/tmp/ggql_snarl_rev_idx/";
+    auto topo = load_topology(gfa, idx);
+
+    auto snarls = ggql::snarl_decomposition::find_all_snarls(topo, 1);
+    // Pelo menos 1 snarl envolvendo o caminho via D (orientação reversa).
+    assert(!snarls.empty()
+           && "Fase 2 deve detectar snarl com orientação reversa B→{C,D-}→E");
+
+    cleanup(gfa, idx);
+}
+
 int main() {
     test_single_bubble();
     test_linear_no_snarls();
     test_two_consecutive_bubbles();
+    test_reverse_orient_snarl();
     return EXIT_SUCCESS;
 }

@@ -11,7 +11,11 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <span>
+#include <unordered_map>
+#include <utility>
 
 namespace ggql::snarl_decomposition {
 
@@ -25,6 +29,194 @@ struct SCCDecomp {
     std::vector<uint32_t> scc_size;
     uint32_t num_scc = 0;
 };
+
+// ── Reconstrói LinkRecords completos a partir de E_fwd_/E_bwd_ ──────────────
+//
+// A topology guarda apenas (v, o2) em out_neighbors e (u, o1) em in_neighbors.
+// Para construir o grafo bidirected precisamos AMBAS orientações por link.
+// Cross-correlate: para cada u, listar (v, o2); para cada v, listar (u, o1);
+// parear por (u, v) — assumindo ordem de aparecimento estável (multi-edges
+// com diferentes orientações são raros em pangenomas; OK como aproximação).
+std::vector<LinkRecord> extract_link_records(const GfaCsrTopology& topo) {
+    using Pair = std::pair<uint64_t, uint64_t>;
+    struct PairHash {
+        size_t operator()(const Pair& p) const noexcept {
+            return std::hash<uint64_t>()(p.first) * 1315423911u
+                 ^ std::hash<uint64_t>()(p.second);
+        }
+    };
+    std::unordered_map<Pair, std::vector<char>, PairHash> fwd_orients; // o2 chars
+    std::unordered_map<Pair, std::vector<char>, PairHash> bwd_orients; // o1 chars
+    fwd_orients.reserve(static_cast<size_t>(topo.num_edges()));
+    bwd_orients.reserve(static_cast<size_t>(topo.num_edges()));
+
+    const uint64_t N = topo.num_nodes();
+    for (uint64_t u = 0; u < N; ++u) {
+        for (uint64_t enc : topo.out_neighbors(u)) {
+            const auto e = GfaCsrTopology::decode(enc);
+            fwd_orients[{u, e.node_id}].push_back(e.orient);
+        }
+        for (uint64_t enc : topo.in_neighbors(u)) {
+            const auto e = GfaCsrTopology::decode(enc);
+            bwd_orients[{e.node_id, u}].push_back(e.orient);
+        }
+    }
+
+    std::vector<LinkRecord> out;
+    out.reserve(topo.num_edges());
+    for (auto& [key, o2s] : fwd_orients) {
+        auto it = bwd_orients.find(key);
+        if (it == bwd_orients.end()) { continue; }
+        auto& o1s = it->second;
+        const size_t n = std::min(o2s.size(), o1s.size());
+        for (size_t i = 0; i < n; ++i) {
+            out.push_back(LinkRecord::make(key.first, o1s[i],
+                                           key.second, o2s[i]));
+        }
+    }
+    return out;
+}
+
+// ── Bidirected (biedged) graph adapter ──────────────────────────────────────
+//
+// Cada nó GFA v vira 2 sides: encoded como side_id = (v << 1) | side_bit
+//   side_bit = 0 → lado L (esquerdo / 5')
+//   side_bit = 1 → lado R (direito / 3')
+//
+// Edges:
+//   - Spine edge: (v_L) ↔ (v_R) — uma por nó GFA
+//   - Link edge: para cada LinkRecord (u, o1, v, o2):
+//       saída de u: o1='+'→ R, o1='-'→ L
+//       entrada de v: o2='+'→ L, o2='-'→ R
+//
+// Representação: vector de listas de adjacência sobre 2N sides.
+struct BiedgedGraph {
+    std::vector<std::vector<uint64_t>> adj; // 2N entries, cada uma = vetor de sides
+
+    explicit BiedgedGraph(uint64_t N, const std::vector<LinkRecord>& links) {
+        adj.assign(static_cast<size_t>(N) * 2, {});
+        // Spine edges
+        for (uint64_t v = 0; v < N; ++v) {
+            adj[v * 2 + 0].push_back(v * 2 + 1);
+            adj[v * 2 + 1].push_back(v * 2 + 0);
+        }
+        // Link edges
+        for (const auto& lk : links) {
+            const uint64_t u = lk.from_id();
+            const uint64_t v = lk.to_id();
+            const bool u_side = (lk.from_orient() == '+'); // saída via R
+            const bool v_side = (lk.to_orient()   != '+'); // entrada: '+'→L (false), '-'→R (true)
+            const uint64_t s_u = u * 2 + (u_side ? 1 : 0);
+            const uint64_t s_v = v * 2 + (v_side ? 1 : 0);
+            adj[static_cast<size_t>(s_u)].push_back(s_v);
+            adj[static_cast<size_t>(s_v)].push_back(s_u);
+        }
+    }
+    size_t num_sides() const noexcept { return adj.size(); }
+};
+
+// ── Tarjan bridge-finding (DFS iterativa) ───────────────────────────────────
+//
+// Bridge = aresta cuja remoção desconecta o grafo. No grafo bidirected,
+// bridges entre componentes 2-edge-connected definem boundary pairs.
+//
+// Implementação clássica: para cada aresta (u, v) em DFS-tree,
+//   bridge sse low[v] > disc[u]
+// onde disc[v] = ordem de descoberta, low[v] = mínimo disc reachable via
+// back-edges no subárvore de v.
+//
+// Como o grafo é não-dirigido (undirected biedged), uso edge_id estável
+// para evitar volta pelo parent (multi-edges não são problema porque cada
+// edge tem id único).
+
+struct Bridges {
+    std::vector<std::pair<uint64_t, uint64_t>> bridges; // pares de sides
+    std::vector<uint32_t> disc, low;
+    std::vector<uint32_t> component_2ec; // componente 2-edge-conectado de cada side
+    uint32_t num_components_2ec = 0;
+};
+
+Bridges find_bridges_2ec(const BiedgedGraph& bg) {
+    const size_t N2 = bg.num_sides();
+    Bridges out;
+    out.disc.assign(N2, UINT32_MAX);
+    out.low.assign(N2, UINT32_MAX);
+
+    // DFS iterativa para evitar stack overflow em grafos grandes.
+    // parent_used distingue "já voltei ao parent uma vez (tree edge)" de
+    // "vim ao parent uma segunda vez (multi-edge → back edge)".
+    struct Frame { uint64_t s; uint32_t i; uint64_t parent; bool parent_used; };
+    std::vector<Frame> stk;
+    stk.reserve(N2);
+
+    uint32_t time = 0;
+    for (uint64_t root = 0; root < N2; ++root) {
+        if (out.disc[root] != UINT32_MAX) { continue; }
+        out.disc[root] = out.low[root] = time++;
+        stk.push_back({root, 0u, UINT64_MAX, false});
+        while (!stk.empty()) {
+            auto& fr = stk.back();
+            const auto& neigh = bg.adj[static_cast<size_t>(fr.s)];
+            if (fr.i < neigh.size()) {
+                const uint64_t to = neigh[fr.i++];
+                if (out.disc[to] == UINT32_MAX) {
+                    // Tree edge
+                    out.disc[to] = out.low[to] = time++;
+                    stk.push_back({to, 0u, fr.s, false});
+                } else if (to == fr.parent && !fr.parent_used) {
+                    // Primeira ida de volta ao parent — não é back edge
+                    fr.parent_used = true;
+                } else {
+                    // Back edge real (ou multi-edge ao parent)
+                    out.low[fr.s] = std::min(out.low[fr.s], out.disc[to]);
+                }
+            } else {
+                // Pop: propaga low para parent e detecta bridge
+                const uint64_t s = fr.s;
+                const uint64_t p = fr.parent;
+                stk.pop_back();
+                if (p != UINT64_MAX && !stk.empty()) {
+                    out.low[stk.back().s] = std::min(out.low[stk.back().s], out.low[s]);
+                    // Bridge check
+                    if (out.low[s] > out.disc[p]) {
+                        out.bridges.push_back({p, s});
+                    }
+                }
+            }
+        }
+    }
+
+    // Componentes 2-edge-conectados: nós conectados via não-bridges.
+    // Marca bridges como "cortes" e faz BFS/DFS em arestas não-bridge.
+    std::vector<std::pair<uint64_t, uint64_t>> bridge_pairs = out.bridges;
+    auto is_bridge = [&](uint64_t a, uint64_t b) -> bool {
+        for (const auto& [x, y] : bridge_pairs) {
+            if ((x == a && y == b) || (x == b && y == a)) return true;
+        }
+        return false;
+    };
+
+    out.component_2ec.assign(N2, UINT32_MAX);
+    for (uint64_t root = 0; root < N2; ++root) {
+        if (out.component_2ec[root] != UINT32_MAX) { continue; }
+        const uint32_t cid = out.num_components_2ec++;
+        // BFS contando apenas non-bridges
+        std::vector<uint64_t> q;
+        q.push_back(root);
+        out.component_2ec[root] = cid;
+        while (!q.empty()) {
+            const uint64_t u = q.back(); q.pop_back();
+            for (uint64_t v : bg.adj[static_cast<size_t>(u)]) {
+                if (out.component_2ec[v] == UINT32_MAX && !is_bridge(u, v)) {
+                    out.component_2ec[v] = cid;
+                    q.push_back(v);
+                }
+            }
+        }
+    }
+
+    return out;
+}
 
 SCCDecomp compute_scc(const GfaCsrTopology& topo) {
     const uint64_t N = topo.num_nodes();
@@ -118,6 +310,126 @@ SCCDecomp compute_scc(const GfaCsrTopology& topo) {
 //   - has_cycles = 1 se algum desses nós internos está em SCC não-trivial
 //     (isto é, não-DAG localmente — captura snarls que vg detecta como
 //     UNCLASSIFIED em vez de ULTRABUBBLE).
+
+// ── Fase 2: snarls a partir de bridges no bidirected graph ──────────────────
+//
+// Cada link bridge (u_X, v_Y) com u != v define um snarl boundary. Nodes
+// que aparecem em ambos os lados de um bridge são source/sink candidatos.
+//
+// Para popular SnarlRecord:
+//   - source/sink: o par (u, v) ordenado pelo lado R do source
+//   - branch_count: out-degree do source no biedged - 1 (exclui spine)
+//   - internal_node_count: # nós no componente 2-edge-conn que contém o sink
+//                         (aproximação superior; refinamento na Fase 3)
+//   - has_cycles: 1 se algum nó interno está em SCC não-trivial do grafo
+//                 dirigido original
+static std::vector<SnarlRecord>
+find_snarls_from_bridges(const GfaCsrTopology& topo,
+                         const std::vector<uint8_t>& is_in_nontrivial_scc) {
+    const uint64_t N = topo.num_nodes();
+    if (N == 0) { return {}; }
+
+    auto links = extract_link_records(topo);
+    BiedgedGraph bg(N, links);
+    auto br = find_bridges_2ec(bg);
+
+    if (std::getenv("GGQL_DEBUG_BIEDGED")) {
+        size_t spine_bridges = 0, link_bridges = 0;
+        for (const auto& [a, b] : br.bridges) {
+            if ((a >> 1) == (b >> 1)) ++spine_bridges;
+            else ++link_bridges;
+        }
+        std::fprintf(stderr,
+                     "[debug biedged] N=%lu links=%lu sides=%lu bridges=%lu (spine=%lu link=%lu) 2EC_comps=%u\n",
+                     static_cast<unsigned long>(N),
+                     static_cast<unsigned long>(links.size()),
+                     static_cast<unsigned long>(bg.num_sides()),
+                     static_cast<unsigned long>(br.bridges.size()),
+                     static_cast<unsigned long>(spine_bridges),
+                     static_cast<unsigned long>(link_bridges),
+                     br.num_components_2ec);
+    }
+    (void)is_in_nontrivial_scc;  // referenciado em comp_has_cycle abaixo
+
+    // Tamanho de cada componente 2-edge-conn (em nós GFA distintos).
+    std::vector<uint32_t> comp_node_count(br.num_components_2ec, 0);
+    {
+        std::vector<uint8_t> seen(N, 0);
+        // Para cada componente, conta nós distintos (cada nó tem 2 sides — pode
+        // estar em comp diferentes! Mas em prática, ambos sides de um nó ficam
+        // no mesmo comp se o spine edge não é bridge). Conta só uma vez por nó.
+        std::vector<uint32_t> first_comp_seen(N, UINT32_MAX);
+        for (uint64_t s = 0; s < bg.num_sides(); ++s) {
+            const uint64_t v = s >> 1;
+            const uint32_t c = br.component_2ec[s];
+            if (first_comp_seen[v] == UINT32_MAX) {
+                first_comp_seen[v] = c;
+                ++comp_node_count[c];
+            }
+        }
+    }
+
+    // Componentes que contêm pelo menos um nó em SCC não-trivial (cíclicos).
+    std::vector<uint8_t> comp_has_cycle(br.num_components_2ec, 0);
+    {
+        std::vector<uint8_t> first_seen_set(N, 0);
+        for (uint64_t s = 0; s < bg.num_sides(); ++s) {
+            const uint64_t v = s >> 1;
+            if (first_seen_set[v]) { continue; }
+            first_seen_set[v] = 1;
+            if (is_in_nontrivial_scc[v]) {
+                comp_has_cycle[br.component_2ec[s]] = 1;
+            }
+        }
+    }
+
+    std::vector<SnarlRecord> out;
+    out.reserve(br.bridges.size());
+
+    // Para cada bridge, emit snarl se for link bridge (não spine).
+    // Dedupe por (source, sink) ordenado.
+    std::vector<std::pair<uint64_t, uint64_t>> seen_pairs;
+    seen_pairs.reserve(br.bridges.size());
+
+    for (const auto& [a, b] : br.bridges) {
+        const uint64_t na = a >> 1;
+        const uint64_t nb = b >> 1;
+        if (na == nb) { continue; } // spine bridge → ignora
+
+        // Ordena por node_id para fixar source/sink (semântica refinada na Fase 3)
+        const uint64_t source = std::min(na, nb);
+        const uint64_t sink   = std::max(na, nb);
+
+        const auto pair = std::make_pair(source, sink);
+        if (std::find(seen_pairs.begin(), seen_pairs.end(), pair) != seen_pairs.end()) {
+            continue;
+        }
+        seen_pairs.push_back(pair);
+
+        SnarlRecord rec{};
+        rec.source = source;
+        rec.sink   = sink;
+
+        // branch_count: out-degree do side de saída do source no biedged - 1 (spine)
+        // Lado R do source (saída forward)
+        const size_t src_R = static_cast<size_t>(source * 2 + 1);
+        const uint32_t bc_raw = static_cast<uint32_t>(bg.adj[src_R].size());
+        rec.branch_count = static_cast<uint8_t>(std::min<uint32_t>(
+            bc_raw > 0 ? bc_raw - 1 : 0, 255));
+
+        // internal_node_count: tamanho do componente 2-EC que contém uma das
+        // pontas do bridge, menos os 2 boundaries (source, sink).
+        const uint32_t comp_id = br.component_2ec[a];
+        const uint32_t cnc = comp_node_count[comp_id];
+        rec.internal_node_count = (cnc > 2) ? (cnc - 2) : 0;
+
+        rec.has_cycles = comp_has_cycle[comp_id];
+
+        out.push_back(rec);
+    }
+
+    return out;
+}
 
 std::vector<SnarlRecord> find_all_snarls(const GfaCsrTopology& topo,
                                          int /*num_threads*/) {
@@ -233,6 +545,24 @@ std::vector<SnarlRecord> find_all_snarls(const GfaCsrTopology& topo,
                                      static_cast<uint8_t>(std::min<uint32_t>(out_dag_v, 255))});
             }
         }
+    }
+
+    // ── FASE 2: bridges no bidirected graph ─────────────────────────────────
+    // Captura snarls que envolvem orientação reversa (~70% dos snarls do vg).
+    auto fase2 = find_snarls_from_bridges(topo, is_in_nontrivial_scc);
+
+    // Merge deduplicado por (source, sink). Em conflito, manter o registro
+    // da Fase 1 (mais preciso para internal_node_count via topological sweep).
+    std::vector<std::pair<uint64_t, uint64_t>> seen;
+    seen.reserve(out.size());
+    for (const auto& s : out) { seen.push_back({s.source, s.sink}); }
+    for (const auto& s : fase2) {
+        const auto p = std::make_pair(s.source, s.sink);
+        const auto p_rev = std::make_pair(s.sink, s.source);
+        if (std::find(seen.begin(), seen.end(), p) != seen.end()) { continue; }
+        if (std::find(seen.begin(), seen.end(), p_rev) != seen.end()) { continue; }
+        out.push_back(s);
+        seen.push_back(p);
     }
 
     return out;

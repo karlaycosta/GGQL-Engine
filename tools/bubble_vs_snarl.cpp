@@ -58,11 +58,13 @@ int main(int argc, char* argv[]) {
     std::printf("bubbles (find_bubbles, Onodera 2013):       %lu  (em %.3f s)\n",
                 static_cast<unsigned long>(bubbles.size()), sec);
 
-    // ── 3. find_all_snarls (Paten 2018, Fase 1) ──────────────────────────────
+    // ── 3. find_all_snarls (Paten 2018, Fases 1+2) ────────────────────────────
+    // Defina GGQL_DEBUG_BIEDGED=1 no env para ver estatísticas internas
+    // (bridges spine vs link, components 2-edge-conn) em stderr.
     const auto t1 = clk::now();
     auto snarls_paten = ggql::snarl_decomposition::find_all_snarls(topo, 1);
     const double sec_paten = std::chrono::duration<double>(clk::now() - t1).count();
-    std::printf("snarls (find_all_snarls, Paten 2018 Fase 1): %lu  (em %.3f s)\n",
+    std::printf("snarls (find_all_snarls, Paten 2018 F1+F2): %lu  (em %.3f s)\n",
                 static_cast<unsigned long>(snarls_paten.size()), sec_paten);
     if (!snarls_paten.empty()) {
         size_t with_cycles = 0, dag = 0;
