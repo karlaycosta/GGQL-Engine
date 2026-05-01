@@ -67,6 +67,13 @@ std::vector<SnarlRecord> find_all_snarls_vgstyle(const GfaCsrTopology& topo,
 std::vector<SnarlRecord> find_all_snarls_sese(const GfaCsrTopology& topo,
                                                int num_threads = 1);
 
+// PORT LITERAL do algoritmo Billi (at-cg/billi, Bhat/Mahajan/Jain 2025).
+// Adaptação direta da pipeline run_decompose() do Billi para nossa stack:
+// build biedged → compact → tips → SESE → hairp → mark_nodes → output.
+// Resultado pretende ser idêntico ao binário Billi.
+std::vector<SnarlRecord> find_all_snarls_billi_port(const GfaCsrTopology& topo,
+                                                     int num_threads = 1);
+
 // Wrapper que invoca o binário Billi (at-cg/billi) como subprocess.
 // Garante por construção: resultado IDÊNTICO ao Billi de referência.
 //

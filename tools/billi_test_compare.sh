@@ -17,8 +17,8 @@ if [[ ! -x "$BILLI" ]]; then
     exit 1
 fi
 
-printf "%-40s %-13s %-7s %-7s %-9s %s\n" "test" "billi(BB+HP)" "paten" "sese" "vgstyle" "wrapper"
-printf "%-40s %-13s %-7s %-7s %-9s %s\n" "----" "-------------" "-----" "----" "-------" "-------"
+printf "%-40s %-13s %-7s %-7s %-9s %-9s %s\n" "test" "billi(BB+HP)" "paten" "sese" "vgstyle" "wrapper" "port"
+printf "%-40s %-13s %-7s %-7s %-9s %-9s %s\n" "----" "-------------" "-----" "----" "-------" "-------" "-----"
 
 for gfa in $(find "$TESTDIR" -name "*.gfa" | sort); do
     name="$(basename "$gfa" .gfa)"
@@ -41,12 +41,13 @@ for gfa in $(find "$TESTDIR" -name "*.gfa" | sort); do
         continue
     fi
 
-    # Roda nossas 4 implementações via bubble_vs_snarl
+    # Roda nossas 5 implementações via bubble_vs_snarl
     bvs_out=$(GGQL_BILLI_PATH="$BILLI" "$BVS" "$real_idx" 2>&1)
     paten=$(echo "$bvs_out" | grep -oP "F1\+F2\): +\K\d+")
     sese=$(echo "$bvs_out" | grep -oP "Billi/SESE\): +\K\d+")
     vgstyle=$(echo "$bvs_out" | grep -oP "vgstyle, refactor\): +\K\d+")
     wrapper=$(echo "$bvs_out" | grep -oP "billi, wrapper\): +\K\d+")
+    port=$(echo "$bvs_out" | grep -oP "billi_port, native\): +\K\d+")
 
-    printf "%-40s %-13s %-7s %-7s %-9s %s\n" "$label" "${billi_total}(${bb}/${hp})" "${paten:-0}" "${sese:-0}" "${vgstyle:-0}" "${wrapper:-0}"
+    printf "%-40s %-13s %-7s %-7s %-9s %-9s %s\n" "$label" "${billi_total}(${bb}/${hp})" "${paten:-0}" "${sese:-0}" "${vgstyle:-0}" "${wrapper:-0}" "${port:-0}"
 done

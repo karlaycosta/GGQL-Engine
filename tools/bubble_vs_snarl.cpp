@@ -100,5 +100,12 @@ int main(int argc, char* argv[]) {
     std::printf("snarls (find_all_snarls_billi, wrapper):     %lu  (em %.3f s)\n",
                 static_cast<unsigned long>(snarls_billi.size()), sec_billi);
 
+    // ── 7. find_all_snarls_billi_port (port literal nativo do Billi) ─────────
+    const auto t5 = clk::now();
+    auto snarls_port = ggql::snarl_decomposition::find_all_snarls_billi_port(topo, 1);
+    const double sec_port = std::chrono::duration<double>(clk::now() - t5).count();
+    std::printf("snarls (find_all_snarls_billi_port, native): %lu  (em %.3f s)\n",
+                static_cast<unsigned long>(snarls_port.size()), sec_port);
+
     return 0;
 }
