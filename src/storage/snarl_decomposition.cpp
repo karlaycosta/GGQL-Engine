@@ -72,28 +72,32 @@ struct BilliState {
 
     // ── Generic ──────────────────────────────────────────────────────
     int maxd = 0;
-    int tot_gray = 0;
     std::vector<uint8_t> mark;  // uint8_t em vez de bool (hot path)
 
     // ── Input (GFA → biedged graph) ──────────────────────────────────
     //
     // Adjacência CSR plana economiza ~5 GB em pangenomas grandes vs
-    // vector<vector<pii>> (220 M envelopes vazios × 24 B = 5.3 GB no HPRC).
+    // vector<vector<>> (220 M envelopes vazios × 24 B = 5.3 GB no HPRC).
     // Black edge sempre fica em ed[off[id]+0] por construção.
-    struct CsrAdj {
+    template <typename T>
+    struct CsrAdjT {
         std::vector<uint32_t> off; // size 2n+1
-        std::vector<pii> ed;       // size = off[2n]
+        std::vector<T> ed;         // size = off[2n]
         size_t deg(int id) const noexcept {
             return static_cast<size_t>(off[id + 1] - off[id]);
         }
-        pii& at(int id, size_t k) noexcept { return ed[off[id] + k]; }
-        const pii& at(int id, size_t k) const noexcept { return ed[off[id] + k]; }
+        T& at(int id, size_t k) noexcept { return ed[off[id] + k]; }
+        const T& at(int id, size_t k) const noexcept { return ed[off[id] + k]; }
     };
+    using CsrAdj    = CsrAdjT<pii>;  // (target_id, gray_edge_id) — usado por g_compacted
+    using CsrAdjInt = CsrAdjT<int>;  // só target_id — usado por g (gray_edge_id é dead)
 
     int n = 0;            // # nós GFA
     int edges_count = 0;  // # links
     std::vector<uint8_t> has_self_loop;
-    CsrAdj g; // adjacência biedged (black + gray); descartada após compaction
+    // g só usa o target node — gray_edge_id seria descartado após compaction.
+    // int em vez de pii corta ~1.7 GB no HPRC (8B → 4B por entry).
+    CsrAdjInt g;
 
     // ── Compacted Graph ──────────────────────────────────────────────
     int cnt_gray_edge = 0;
@@ -163,12 +167,12 @@ struct BilliState {
     // ─────────────────────────────────────────────────────────────────
 
     bool chk_vertex(int id) {
-        return g.deg(id) == 2 && g.at(id, 0).first != g.at(id, 1).first
+        return g.deg(id) == 2 && g.at(id, 0) != g.at(id, 1)
                && !has_self_loop[id];
     }
     bool chk_for_compaction(int id) {
         if (chk_vertex(id)) {
-            int u = g.at(id, 1).first;
+            int u = g.at(id, 1);
             return chk_vertex(u);
         }
         return false;
@@ -656,8 +660,8 @@ static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo) {
 
     // ── Pass 3a: black edges PRIMEIRO (ficam em off[id] + 0) ────────────
     for (int i = 0; i < s.n; ++i) {
-        s.g.ed[cursor[2*i]++]     = {2*i + 1, -1};
-        s.g.ed[cursor[2*i + 1]++] = {2*i,     -1};
+        s.g.ed[cursor[2*i]++]     = 2*i + 1;
+        s.g.ed[cursor[2*i + 1]++] = 2*i;
     }
 
     // ── Pass 3b: gray edges ─────────────────────────────────────────────
@@ -667,9 +671,8 @@ static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo) {
             int id1, id2, n1, n2;
             char s1, s2;
             if (!resolve_link(u, k, id1, id2, n1, n2, s1, s2)) continue;
-            s.g.ed[cursor[id1]++] = {id2, s.tot_gray};
-            if (id1 != id2) s.g.ed[cursor[id2]++] = {id1, s.tot_gray};
-            ++s.tot_gray;
+            s.g.ed[cursor[id1]++] = id2;
+            if (id1 != id2) s.g.ed[cursor[id2]++] = id1;
             if (n1 == n2 && s1 != s2) s.has_self_loop[id1] = true;
             ++s.edges_count;
         }
@@ -701,27 +704,27 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
             if (hi > lo + 1) {
                 std::sort(s.g.ed.begin() + lo + 1, s.g.ed.begin() + hi);
             }
-            const int black_first = s.g.ed[lo].first;
-            const bool include_black = (hi - lo >= 2 && black_first == s.g.ed[lo + 1].first);
+            const int black_target = s.g.ed[lo];
+            const bool include_black = (hi - lo >= 2 && black_target == s.g.ed[lo + 1]);
 
             // Black sempre escrito primeiro.
             s.g.ed[write++] = s.g.ed[lo];
 
             size_t j = lo + 1;
             if (include_black) {
-                // Pula grays cuja .first == black.first (colapsados pelo
+                // Pula grays cujo target == black target (colapsados pelo
                 // unique do Billi original quando estão contíguos no sort).
-                while (j < hi && s.g.ed[j].first == black_first) ++j;
+                while (j < hi && s.g.ed[j] == black_target) ++j;
             }
 
             if (j < hi) {
                 s.g.ed[write++] = s.g.ed[j];
-                int prev_first = s.g.ed[j].first;
+                int prev_target = s.g.ed[j];
                 ++j;
                 for (; j < hi; ++j) {
-                    if (s.g.ed[j].first != prev_first) {
+                    if (s.g.ed[j] != prev_target) {
                         s.g.ed[write++] = s.g.ed[j];
-                        prev_first = s.g.ed[j].first;
+                        prev_target = s.g.ed[j];
                     }
                 }
             }
@@ -743,14 +746,14 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
         if (s.mark[i]) continue;
         if (s.chk_for_compaction(i)) {
             s.q_compact.push({i ^ 1, 0});
-            s.q_compact.push({s.g.at(i, 1).first ^ 1, 1});
-            int left = i, right = s.g.at(i, 1).first;
+            s.q_compact.push({s.g.at(i, 1) ^ 1, 1});
+            int left = i, right = s.g.at(i, 1);
             s.mark[left] = s.mark[right] = true;
             while (!s.q_compact.empty()) {
                 pii pid = s.q_compact.front(); s.q_compact.pop();
                 if (s.chk_for_compaction(pid.first)) {
                     s.mark[pid.first] = true;
-                    int neigh = s.g.at(pid.first, 1).first;
+                    int neigh = s.g.at(pid.first, 1);
                     s.mark[neigh] = true;
                     if (s.mark[neigh ^ 1]) continue;
                     if (pid.second == 0) {
@@ -769,13 +772,13 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
             s.ty_end[l] = 0; s.ty_end[r] = 1;
             s.black_edge_id[l] = s.black_edge_id[r] = s.cnt_black_edge++;
             for (size_t j = 1, dl = s.g.deg(l); j < dl; ++j) {
-                int u = s.g.at(l, j).first;
+                int u = s.g.at(l, j);
                 if (s.mark[u] && u != r) continue;
                 if (l != u) s.g_compacted[l].push_back({u, s.cnt_gray_edge});
                 s.g_compacted[u].push_back({l, s.cnt_gray_edge++});
             }
             for (size_t j = 1, dr = s.g.deg(r); j < dr; ++j) {
-                int u = s.g.at(r, j).first;
+                int u = s.g.at(r, j);
                 if (s.mark[u]) continue;
                 if (r != u) s.g_compacted[r].push_back({u, s.cnt_gray_edge});
                 s.g_compacted[u].push_back({r, s.cnt_gray_edge++});
@@ -793,7 +796,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
             s.black_edge_id[i] = s.black_edge_id[i ^ 1] = s.cnt_black_edge++;
         }
         for (size_t j = 1, di = s.g.deg(i); j < di; ++j) {
-            int u = s.g.at(i, j).first;
+            int u = s.g.at(i, j);
             if (s.mark[u]) continue;
             if (i != u) s.g_compacted[i].push_back({u, s.cnt_gray_edge});
             s.g_compacted[u].push_back({i, s.cnt_gray_edge++});
