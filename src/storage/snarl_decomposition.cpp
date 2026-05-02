@@ -76,10 +76,24 @@ struct BilliState {
     std::vector<uint8_t> mark;  // uint8_t em vez de bool (hot path)
 
     // ── Input (GFA → biedged graph) ──────────────────────────────────
+    //
+    // Adjacência CSR plana economiza ~5 GB em pangenomas grandes vs
+    // vector<vector<pii>> (220 M envelopes vazios × 24 B = 5.3 GB no HPRC).
+    // Black edge sempre fica em ed[off[id]+0] por construção.
+    struct CsrAdj {
+        std::vector<uint32_t> off; // size 2n+1
+        std::vector<pii> ed;       // size = off[2n]
+        size_t deg(int id) const noexcept {
+            return static_cast<size_t>(off[id + 1] - off[id]);
+        }
+        pii& at(int id, size_t k) noexcept { return ed[off[id] + k]; }
+        const pii& at(int id, size_t k) const noexcept { return ed[off[id] + k]; }
+    };
+
     int n = 0;            // # nós GFA
     int edges_count = 0;  // # links
     std::vector<uint8_t> has_self_loop;
-    std::vector<std::vector<pii>> g; // (node_id, gray_edge_id)
+    CsrAdj g; // adjacência biedged (black + gray); descartada após compaction
 
     // ── Compacted Graph ──────────────────────────────────────────────
     int cnt_gray_edge = 0;
@@ -96,7 +110,12 @@ struct BilliState {
     std::vector<int> depth;
     std::vector<int> biedged_connected_comp;
     std::vector<std::vector<int>> tips;
+    // g_compacted é vector<vector<>> durante a fase de build (compaction +
+    // swap-black + tip-add) porque sofre push_back dinâmico. Após o último
+    // write é feito FREEZE para a CSR plana g_compacted_csr (~5 GB economia
+    // sustentada no HPRC durante todo o SESE/hairp/mark_nodes).
     std::vector<std::vector<pii>> g_compacted;
+    CsrAdj g_compacted_csr;
 
     // ── SESE ────────────────────────────────────────────────────────
     int vtime = 0;
@@ -143,19 +162,13 @@ struct BilliState {
     // Métodos do algoritmo (port literal de billi/decompose.cpp)
     // ─────────────────────────────────────────────────────────────────
 
-    void add_edge(std::vector<std::vector<pii>>& gg, int id1, int id2) {
-        gg[id1].push_back({id2, tot_gray});
-        if (id1 != id2) gg[id2].push_back({id1, tot_gray});
-        ++tot_gray;
-    }
-
     bool chk_vertex(int id) {
-        return g[id].size() == 2 && g[id][0].first != g[id][1].first
+        return g.deg(id) == 2 && g.at(id, 0).first != g.at(id, 1).first
                && !has_self_loop[id];
     }
     bool chk_for_compaction(int id) {
         if (chk_vertex(id)) {
-            int u = g[id][1].first;
+            int u = g.at(id, 1).first;
             return chk_vertex(u);
         }
         return false;
@@ -198,8 +211,9 @@ struct BilliState {
         while (!stk.empty()) {
             auto& f = stk.back();
             bool pushed = false;
-            while (f.ci < g_compacted[f.u].size()) {
-                int v = g_compacted[f.u][f.ci++].first;
+            const size_t deg_u = g_compacted_csr.deg(f.u);
+            while (f.ci < deg_u) {
+                int v = g_compacted_csr.at(f.u, f.ci++).first;
                 if (mark[v]) continue;
                 mark[v] = true;
                 depth[v] = depth[f.u] + 1;
@@ -303,30 +317,39 @@ struct BilliState {
 
                 // Compute can_end
                 f.can_end = true;
-                for (const auto& child : g_compacted[f.u]) {
-                    if (child.first == dual[f.u] && child.second != -1) {
-                        f.can_end = false; break;
+                {
+                    const size_t deg_u = g_compacted_csr.deg(f.u);
+                    for (size_t k = 0; k < deg_u; ++k) {
+                        const auto& child = g_compacted_csr.at(f.u, k);
+                        if (child.first == dual[f.u] && child.second != -1) {
+                            f.can_end = false; break;
+                        }
                     }
                 }
                 // Compute h0 for non-recursive edges (parent, self, back-edges)
-                for (const auto& child : g_compacted[f.u]) {
-                    int v = child.first;
-                    if (v == f.parent || v == f.u) {
-                        f.h0 = std::min(f.h0, depth[v]);
-                        continue;
-                    }
-                    if (f.parent == -1 && child.second != -1) continue;
-                    if (mark[v]) {
-                        if (depth[v] <= depth[f.u])
+                {
+                    const size_t deg_u = g_compacted_csr.deg(f.u);
+                    for (size_t k = 0; k < deg_u; ++k) {
+                        const auto& child = g_compacted_csr.at(f.u, k);
+                        int v = child.first;
+                        if (v == f.parent || v == f.u) {
                             f.h0 = std::min(f.h0, depth[v]);
+                            continue;
+                        }
+                        if (f.parent == -1 && child.second != -1) continue;
+                        if (mark[v]) {
+                            if (depth[v] <= depth[f.u])
+                                f.h0 = std::min(f.h0, depth[v]);
+                        }
                     }
                 }
             }
 
             // Find next unvisited child to "recurse" into
             bool pushed = false;
-            while (f.ci < g_compacted[f.u].size()) {
-                const auto& child = g_compacted[f.u][f.ci++];
+            const size_t deg_u = g_compacted_csr.deg(f.u);
+            while (f.ci < deg_u) {
+                const auto& child = g_compacted_csr.at(f.u, f.ci++);
                 int v = child.first;
                 if (v == f.parent || v == f.u) continue;
                 if (f.parent == -1 && child.second != -1) continue;
@@ -345,16 +368,20 @@ struct BilliState {
                 int h0 = f.h0, h1 = f.h1, h2 = f.h2;
 
                 bl[u] = alloc_bracket();
-                for (const auto& child : g_compacted[u]) {
-                    int v = child.first;
-                    if (depth[v] != depth[u] + 1) continue;
-                    if (parent == -1 && child.second != -1) continue;
-                    if (bl[v]) {
-                        if (bl[v]->d < h1) { h2 = h1; h1 = bl[v]->d; }
-                        else                { h2 = std::min(h2, bl[v]->d); }
-                        bl[v]->d = maxd;
+                {
+                    const size_t deg_u_post = g_compacted_csr.deg(u);
+                    for (size_t k = 0; k < deg_u_post; ++k) {
+                        const auto& child = g_compacted_csr.at(u, k);
+                        int v = child.first;
+                        if (depth[v] != depth[u] + 1) continue;
+                        if (parent == -1 && child.second != -1) continue;
+                        if (bl[v]) {
+                            if (bl[v]->d < h1) { h2 = h1; h1 = bl[v]->d; }
+                            else                { h2 = std::min(h2, bl[v]->d); }
+                            bl[v]->d = maxd;
+                        }
+                        if (bl[v] && !bl[v]->merged) merge(bl[u], bl[v]);
                     }
-                    if (bl[v] && !bl[v]->merged) merge(bl[u], bl[v]);
                 }
                 bl[u]->d = std::min(h0, h1);
 
@@ -380,14 +407,18 @@ struct BilliState {
                 }
                 if (bl[u]->d == depth[u]) bl[u]->d = maxd;
 
-                for (const auto& child : g_compacted[u]) {
-                    int v = child.first;
-                    if (depth[v] >= depth[u] - 1) continue;
-                    if (parent == -1 && child.second != -1) continue;
-                    Edge* ed = alloc_edge(child.second);
-                    pending_removals[v].push_back(ed);
-                    auto* tmp = alloc_bracket(1, depth[v], ed, ed);
-                    merge(bl[u], tmp);
+                {
+                    const size_t deg_u_back = g_compacted_csr.deg(u);
+                    for (size_t k = 0; k < deg_u_back; ++k) {
+                        const auto& child = g_compacted_csr.at(u, k);
+                        int v = child.first;
+                        if (depth[v] >= depth[u] - 1) continue;
+                        if (parent == -1 && child.second != -1) continue;
+                        Edge* ed = alloc_edge(child.second);
+                        pending_removals[v].push_back(ed);
+                        auto* tmp = alloc_bracket(1, depth[v], ed, ed);
+                        merge(bl[u], tmp);
+                    }
                 }
 
                 if (h2 <= h0 && h0 != maxd) {
@@ -432,8 +463,9 @@ struct BilliState {
         while (!stk.empty()) {
             auto& f = stk.back();
             bool pushed = false;
-            while (f.ci < g_compacted[f.u].size()) {
-                const auto& child = g_compacted[f.u][f.ci++];
+            const size_t deg_u = g_compacted_csr.deg(f.u);
+            while (f.ci < deg_u) {
+                const auto& child = g_compacted_csr.at(f.u, f.ci++);
                 if (child.first == f.parent) continue;
                 f.cnt++;
                 if (mark[child.first]) continue;
@@ -502,9 +534,10 @@ struct BilliState {
                 if (!end_gene(u, rs)) upd_node(u, ty);
             }
             bool pushed = false;
-            const auto& adj = g_compacted[dual[u]];
-            while (ci < adj.size()) {
-                const auto& child = adj[ci++];
+            const int du = dual[u];
+            const size_t deg_du = g_compacted_csr.deg(du);
+            while (ci < deg_du) {
+                const auto& child = g_compacted_csr.at(du, ci++);
                 int v = child.first;
                 if (child.second >= tip_start[biedged_connected_comp[rs.second]]
                     || child.second == -1
@@ -522,7 +555,8 @@ struct BilliState {
 
 // Constrói o estado Billi a partir da nossa GfaCsrTopology.
 // Reproduz get_ne + make_graph do Billi sem ler arquivo GFA — extraindo
-// orientações diretamente da CSR, sem hashmap intermediário.
+// orientações diretamente da CSR, sem hashmap intermediário, e populando
+// adjacência biedged em CSR plana (sem vector<vector<>>).
 //
 // Pareamento s1/s2 sem hashmap: cada link aparece uma vez em E_fwd_ (com
 // to-orient = s2) e uma vez em E_bwd_ (com from-orient = s1). O LSD radix
@@ -530,76 +564,117 @@ struct BilliState {
 // de v em out_neighbors(u) corresponde à i-ésima ocorrência de u em
 // in_neighbors(v). Pareamos por posição.
 //
-// Custo: O(E · d_avg) tempo, O(0) memória extra — vs O(E) memória de dois
-// hashmaps (~14 GB) e até T cópias locais (~30+ GB transitórios em HPRC) na
-// versão anterior.
+// Build em 3 passes para CSR plana:
+//   1. count[id]  — degree por nó biedged (black + gray contributions)
+//   2. offsets    — prefix sum
+//   3. fill       — black primeiro (vai para off[id]+0), depois gray
+//
+// Custo: O(E · d_avg) tempo (resolve_link executado 2× — ~15 s extra no HPRC).
+// Memória: O(0) overhead transitório vs ~5 GB do envelope vector<vector<>>.
 static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo) {
     const uint64_t N = topo.num_nodes();
     assert(N <= static_cast<uint64_t>(INT32_MAX) &&
            "snarl_decomposition: num_nodes excede INT32_MAX — overflow em biedged IDs");
     s.n = static_cast<int>(N);
 
-    // Setup biedged: g[2*n] tem black edges + gray edges
-    s.g.assign(2 * s.n, {});
     s.has_self_loop.assign(2 * s.n, false);
     s.maxd = 2 * s.n + 100;
 
-    // Black edges (id=-1) entre 2*i e 2*i+1 PRIMEIRO
+    // Resolve um link via pareamento por posição na CSR.
+    // Retorna false se in_neighbors(v) não tem entry correspondente (GFA órfão).
+    auto resolve_link = [&topo](uint64_t u, size_t k,
+                                int& id1, int& id2,
+                                int& n1, int& n2,
+                                char& s1, char& s2) -> bool {
+        const auto out = topo.out_neighbors(u);
+        const auto e_out = GfaCsrTopology::decode(out[k]);
+        const uint64_t v = e_out.node_id;
+
+        size_t occ = 0;
+        for (size_t j = 0; j < k; ++j) {
+            if ((out[j] >> 1) == v) ++occ;
+        }
+
+        s1 = '+';
+        bool found = false;
+        const auto in_v = topo.in_neighbors(v);
+        size_t seen = 0;
+        for (uint32_t enc : in_v) {
+            if ((enc >> 1) != u) continue;
+            if (seen == occ) {
+                s1 = (enc & 1u) ? '-' : '+';
+                found = true;
+                break;
+            }
+            ++seen;
+        }
+        if (!found) return false;
+
+        n1 = static_cast<int>(u);
+        n2 = static_cast<int>(v);
+        s2 = e_out.orient;
+        if (n1 > n2) {
+            std::swap(n1, n2);
+            s1 = (s1 == '+') ? '-' : '+';
+            s2 = (s2 == '+') ? '-' : '+';
+            std::swap(s1, s2);
+        }
+        id1 = n1 << 1;
+        id2 = n2 << 1;
+        if (s1 == '+') id1++;
+        if (s2 == '-') id2++;
+        return true;
+    };
+
+    // ── Pass 1: count entries por nó biedged ────────────────────────────
+    std::vector<uint32_t> count(2 * s.n, 0u);
+    // Black edges: cada par (2i, 2i+1) contribui 1 entry para cada lado.
     for (int i = 0; i < s.n; ++i) {
-        s.g[2*i].push_back({2*i + 1, -1});
-        s.g[2*i + 1].push_back({2*i, -1});
+        count[2*i]++;
+        count[2*i + 1]++;
+    }
+    for (uint64_t u = 0; u < N; ++u) {
+        const size_t out_sz = topo.out_neighbors(u).size();
+        for (size_t k = 0; k < out_sz; ++k) {
+            int id1, id2, n1, n2;
+            char s1, s2;
+            if (!resolve_link(u, k, id1, id2, n1, n2, s1, s2)) continue;
+            count[id1]++;
+            if (id1 != id2) count[id2]++;
+        }
     }
 
-    // Gray edges — extração streaming da CSR.
+    // ── Pass 2: prefix sum → offsets ────────────────────────────────────
+    s.g.off.assign(2 * s.n + 1, 0u);
+    for (int i = 0; i < 2 * s.n; ++i) {
+        s.g.off[i + 1] = s.g.off[i] + count[i];
+    }
+    s.g.ed.resize(s.g.off[2 * s.n]);
+    // count vira cursor (escritas avançam cursor[id] a partir de off[id]).
+    auto& cursor = count; // reaproveita buffer
+    for (int i = 0; i < 2 * s.n; ++i) cursor[i] = s.g.off[i];
+
+    // ── Pass 3a: black edges PRIMEIRO (ficam em off[id] + 0) ────────────
+    for (int i = 0; i < s.n; ++i) {
+        s.g.ed[cursor[2*i]++]     = {2*i + 1, -1};
+        s.g.ed[cursor[2*i + 1]++] = {2*i,     -1};
+    }
+
+    // ── Pass 3b: gray edges ─────────────────────────────────────────────
     for (uint64_t u = 0; u < N; ++u) {
-        const auto out = topo.out_neighbors(u);
-        for (size_t k = 0; k < out.size(); ++k) {
-            const auto e_out = GfaCsrTopology::decode(out[k]);
-            const uint64_t v = e_out.node_id;
-
-            // occ = nº de ocorrências anteriores de v em out_neighbors(u);
-            // serve para parear corretamente em multi-edges (raríssimo, mas
-            // possível via self-loops com orientações distintas).
-            size_t occ = 0;
-            for (size_t j = 0; j < k; ++j) {
-                if ((out[j] >> 1) == v) ++occ;
-            }
-
-            // s1 = (occ)-ésima ocorrência de u em in_neighbors(v).
-            char s1 = '+';
-            bool found = false;
-            const auto in_v = topo.in_neighbors(v);
-            size_t seen = 0;
-            for (uint32_t enc : in_v) {
-                if ((enc >> 1) != u) continue;
-                if (seen == occ) {
-                    s1 = (enc & 1u) ? '-' : '+';
-                    found = true;
-                    break;
-                }
-                ++seen;
-            }
-            if (!found) continue; // GFA inconsistente — pula link órfão
-
-            int n1 = static_cast<int>(u);
-            int n2 = static_cast<int>(v);
-            char s2 = e_out.orient;
-            // Consistência de direção (do Billi)
-            if (n1 > n2) {
-                std::swap(n1, n2);
-                s1 = (s1 == '+') ? '-' : '+';
-                s2 = (s2 == '+') ? '-' : '+';
-                std::swap(s1, s2);
-            }
-            int id1 = n1 << 1;
-            int id2 = n2 << 1;
-            if (s1 == '+') id1++;
-            if (s2 == '-') id2++;
-            s.add_edge(s.g, id1, id2);
+        const size_t out_sz = topo.out_neighbors(u).size();
+        for (size_t k = 0; k < out_sz; ++k) {
+            int id1, id2, n1, n2;
+            char s1, s2;
+            if (!resolve_link(u, k, id1, id2, n1, n2, s1, s2)) continue;
+            s.g.ed[cursor[id1]++] = {id2, s.tot_gray};
+            if (id1 != id2) s.g.ed[cursor[id2]++] = {id1, s.tot_gray};
+            ++s.tot_gray;
             if (n1 == n2 && s1 != s2) s.has_self_loop[id1] = true;
             ++s.edges_count;
         }
     }
+    // cursor (= count buffer) descartado ao sair do escopo.
 }
 
 // Pipeline principal — port literal de run_decompose() do Billi.
@@ -610,14 +685,51 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
     if (s.n == 0) return {};
 
     // *** Graph Cleaning ***
-    // Removing parallel gray edges
-    for (int i = 0; i < 2 * s.n; ++i) {
-        std::sort(s.g[i].begin() + 1, s.g[i].end());
-        int add = 0;
-        if (s.g[i].size() >= 2 && s.g[i][0].first == s.g[i][1].first) add = 1;
-        s.g[i].erase(std::unique(s.g[i].begin() + add, s.g[i].end(),
-                                  [](const pii& a, const pii& b) { return a.first == b.first; }),
-                     s.g[i].end());
+    // Sort + dedup in-place sobre a CSR plana. Black edge (em ed[off[i]+0])
+    // sempre sobrevive; gray slice [off[i]+1, off[i+1]) é ordenado e
+    // colapsado por .first. Compactação in-place é segura porque write[i]
+    // ≤ off[i] ao começar de cada nó (counts só encolhem).
+    {
+        std::vector<uint32_t> new_off(2 * s.n + 1, 0u);
+        size_t write = 0;
+        for (int i = 0; i < 2 * s.n; ++i) {
+            new_off[i] = static_cast<uint32_t>(write);
+            const size_t lo = s.g.off[i];
+            const size_t hi = s.g.off[i + 1];
+            if (hi == lo) continue;
+
+            if (hi > lo + 1) {
+                std::sort(s.g.ed.begin() + lo + 1, s.g.ed.begin() + hi);
+            }
+            const int black_first = s.g.ed[lo].first;
+            const bool include_black = (hi - lo >= 2 && black_first == s.g.ed[lo + 1].first);
+
+            // Black sempre escrito primeiro.
+            s.g.ed[write++] = s.g.ed[lo];
+
+            size_t j = lo + 1;
+            if (include_black) {
+                // Pula grays cuja .first == black.first (colapsados pelo
+                // unique do Billi original quando estão contíguos no sort).
+                while (j < hi && s.g.ed[j].first == black_first) ++j;
+            }
+
+            if (j < hi) {
+                s.g.ed[write++] = s.g.ed[j];
+                int prev_first = s.g.ed[j].first;
+                ++j;
+                for (; j < hi; ++j) {
+                    if (s.g.ed[j].first != prev_first) {
+                        s.g.ed[write++] = s.g.ed[j];
+                        prev_first = s.g.ed[j].first;
+                    }
+                }
+            }
+        }
+        new_off[2 * s.n] = static_cast<uint32_t>(write);
+        s.g.off = std::move(new_off);
+        s.g.ed.resize(write);
+        s.g.ed.shrink_to_fit();
     }
 
     // Compaction (remove unitigs)
@@ -631,14 +743,14 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
         if (s.mark[i]) continue;
         if (s.chk_for_compaction(i)) {
             s.q_compact.push({i ^ 1, 0});
-            s.q_compact.push({s.g[i][1].first ^ 1, 1});
-            int left = i, right = s.g[i][1].first;
+            s.q_compact.push({s.g.at(i, 1).first ^ 1, 1});
+            int left = i, right = s.g.at(i, 1).first;
             s.mark[left] = s.mark[right] = true;
             while (!s.q_compact.empty()) {
                 pii pid = s.q_compact.front(); s.q_compact.pop();
                 if (s.chk_for_compaction(pid.first)) {
                     s.mark[pid.first] = true;
-                    int neigh = s.g[pid.first][1].first;
+                    int neigh = s.g.at(pid.first, 1).first;
                     s.mark[neigh] = true;
                     if (s.mark[neigh ^ 1]) continue;
                     if (pid.second == 0) {
@@ -656,14 +768,14 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
             s.dual[l] = r; s.dual[r] = l;
             s.ty_end[l] = 0; s.ty_end[r] = 1;
             s.black_edge_id[l] = s.black_edge_id[r] = s.cnt_black_edge++;
-            for (size_t j = 1; j < s.g[l].size(); ++j) {
-                int u = s.g[l][j].first;
+            for (size_t j = 1, dl = s.g.deg(l); j < dl; ++j) {
+                int u = s.g.at(l, j).first;
                 if (s.mark[u] && u != r) continue;
                 if (l != u) s.g_compacted[l].push_back({u, s.cnt_gray_edge});
                 s.g_compacted[u].push_back({l, s.cnt_gray_edge++});
             }
-            for (size_t j = 1; j < s.g[r].size(); ++j) {
-                int u = s.g[r][j].first;
+            for (size_t j = 1, dr = s.g.deg(r); j < dr; ++j) {
+                int u = s.g.at(r, j).first;
                 if (s.mark[u]) continue;
                 if (r != u) s.g_compacted[r].push_back({u, s.cnt_gray_edge});
                 s.g_compacted[u].push_back({r, s.cnt_gray_edge++});
@@ -680,8 +792,8 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
             s.ty_end[i] = 0; s.ty_end[i ^ 1] = 1;
             s.black_edge_id[i] = s.black_edge_id[i ^ 1] = s.cnt_black_edge++;
         }
-        for (size_t j = 1; j < s.g[i].size(); ++j) {
-            int u = s.g[i][j].first;
+        for (size_t j = 1, di = s.g.deg(i); j < di; ++j) {
+            int u = s.g.at(i, j).first;
             if (s.mark[u]) continue;
             if (i != u) s.g_compacted[i].push_back({u, s.cnt_gray_edge});
             s.g_compacted[u].push_back({i, s.cnt_gray_edge++});
@@ -700,8 +812,9 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
     }
     // cnt_black_edge é incrementado uma vez por nó canônico; deve caber em [0, n].
     assert(s.cnt_black_edge <= s.n);
-    // Libera o envelope (~200MB em CHM13): clear() mantém capacity de 2*n pointers.
-    { decltype(s.g) tmp; s.g.swap(tmp); }
+    // Libera os buffers da CSR plana de g (~4 GB no HPRC).
+    s.g.off.clear(); s.g.off.shrink_to_fit();
+    s.g.ed.clear();  s.g.ed.shrink_to_fit();
 
     // Connected components in compacted
     std::fill(s.mark.begin(), s.mark.end(), false);
@@ -753,6 +866,27 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
         if (s.tips[it].size() <= 1) s.tip_start[it] = maxv;
     }
     s.rm_cnt.clear(); s.first_node.clear();
+
+    // ── Freeze g_compacted (vector<vector<>>) → g_compacted_csr (CSR plana) ──
+    // Após este ponto não há mais writes a g_compacted; libera o
+    // vector<vector<>> (~5 GB no HPRC) e usa CsrAdj para todos os reads
+    // subsequentes (dfs_depth, sese, hairp, mark_nodes, validação hairpin).
+    {
+        s.g_compacted_csr.off.assign(2 * s.n + 1, 0u);
+        for (int i = 0; i < 2 * s.n; ++i) {
+            s.g_compacted_csr.off[i + 1] = s.g_compacted_csr.off[i]
+                + static_cast<uint32_t>(s.g_compacted[i].size());
+        }
+        s.g_compacted_csr.ed.resize(s.g_compacted_csr.off[2 * s.n]);
+        for (int i = 0; i < 2 * s.n; ++i) {
+            const auto& src = s.g_compacted[i];
+            std::copy(src.begin(), src.end(),
+                      s.g_compacted_csr.ed.begin() + s.g_compacted_csr.off[i]);
+        }
+        // Libera o vector<vector<>>.
+        s.g_compacted.clear();
+        s.g_compacted.shrink_to_fit();
+    }
 
     // Depth DFS
     std::fill(s.depth.begin(), s.depth.end(), 0);
@@ -846,9 +980,9 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
 
     for (size_t i = 0; i < s.possible_hairpins.size(); ++i) {
         pii rs = s.possible_hairpins[i];
-        if ((s.g_compacted[rs.first].size() == 2
-             && s.g_compacted[rs.first][1].first == s.g_compacted[rs.first][0].first)
-            || s.g_compacted[rs.first].size() <= 1) continue;
+        if ((s.g_compacted_csr.deg(rs.first) == 2
+             && s.g_compacted_csr.at(rs.first, 1).first == s.g_compacted_csr.at(rs.first, 0).first)
+            || s.g_compacted_csr.deg(rs.first) <= 1) continue;
 
         bool is_valid = true;
         for (int u : s.considered) {
