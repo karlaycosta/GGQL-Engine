@@ -28,10 +28,32 @@
 #include <climits>
 #include <cstdint>
 #include <deque>
+#include <execution>
+#include <numeric>
 #include <queue>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+// Profiling opcional: define GGQL_SNARL_PROFILE=1 para imprimir wall por fase.
+#if defined(GGQL_SNARL_PROFILE)
+    #include <cstdio>
+    #include <chrono>
+    #define GGQL_SNARL_TIMER_BEGIN(name) const auto __t_##name = std::chrono::high_resolution_clock::now()
+    #define GGQL_SNARL_TIMER_END(name) do { \
+        const auto __dt = std::chrono::duration<double>(\
+            std::chrono::high_resolution_clock::now() - __t_##name).count(); \
+        std::fprintf(stderr, "  [snarl-prof] %-22s %7.2f s\n", #name, __dt); \
+    } while (0)
+#else
+    #define GGQL_SNARL_TIMER_BEGIN(name) ((void)0)
+    #define GGQL_SNARL_TIMER_END(name) ((void)0)
+#endif
 
 namespace ggql::snarl_decomposition {
 
@@ -60,15 +82,64 @@ struct BilliState {
             : sz(lsz), d(depth), start(pstart), end_(pend) {}
     };
 
-    // ── Pool allocators (pointer-stable, no leaks) ────────────────────
-    std::deque<Edge> edge_pool;
-    std::deque<BracketList> bracket_pool;
+    // Hash splitmix64 para pii — distribuição uniforme, baixa colisão.
+    // Movido pra cima porque ComponentState (abaixo) precisa dele.
+    struct PiiHash {
+        static uint64_t splitmix64(uint64_t x) noexcept {
+            x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+            x ^= x >> 27; x *= 0x94d049bb133111ebULL;
+            x ^= x >> 31;
+            return x;
+        }
+        size_t operator()(const pii& p) const noexcept {
+            const uint64_t a = static_cast<uint32_t>(p.first);
+            const uint64_t b = static_cast<uint32_t>(p.second);
+            return static_cast<size_t>(splitmix64((a << 32) | b));
+        }
+    };
 
-    Edge* alloc_edge(int eid) { return &edge_pool.emplace_back(eid); }
-    BracketList* alloc_bracket() { return &bracket_pool.emplace_back(); }
-    BracketList* alloc_bracket(int lsz, int d, Edge* ps, Edge* pe) {
-        return &bracket_pool.emplace_back(lsz, d, ps, pe);
-    }
+    // ── ComponentState ───────────────────────────────────────────────
+    // Estado per-componente conexo. Cada componente recebe sua instância;
+    // sese/hairp/mark_nodes operam sobre uma referência. Permite paralelizar
+    // o pipeline pós-freeze por componente (cada thread escreve em sua
+    // própria ComponentState; arrays compartilhados em BilliState são
+    // acessados por índices DISJOINTS por componente — sem race).
+    //
+    // Edge IDs em edge_pool (cnt_gray_edge local) são namespaced à
+    // ComponentState — não precisam ser únicos globalmente porque
+    // canonical_sese (que usa esses IDs em chaves) também é per-componente.
+    struct ComponentState {
+        // SESE state
+        int vtime = 0;
+        std::vector<int> stack_trace;
+        std::unordered_map<pii, std::vector<pii>, PiiHash> canonical_sese;
+        std::unordered_map<pii, int, PiiHash> st;
+        std::unordered_map<int, std::vector<Edge*>> pending_removals;
+        std::deque<Edge> edge_pool;
+        std::deque<BracketList> bracket_pool;
+        int cnt_gray_edge = 0; // Edge IDs locais
+
+        // Hairp output
+        std::vector<pii> possible_hairpins;
+
+        // Brute-force validation scratch (per-component)
+        std::vector<int> considered;
+        int counter = 0;
+
+        // Per-component output (mergeado no final)
+        std::vector<pii> valid_panbubbles;
+        std::vector<pii> valid_hairpins;
+
+        [[nodiscard]] Edge* alloc_edge(int eid) {
+            return &edge_pool.emplace_back(eid);
+        }
+        [[nodiscard]] BracketList* alloc_bracket() {
+            return &bracket_pool.emplace_back();
+        }
+        [[nodiscard]] BracketList* alloc_bracket(int lsz, int d, Edge* ps, Edge* pe) {
+            return &bracket_pool.emplace_back(lsz, d, ps, pe);
+        }
+    };
 
     // ── Generic ──────────────────────────────────────────────────────
     int maxd = 0;
@@ -83,11 +154,11 @@ struct BilliState {
     struct CsrAdjT {
         std::vector<uint32_t> off; // size 2n+1
         std::vector<T> ed;         // size = off[2n]
-        size_t deg(int id) const noexcept {
+        [[nodiscard]] size_t deg(int id) const noexcept {
             return static_cast<size_t>(off[id + 1] - off[id]);
         }
-        T& at(int id, size_t k) noexcept { return ed[off[id] + k]; }
-        const T& at(int id, size_t k) const noexcept { return ed[off[id] + k]; }
+        [[nodiscard]] T& at(int id, size_t k) noexcept { return ed[off[id] + k]; }
+        [[nodiscard]] const T& at(int id, size_t k) const noexcept { return ed[off[id] + k]; }
     };
     using CsrAdj    = CsrAdjT<pii>;  // (target_id, gray_edge_id) — usado por g_compacted
     using CsrAdjInt = CsrAdjT<int>;  // só target_id — usado por g (gray_edge_id é dead)
@@ -121,43 +192,21 @@ struct BilliState {
     std::vector<std::vector<pii>> g_compacted;
     CsrAdj g_compacted_csr;
 
-    // ── SESE ────────────────────────────────────────────────────────
-    int vtime = 0;
+    // ── SESE shared state (compartilhado entre componentes) ─────────
+    // entry_time/exit_time/bl[] são indexados por nó biedged → DISJOINT por
+    // componente conexo, então writes paralelos não conflitam. is_bridge[]
+    // é indexado por black_edge_id → também disjoint.
     std::vector<int> entry_time, exit_time;
-    std::vector<int> stack_trace;
     std::vector<uint8_t> is_bridge;
-    std::vector<pii> possible_hairpins;
-
-    // Hash splitmix64 para pii — distribuição uniforme, baixa colisão.
-    struct PiiHash {
-        static uint64_t splitmix64(uint64_t x) noexcept {
-            x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
-            x ^= x >> 27; x *= 0x94d049bb133111ebULL;
-            x ^= x >> 31;
-            return x;
-        }
-        size_t operator()(const pii& p) const noexcept {
-            const uint64_t a = static_cast<uint32_t>(p.first);
-            const uint64_t b = static_cast<uint32_t>(p.second);
-            return static_cast<size_t>(splitmix64((a << 32) | b));
-        }
-    };
-    // canonical_sese: ordem afeta seleção canônica de panbubbles.
-    // unordered_map para inserts O(1) + sort no final preserva paridade Billi.
-    std::unordered_map<pii, std::vector<pii>, PiiHash> canonical_sese;
-    std::unordered_map<pii, int, PiiHash> st;
     std::vector<BracketList*> bl;
-    // Sparse: a maioria dos nós nunca recebe pending_removal. Mapa esparso
-    // economiza ~5 GB no HPRC (vs vector<vector<>> com 2N envelopes vazios).
-    std::unordered_map<int, std::vector<Edge*>> pending_removals;
 
-    // ── Brute force ─────────────────────────────────────────────────
-    int counter = 0;
-    std::vector<int> considered;
+    // ── Brute-force validation: estado SHARED com índices disjoint ───
+    // to_chk[]: indexado por black_edge_id (disjoint por componente).
+    // visit_order[]: indexado por nó biedged (disjoint).
     std::vector<short> to_chk;
     std::vector<short> visit_order;
 
-    // ── Output ──────────────────────────────────────────────────────
+    // ── Output (final, populado via merge das ComponentStates) ───────
     std::vector<pii> valid_panbubbles, valid_hairpins;
 
     int offset = 1; // heuristic mode (=1); -e flag aumenta para INT32_MAX/10
@@ -166,11 +215,11 @@ struct BilliState {
     // Métodos do algoritmo (port literal de billi/decompose.cpp)
     // ─────────────────────────────────────────────────────────────────
 
-    bool chk_vertex(int id) {
+    [[nodiscard]] bool chk_vertex(int id) const noexcept {
         return g.deg(id) == 2 && g.at(id, 0) != g.at(id, 1)
                && !has_self_loop[id];
     }
-    bool chk_for_compaction(int id) {
+    [[nodiscard]] bool chk_for_compaction(int id) const noexcept {
         if (chk_vertex(id)) {
             int u = g.at(id, 1);
             return chk_vertex(u);
@@ -196,7 +245,7 @@ struct BilliState {
     }
 
     // Retorna 1 se u tem ao menos 1 vizinho diferente do dual, 0 caso contrário.
-    int find_unique_including_selfloop(int u) {
+    [[nodiscard]] int find_unique_including_selfloop(int u) const noexcept {
         for (const auto& child : g_compacted[u]) {
             if (child.first != dual[u]) return 1;
         }
@@ -229,7 +278,7 @@ struct BilliState {
         }
     }
 
-    void merge(BracketList* bl1, BracketList* bl2) {
+    static void merge(BracketList* bl1, BracketList* bl2) noexcept {
         if (!bl2->start) return;
         if (!bl1->start) {
             bl1->start = bl2->start;
@@ -244,8 +293,15 @@ struct BilliState {
         bl2->merged = true;
     }
 
-    // Iterativo com post-order via child_idx tracking
+    // Iterativo com post-order via child_idx tracking.
+    // Pool local — BracketList* viram dangling depois da função, mas isso é
+    // OK porque bl[] é reassignado antes do SESE main (que usa pools per-
+    // componente nos ComponentStates).
     void sese_minbracket(int root, int& x, int& val) {
+        std::deque<BracketList> local_pool;
+        auto local_alloc = [&]() -> BracketList* {
+            return &local_pool.emplace_back();
+        };
         struct Frame { int u, parent; size_t ci; };
         std::vector<Frame> stk = {{root, -1, 0}};
         mark[root] = true;
@@ -266,7 +322,7 @@ struct BilliState {
             }
             if (!pushed) {
                 int u = f.u;
-                bl[u] = alloc_bracket();
+                bl[u] = local_alloc();
                 for (const auto& child : g_compacted[u]) {
                     int v = child.first;
                     if (depth[v] != depth[u] + 1) continue;
@@ -294,7 +350,7 @@ struct BilliState {
     // Iterativo com post-order — preserva semântica exata do SESE recursivo.
     // Pre-order calcula h0 antes de qualquer recursão; correto pois graph cleaning
     // garante que cada vizinho aparece no máximo 1× em g_compacted[u].
-    void sese(int root, int root_parent) {
+    void sese(ComponentState& cs, int root, int root_parent) {
         // Frame compacto: ints primeiro (alignof=4), uint32_t ci (g_compacted[u]
         // tem no máx ~dozens de entries no biedged), 2 bools no final.
         // 28 bytes vs 40 bytes do layout naive (size_t ci + bools intercalados).
@@ -315,9 +371,9 @@ struct BilliState {
             // Pre-order work (runs once per frame)
             if (!f.pre_done) {
                 f.pre_done = true;
-                stack_trace.push_back(f.u);
+                cs.stack_trace.push_back(f.u);
                 mark[f.u] = true;
-                entry_time[f.u] = vtime++;
+                entry_time[f.u] = cs.vtime++;
 
                 // Compute can_end
                 f.can_end = true;
@@ -371,7 +427,7 @@ struct BilliState {
                 bool can_end = f.can_end;
                 int h0 = f.h0, h1 = f.h1, h2 = f.h2;
 
-                bl[u] = alloc_bracket();
+                bl[u] = cs.alloc_bracket();
                 {
                     const size_t deg_u_post = g_compacted_csr.deg(u);
                     for (size_t k = 0; k < deg_u_post; ++k) {
@@ -389,8 +445,8 @@ struct BilliState {
                 }
                 bl[u]->d = std::min(h0, h1);
 
-                if (auto pr_it = pending_removals.find(u);
-                    pr_it != pending_removals.end()) {
+                if (auto pr_it = cs.pending_removals.find(u);
+                    pr_it != cs.pending_removals.end()) {
                     for (Edge* ed : pr_it->second) {
                         if (ed->front) {
                             if (ed->back) {
@@ -407,7 +463,7 @@ struct BilliState {
                         }
                         bl[u]->sz--;
                     }
-                    pending_removals.erase(pr_it);
+                    cs.pending_removals.erase(pr_it);
                 }
                 if (bl[u]->d == depth[u]) bl[u]->d = maxd;
 
@@ -418,18 +474,18 @@ struct BilliState {
                         int v = child.first;
                         if (depth[v] >= depth[u] - 1) continue;
                         if (parent == -1 && child.second != -1) continue;
-                        Edge* ed = alloc_edge(child.second);
-                        pending_removals[v].push_back(ed);
-                        auto* tmp = alloc_bracket(1, depth[v], ed, ed);
+                        Edge* ed = cs.alloc_edge(child.second);
+                        cs.pending_removals[v].push_back(ed);
+                        auto* tmp = cs.alloc_bracket(1, depth[v], ed, ed);
                         merge(bl[u], tmp);
                     }
                 }
 
                 if (h2 <= h0 && h0 != maxd) {
-                    int w = stack_trace[h2];
-                    Edge* ed = alloc_edge(cnt_gray_edge); cnt_gray_edge++;
-                    pending_removals[w].push_back(ed);
-                    auto* tmp = alloc_bracket(1, depth[w], ed, ed);
+                    int w = cs.stack_trace[h2];
+                    Edge* ed = cs.alloc_edge(cs.cnt_gray_edge); cs.cnt_gray_edge++;
+                    cs.pending_removals[w].push_back(ed);
+                    auto* tmp = cs.alloc_bracket(1, depth[w], ed, ed);
                     merge(bl[u], tmp);
                 }
 
@@ -441,18 +497,18 @@ struct BilliState {
                     } else {
                         key = {0, 0};
                     }
-                    auto it = st.find(key);
-                    if (it != st.end()) {
+                    auto it = cs.st.find(key);
+                    if (it != cs.st.end()) {
                         int w = it->second;
-                        canonical_sese[key].push_back({u, w});
+                        cs.canonical_sese[key].push_back({u, w});
                     }
-                    st[key] = parent;
+                    cs.st[key] = parent;
                 }
                 if (bl[u]->sz == 0 && can_end) {
                     is_bridge[black_edge_id[u]] = true;
                 }
-                exit_time[u] = vtime++;
-                stack_trace.pop_back();
+                exit_time[u] = cs.vtime++;
+                cs.stack_trace.pop_back();
                 stk.pop_back();
             }
         }
@@ -460,7 +516,7 @@ struct BilliState {
 
     // Iterativo com post-order e propagação de child_bridge.
     // Caller ignora retorno → void.
-    void hairp(int root) {
+    void hairp(ComponentState& cs, int root) {
         struct Frame { int u, parent; size_t ci; bool child_bridge; int cnt; };
         std::vector<Frame> stk = {{root, -1, 0, false, 0}};
         mark[root] = true;
@@ -484,7 +540,7 @@ struct BilliState {
                 int cnt = f.cnt;
                 bool result = cb | static_cast<bool>(is_bridge[black_edge_id[u]]);
                 if (!cb && is_bridge[black_edge_id[u]] && cnt != 0) {
-                    possible_hairpins.push_back({u, u});
+                    cs.possible_hairpins.push_back({u, u});
                 }
                 stk.pop_back();
                 if (!stk.empty()) stk.back().child_bridge |= result;
@@ -492,33 +548,33 @@ struct BilliState {
         }
     }
 
-    bool end_gene(int u, pii rs) {
+    [[nodiscard]] bool end_gene(int u, pii rs) const noexcept {
         return u == rs.first || u == dual[rs.first]
                || u == rs.second || u == dual[rs.second];
     }
-    bool root_leaf_path(int u, int v) {
+    [[nodiscard]] bool root_leaf_path(int u, int v) const noexcept {
         return entry_time[u] <= entry_time[v] && exit_time[u] >= exit_time[v];
     }
-    void upd_node(int u, int ty) {
+    void upd_node(ComponentState& cs, int u, int ty) {
         visit_order[u] = static_cast<short>(ty);
         int gene = black_edge_id[u];
         if (ty == 0) {
             if (to_chk[gene] == -1) {
-                counter++;
+                cs.counter++;
                 to_chk[gene] = static_cast<short>(ty_end[u]);
-                considered.push_back(u);
+                cs.considered.push_back(u);
             } else {
                 if (ty_end[u] != to_chk[gene]) to_chk[gene] = 2;
             }
         } else {
             if (to_chk[gene] == 2) {
-                counter--;
+                cs.counter--;
                 to_chk[gene] = -2;
             } else {
                 short required = static_cast<short>(1 - ty_end[u]);
                 if (to_chk[gene] == required || to_chk[gene] == -1) {
-                    if (to_chk[gene] == -1) considered.push_back(u);
-                    counter--;
+                    if (to_chk[gene] == -1) cs.considered.push_back(u);
+                    cs.counter--;
                     to_chk[gene] = -2;
                 }
             }
@@ -527,7 +583,7 @@ struct BilliState {
     // Iterativo. Sem skip por visit_order[u] no início — o recursivo original
     // SEMPRE executa is_bridge/upd_node em cada entrada (proteção contra
     // revisita do mesmo u é feita por to_chk dentro de upd_node).
-    bool mark_nodes(int root, pii rs, int ty) {
+    [[nodiscard]] bool mark_nodes(ComponentState& cs, int root, pii rs, int ty) {
         std::vector<std::pair<int, size_t>> stk = {{root, 0}};
         while (!stk.empty()) {
             auto& [u, ci] = stk.back();
@@ -535,7 +591,7 @@ struct BilliState {
                 if (is_bridge[black_edge_id[u]]
                     && (!root_leaf_path(dual[rs.first], u)
                         || !root_leaf_path(u, dual[rs.second]))) return false;
-                if (!end_gene(u, rs)) upd_node(u, ty);
+                if (!end_gene(u, rs)) upd_node(cs, u, ty);
             }
             bool pushed = false;
             const int du = dual[u];
@@ -568,14 +624,16 @@ struct BilliState {
 // de v em out_neighbors(u) corresponde à i-ésima ocorrência de u em
 // in_neighbors(v). Pareamos por posição.
 //
-// Build em 3 passes para CSR plana:
-//   1. count[id]  — degree por nó biedged (black + gray contributions)
-//   2. offsets    — prefix sum
-//   3. fill       — black primeiro (vai para off[id]+0), depois gray
+// Build em 3 passes (todos paralelos):
+//   1. count[id] via atomic_fetch_add — paralelo por u.
+//   2. inclusive_scan paralelo → offsets.
+//   3. fill via atomic_fetch_add no cursor — paralelo por u.
 //
-// Custo: O(E · d_avg) tempo (resolve_link executado 2× — ~15 s extra no HPRC).
+// Custo: O(E · d_avg) tempo (resolve_link executado 2× — ~15 s extra serial,
+// mas paralelizado entre threads — fica abaixo de 5 s no HPRC com 8 threads).
 // Memória: O(0) overhead transitório vs ~5 GB do envelope vector<vector<>>.
-static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo) {
+static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo,
+                                   int num_threads) {
     const uint64_t N = topo.num_nodes();
     assert(N <= static_cast<uint64_t>(INT32_MAX) &&
            "snarl_decomposition: num_nodes excede INT32_MAX — overflow em biedged IDs");
@@ -630,63 +688,102 @@ static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo) {
         return true;
     };
 
-    // ── Pass 1: count entries por nó biedged ────────────────────────────
-    std::vector<uint32_t> count(2 * s.n, 0u);
+    const int N2 = 2 * s.n;
+
+    // ── Pass 1: count entries por nó biedged (paralelo, atomic) ─────────
+    std::vector<uint32_t> count(N2, 0u);
     // Black edges: cada par (2i, 2i+1) contribui 1 entry para cada lado.
+    // Sem race aqui — cada i toca slots distintos.
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static) num_threads(num_threads)
+#endif
     for (int i = 0; i < s.n; ++i) {
-        count[2*i]++;
-        count[2*i + 1]++;
+        count[2*i]   = 1;
+        count[2*i+1] = 1;
     }
-    for (uint64_t u = 0; u < N; ++u) {
+    // Gray edges: race em count[id1] e count[id2] entre threads → atomic.
+    int orphan_count = 0;
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(dynamic, 4096) num_threads(num_threads) reduction(+:orphan_count)
+#endif
+    for (int64_t u = 0; u < static_cast<int64_t>(N); ++u) {
         const size_t out_sz = topo.out_neighbors(u).size();
         for (size_t k = 0; k < out_sz; ++k) {
             int id1, id2, n1, n2;
             char s1, s2;
-            if (!resolve_link(u, k, id1, id2, n1, n2, s1, s2)) continue;
-            count[id1]++;
-            if (id1 != id2) count[id2]++;
+            if (!resolve_link(static_cast<uint64_t>(u), k, id1, id2, n1, n2, s1, s2)) {
+                ++orphan_count;
+                continue;
+            }
+            __atomic_fetch_add(&count[id1], 1u, __ATOMIC_RELAXED);
+            if (id1 != id2) __atomic_fetch_add(&count[id2], 1u, __ATOMIC_RELAXED);
         }
     }
 
-    // ── Pass 2: prefix sum → offsets ────────────────────────────────────
-    s.g.off.assign(2 * s.n + 1, 0u);
-    for (int i = 0; i < 2 * s.n; ++i) {
-        s.g.off[i + 1] = s.g.off[i] + count[i];
-    }
-    s.g.ed.resize(s.g.off[2 * s.n]);
-    // count vira cursor (escritas avançam cursor[id] a partir de off[id]).
+    // ── Pass 2: prefix sum paralelo → offsets ───────────────────────────
+    s.g.off.assign(N2 + 1, 0u);
+    // Copia count → off[1..] e faz inclusive_scan in-place.
+    std::copy(std::execution::par_unseq, count.begin(), count.end(),
+              s.g.off.begin() + 1);
+    std::inclusive_scan(std::execution::par_unseq,
+                        s.g.off.begin(), s.g.off.end(), s.g.off.begin());
+    s.g.ed.resize(s.g.off[N2]);
+    // count vira cursor — escritas avançam cursor[id] a partir de off[id].
     auto& cursor = count; // reaproveita buffer
-    for (int i = 0; i < 2 * s.n; ++i) cursor[i] = s.g.off[i];
+    std::copy(std::execution::par_unseq, s.g.off.begin(), s.g.off.begin() + N2,
+              cursor.begin());
 
     // ── Pass 3a: black edges PRIMEIRO (ficam em off[id] + 0) ────────────
+    // Cada i toca slots distintos de cursor → sem race.
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static) num_threads(num_threads)
+#endif
     for (int i = 0; i < s.n; ++i) {
         s.g.ed[cursor[2*i]++]     = 2*i + 1;
         s.g.ed[cursor[2*i + 1]++] = 2*i;
     }
 
-    // ── Pass 3b: gray edges ─────────────────────────────────────────────
-    for (uint64_t u = 0; u < N; ++u) {
+    // ── Pass 3b: gray edges (paralelo, atomic em cursor) ────────────────
+    // edges_count é incrementado atomicamente; has_self_loop write é race-OK
+    // (idempotent set-to-true) mas usamos atomic_store para evitar UB strict.
+    int local_edges = 0;
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(dynamic, 4096) num_threads(num_threads) reduction(+:local_edges)
+#endif
+    for (int64_t u = 0; u < static_cast<int64_t>(N); ++u) {
         const size_t out_sz = topo.out_neighbors(u).size();
         for (size_t k = 0; k < out_sz; ++k) {
             int id1, id2, n1, n2;
             char s1, s2;
-            if (!resolve_link(u, k, id1, id2, n1, n2, s1, s2)) continue;
-            s.g.ed[cursor[id1]++] = id2;
-            if (id1 != id2) s.g.ed[cursor[id2]++] = id1;
-            if (n1 == n2 && s1 != s2) s.has_self_loop[id1] = true;
-            ++s.edges_count;
+            if (!resolve_link(static_cast<uint64_t>(u), k, id1, id2, n1, n2, s1, s2)) continue;
+            const uint32_t pos1 = __atomic_fetch_add(&cursor[id1], 1u, __ATOMIC_RELAXED);
+            s.g.ed[pos1] = id2;
+            if (id1 != id2) {
+                const uint32_t pos2 = __atomic_fetch_add(&cursor[id2], 1u, __ATOMIC_RELAXED);
+                s.g.ed[pos2] = id1;
+            }
+            if (n1 == n2 && s1 != s2) {
+                __atomic_store_n(&s.has_self_loop[id1], uint8_t{1}, __ATOMIC_RELAXED);
+            }
+            ++local_edges;
         }
     }
+    s.edges_count += local_edges;
+    (void)orphan_count;
     // cursor (= count buffer) descartado ao sair do escopo.
 }
 
 // Pipeline principal — port literal de run_decompose() do Billi.
-static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
+static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
+                                                    int num_threads) {
     BilliState s;
-    build_state_from_topo(s, topo);
+    GGQL_SNARL_TIMER_BEGIN(build_state);
+    build_state_from_topo(s, topo, num_threads);
+    GGQL_SNARL_TIMER_END(build_state);
 
     if (s.n == 0) return {};
 
+    GGQL_SNARL_TIMER_BEGIN(graph_cleaning);
     // *** Graph Cleaning ***
     // Sort + dedup in-place sobre a CSR plana. Black edge (em ed[off[i]+0])
     // sempre sobrevive; gray slice [off[i]+1, off[i+1]) é ordenado e
@@ -735,6 +832,9 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
         s.g.ed.shrink_to_fit();
     }
 
+    GGQL_SNARL_TIMER_END(graph_cleaning);
+
+    GGQL_SNARL_TIMER_BEGIN(compaction);
     // Compaction (remove unitigs)
     s.mark.assign(2 * s.n, false);
     s.dual.assign(2 * s.n, -1);
@@ -818,7 +918,9 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
     // Libera os buffers da CSR plana de g (~4 GB no HPRC).
     s.g.off.clear(); s.g.off.shrink_to_fit();
     s.g.ed.clear();  s.g.ed.shrink_to_fit();
+    GGQL_SNARL_TIMER_END(compaction);
 
+    GGQL_SNARL_TIMER_BEGIN(cc_tip_id);
     // Connected components in compacted
     std::fill(s.mark.begin(), s.mark.end(), false);
     s.biedged_connected_comp.assign(2 * s.n, 0);
@@ -829,15 +931,48 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
         s.component++;
     }
 
-    // Identifying tips
+    // ── Identifying tips · paralelo ──────────────────────────────────
+    // Cada nó é checado independentemente. Race em s.tips[c].push_back
+    // resolvida via per-thread tip lists, mergidas em ordem de tid (preserva
+    // ordem ascendente de node-index porque schedule(static) particiona
+    // contiguamente). ORDEM IMPORTA: s.tips[c][0] vira Start[c] no SESE.
     s.tips.assign(s.component, {});
-    int cnt_zero = 0;
-    for (int i = 0; i < 2 * s.n; ++i) {
-        if (s.g_compacted[i].empty()) continue;
-        if (s.find_unique_including_selfloop(i) == 0) {
-            s.tips[s.biedged_connected_comp[i]].push_back(i);
+    {
+        const int N2 = 2 * s.n;
+        const int T = std::max(1, num_threads);
+        std::vector<std::vector<std::vector<int>>> tips_local(T);
+        for (auto& tl : tips_local) tl.assign(s.component, {});
+
+#ifdef _OPENMP
+        #pragma omp parallel num_threads(num_threads)
+#endif
+        {
+            int tid = 0;
+#ifdef _OPENMP
+            tid = omp_get_thread_num();
+#endif
+            auto& tl = tips_local[tid];
+#ifdef _OPENMP
+            #pragma omp for schedule(static)
+#endif
+            for (int i = 0; i < N2; ++i) {
+                if (s.g_compacted[i].empty()) continue;
+                if (s.find_unique_including_selfloop(i) == 0) {
+                    tl[s.biedged_connected_comp[i]].push_back(i);
+                }
+            }
+        }
+        // Merge em ordem de tid → ordem global ascendente preservada.
+        for (int t = 0; t < T; ++t) {
+            for (int c = 0; c < s.component; ++c) {
+                auto& src = tips_local[t][c];
+                if (src.empty()) continue;
+                s.tips[c].insert(s.tips[c].end(), src.begin(), src.end());
+            }
         }
     }
+
+    int cnt_zero = 0;
     for (int i = 0; i < s.component; ++i) {
         if (s.tips[i].empty()) cnt_zero++;
     }
@@ -869,141 +1004,248 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
         if (s.tips[it].size() <= 1) s.tip_start[it] = maxv;
     }
     s.rm_cnt.clear(); s.first_node.clear();
+    GGQL_SNARL_TIMER_END(cc_tip_id);
 
+    GGQL_SNARL_TIMER_BEGIN(freeze_gc);
     // ── Freeze g_compacted (vector<vector<>>) → g_compacted_csr (CSR plana) ──
     // Após este ponto não há mais writes a g_compacted; libera o
     // vector<vector<>> (~5 GB no HPRC) e usa CsrAdj para todos os reads
     // subsequentes (dfs_depth, sese, hairp, mark_nodes, validação hairpin).
+    //
+    // 3 sub-passes (com timing detalhado para profilar variância):
+    //   1. Fill off[i+1] = sizes — paralelo por nó.
+    //   2. Inclusive scan SEQUENCIAL (par_unseq mostrou variância alta no
+    //      HPRC — provável conflito TBB/OMP; scan serial sobre 220M ints
+    //      custa ~1 s, irrelevante).
+    //   3. Copy per-node — paralelo por nó.
     {
-        s.g_compacted_csr.off.assign(2 * s.n + 1, 0u);
-        for (int i = 0; i < 2 * s.n; ++i) {
-            s.g_compacted_csr.off[i + 1] = s.g_compacted_csr.off[i]
-                + static_cast<uint32_t>(s.g_compacted[i].size());
+        const int N2 = 2 * s.n;
+
+        GGQL_SNARL_TIMER_BEGIN(freeze_gc__sizes);
+        s.g_compacted_csr.off.assign(N2 + 1, 0u);
+#ifdef _OPENMP
+        #pragma omp parallel for schedule(static) num_threads(num_threads)
+#endif
+        for (int i = 0; i < N2; ++i) {
+            s.g_compacted_csr.off[i + 1] = static_cast<uint32_t>(s.g_compacted[i].size());
         }
-        s.g_compacted_csr.ed.resize(s.g_compacted_csr.off[2 * s.n]);
-        for (int i = 0; i < 2 * s.n; ++i) {
+        GGQL_SNARL_TIMER_END(freeze_gc__sizes);
+
+        GGQL_SNARL_TIMER_BEGIN(freeze_gc__scan);
+        // Scan sequencial: 220M ints × ~5 ns/op = ~1 s. Cheap.
+        for (int i = 0; i < N2; ++i) {
+            s.g_compacted_csr.off[i + 1] += s.g_compacted_csr.off[i];
+        }
+        GGQL_SNARL_TIMER_END(freeze_gc__scan);
+
+        GGQL_SNARL_TIMER_BEGIN(freeze_gc__alloc);
+        s.g_compacted_csr.ed.resize(s.g_compacted_csr.off[N2]);
+        GGQL_SNARL_TIMER_END(freeze_gc__alloc);
+
+        GGQL_SNARL_TIMER_BEGIN(freeze_gc__copy);
+#ifdef _OPENMP
+        #pragma omp parallel for schedule(static) num_threads(num_threads)
+#endif
+        for (int i = 0; i < N2; ++i) {
             const auto& src = s.g_compacted[i];
             std::copy(src.begin(), src.end(),
                       s.g_compacted_csr.ed.begin() + s.g_compacted_csr.off[i]);
         }
-        // Libera o vector<vector<>>.
-        s.g_compacted.clear();
-        s.g_compacted.shrink_to_fit();
+        GGQL_SNARL_TIMER_END(freeze_gc__copy);
     }
 
-    // Depth DFS
+    // ── Free de g_compacted em BACKGROUND ────────────────────────────
+    // Destruir 220M vector<pii> envelopes custa ~20s sequenciais e NÃO
+    // paraleliza (glibc malloc serializa frees em arena locks). Em vez de
+    // bloquear, movemos a memória para uma jthread que destrói em background.
+    // O jthread auto-join ocorre no fim do escopo (return de run_billi_pipeline)
+    // — nesse ponto, dfs_depth + SESE + hairp + validação já consumiram >70s
+    // de wall em paralelo, escondendo o custo do free.
+    GGQL_SNARL_TIMER_END(freeze_gc);
+
+    std::jthread bg_free_gc([dead = std::move(s.g_compacted)]() mutable {
+        // dead destruído aqui em thread separada.
+        (void)dead;
+    });
+    // s.g_compacted agora é vector<vector<>> em estado moved-from (vazio).
+
+    GGQL_SNARL_TIMER_BEGIN(dfs_depth);
+    // ── Depth DFS · paralelo por componente ──────────────────────────
+    // dfs_depth escreve mark[] e depth[] em índices DISJOINTS por
+    // componente conexo → safe pra paralelizar (false sharing irrelevante
+    // dado o trabalho por nó).
     std::fill(s.depth.begin(), s.depth.end(), 0);
     std::fill(s.mark.begin(), s.mark.end(), false);
     s.entry_time.assign(2 * s.n, 0);
     s.exit_time.assign(2 * s.n, 0);
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(dynamic, 1) num_threads(num_threads)
+#endif
     for (int it = 0; it < s.component; ++it) {
         s.dfs_depth(s.Start[it]);
     }
+    GGQL_SNARL_TIMER_END(dfs_depth);
 
-    // SESE main
-    s.pending_removals.clear();
+    GGQL_SNARL_TIMER_BEGIN(sese_main);
+    // ── SESE / hairp / validation per-componente · PARALELO ──────────
+    // Cada ComponentState é independente: vtime, stack_trace, edge_pool,
+    // bracket_pool, canonical_sese, st, pending_removals, possible_hairpins,
+    // considered, counter, valid_*. Arrays compartilhados em BilliState
+    // (mark, entry_time, exit_time, bl, is_bridge, to_chk, visit_order)
+    // são acessados por índices DISJOINTS por componente → sem race.
+    // Outros (dual, depth, black_edge_id, ty_end, biedged_connected_comp,
+    // tip_start, g_compacted_csr) são read-only após freeze.
     s.is_bridge.assign(s.n, false);
     s.bl.assign(2 * s.n, nullptr);
-    std::fill(s.mark.begin(), s.mark.end(), false);
-
-    for (int it = 0; it < s.component; ++it) {
-        s.st.clear();
-        s.sese(s.Start[it], -1);
-        if (s.tips[it].empty()) {
-            s.st.clear();
-            s.mark[s.Start[it]] = s.mark[s.dual[s.Start[it]]] = false;
-            s.sese(s.dual[s.Start[it]], -1);
-        }
-    }
-    std::fill(s.mark.begin(), s.mark.end(), false);
-    for (int it = 0; it < s.component; ++it) {
-        s.hairp(s.Start[it]);
-    }
-
-    // Brute force panbubbles validation
-    std::fill(s.mark.begin(), s.mark.end(), false);
     s.visit_order.assign(2 * s.n, -1);
     s.to_chk.assign(s.n, -1);
-
-    // Ordenação requerida: paridade Billi exige iteração em ordem crescente
-    // de (top_bracket, sz). std::map fazia isso de graça; aqui copiamos
-    // para vector + sort O(K log K), mais cache-friendly e mais rápido que RB-tree.
-    std::vector<std::pair<pii, std::vector<pii>>> sorted_sese;
-    sorted_sese.reserve(s.canonical_sese.size());
-    for (auto& kv : s.canonical_sese) {
-        sorted_sese.emplace_back(kv.first, std::move(kv.second));
-    }
-    s.canonical_sese.clear();
-    std::sort(sorted_sese.begin(), sorted_sese.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
-
-    for (const auto& [key, vec] : sorted_sese) {
-        int sz = static_cast<int>(vec.size());
-        for (int i = 0; i < sz; ) {
-            bool is_valid = true;
-            int j = -1, cnt = 0;
-            for (j = i; j < sz; ++j) {
-                pii rs = {vec[j].first, vec[i].second};
-                if (j != i && s.dual[vec[j].second] != vec[j - 1].first) {
-                    is_valid = false;
-                    break;
-                }
-                if (!s.root_leaf_path(rs.first, rs.second)) continue;
-                cnt++;
-                if (cnt > s.offset) { is_valid = false; break; }
-                is_valid = true;
-
-                for (int u : s.considered) {
-                    s.visit_order[u] = s.visit_order[s.dual[u]] = -1;
-                    s.to_chk[s.black_edge_id[u]] = -1;
-                }
-                s.considered.clear();
-                s.counter = 0;
-
-                is_valid = s.mark_nodes(s.dual[rs.first], rs, 0);
-                if (!is_valid) continue;
-                is_valid &= s.mark_nodes(s.dual[rs.second], rs, 1);
-                is_valid &= (s.counter == 0);
-
-                if (is_valid) {
-                    s.valid_panbubbles.push_back(rs);
-                    i = j + (j == i ? 1 : 0);
-                    break;
-                }
-            }
-            if (!is_valid || j == sz) i++;
-        }
-    }
-    s.considered.clear();
-
-    // Hairpins validation
     std::fill(s.mark.begin(), s.mark.end(), false);
-    std::fill(s.visit_order.begin(), s.visit_order.end(), -1);
-    std::fill(s.to_chk.begin(), s.to_chk.end(), -1);
 
-    for (size_t i = 0; i < s.possible_hairpins.size(); ++i) {
-        pii rs = s.possible_hairpins[i];
-        if ((s.g_compacted_csr.deg(rs.first) == 2
-             && s.g_compacted_csr.at(rs.first, 1).first == s.g_compacted_csr.at(rs.first, 0).first)
-            || s.g_compacted_csr.deg(rs.first) <= 1) continue;
+    std::vector<BilliState::ComponentState> cstates(s.component);
+    // BUG-FIX CRÍTICO: Edge IDs alocados via cs.alloc_edge(cs.cnt_gray_edge++)
+    // PRECISAM continuar a partir de s.cnt_gray_edge (valor pós-compaction +
+    // tip-add). Caso contrário, cs.cnt_gray_edge=0 colide com IDs já presentes
+    // em g_compacted_csr.at(u, k).second (que vêm do range [0, s.cnt_gray_edge)).
+    // A colisão fazia chaves (br, sz) em cs.canonical_sese aglomerar entries
+    // estruturalmente diferentes → vec sizes explodiam → loop O(sz²) panbubble
+    // val degradava de 42s → 702s no HPRC.
+    for (auto& cs : cstates) cs.cnt_gray_edge = s.cnt_gray_edge;
 
-        bool is_valid = true;
-        for (int u : s.considered) {
-            s.visit_order[u] = s.visit_order[s.dual[u]] = -1;
-            s.to_chk[s.black_edge_id[u]] = -1;
+    // Phase 1: SESE per componente.
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(dynamic, 1) num_threads(num_threads)
+#endif
+    for (int it = 0; it < s.component; ++it) {
+        auto& cs = cstates[it];
+        s.sese(cs, s.Start[it], -1);
+        if (s.tips[it].empty()) {
+            cs.st.clear();
+            s.mark[s.Start[it]] = s.mark[s.dual[s.Start[it]]] = false;
+            s.sese(cs, s.dual[s.Start[it]], -1);
         }
-        s.considered.clear();
-        s.counter = 0;
+        cs.st.clear(); // st não é mais usado nas próximas fases
+    }
+    GGQL_SNARL_TIMER_END(sese_main);
 
-        is_valid = s.mark_nodes(s.dual[rs.first], rs, 0);
-        if (!is_valid) continue;
-        is_valid &= s.mark_nodes(s.dual[rs.second], rs, 1);
-        is_valid &= (s.counter == 0);
+    GGQL_SNARL_TIMER_BEGIN(hairp);
+    // Phase 2: hairp per componente.
+    std::fill(s.mark.begin(), s.mark.end(), false);
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(dynamic, 1) num_threads(num_threads)
+#endif
+    for (int it = 0; it < s.component; ++it) {
+        s.hairp(cstates[it], s.Start[it]);
+    }
+    GGQL_SNARL_TIMER_END(hairp);
 
-        if (is_valid) {
-            s.valid_hairpins.push_back(rs);
+    GGQL_SNARL_TIMER_BEGIN(panbubble_val);
+    // Phase 3: brute-force panbubble validation per componente.
+    // Sort canonical_sese de cada componente preserva paridade Billi
+    // (iteração em ordem crescente de chave dentro do componente).
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(dynamic, 1) num_threads(num_threads)
+#endif
+    for (int it = 0; it < s.component; ++it) {
+        auto& cs = cstates[it];
+        std::vector<std::pair<pii, std::vector<pii>>> sorted_sese;
+        sorted_sese.reserve(cs.canonical_sese.size());
+        for (auto& kv : cs.canonical_sese) {
+            sorted_sese.emplace_back(kv.first, std::move(kv.second));
+        }
+        cs.canonical_sese.clear();
+        std::sort(sorted_sese.begin(), sorted_sese.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+
+        for (const auto& [key, vec] : sorted_sese) {
+            int sz = static_cast<int>(vec.size());
+            for (int i = 0; i < sz; ) {
+                bool is_valid = true;
+                int j = -1, cnt = 0;
+                for (j = i; j < sz; ++j) {
+                    pii rs = {vec[j].first, vec[i].second};
+                    if (j != i && s.dual[vec[j].second] != vec[j - 1].first) {
+                        is_valid = false;
+                        break;
+                    }
+                    if (!s.root_leaf_path(rs.first, rs.second)) continue;
+                    cnt++;
+                    if (cnt > s.offset) { is_valid = false; break; }
+                    is_valid = true;
+
+                    for (int u : cs.considered) {
+                        s.visit_order[u] = s.visit_order[s.dual[u]] = -1;
+                        s.to_chk[s.black_edge_id[u]] = -1;
+                    }
+                    cs.considered.clear();
+                    cs.counter = 0;
+
+                    is_valid = s.mark_nodes(cs, s.dual[rs.first], rs, 0);
+                    if (!is_valid) continue;
+                    is_valid &= s.mark_nodes(cs, s.dual[rs.second], rs, 1);
+                    is_valid &= (cs.counter == 0);
+
+                    if (is_valid) {
+                        cs.valid_panbubbles.push_back(rs);
+                        i = j + (j == i ? 1 : 0);
+                        break;
+                    }
+                }
+                if (!is_valid || j == sz) i++;
+            }
+        }
+        // NÃO limpa cs.considered — phase 4 (hairpin) precisa dele para
+        // resetar visit_order/to_chk via o caminho per-trial. (No Billi
+        // original isso era feito com std::fill em visit_order/to_chk
+        // entre as fases; aqui evitamos o O(2n) e aproveitamos o tracking.)
+    }
+    GGQL_SNARL_TIMER_END(panbubble_val);
+
+    GGQL_SNARL_TIMER_BEGIN(hairpin_val);
+    // Phase 4: hairpin validation per componente.
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(dynamic, 1) num_threads(num_threads)
+#endif
+    for (int it = 0; it < s.component; ++it) {
+        auto& cs = cstates[it];
+        for (size_t i = 0; i < cs.possible_hairpins.size(); ++i) {
+            pii rs = cs.possible_hairpins[i];
+            if ((s.g_compacted_csr.deg(rs.first) == 2
+                 && s.g_compacted_csr.at(rs.first, 1).first == s.g_compacted_csr.at(rs.first, 0).first)
+                || s.g_compacted_csr.deg(rs.first) <= 1) continue;
+
+            bool is_valid = true;
+            for (int u : cs.considered) {
+                s.visit_order[u] = s.visit_order[s.dual[u]] = -1;
+                s.to_chk[s.black_edge_id[u]] = -1;
+            }
+            cs.considered.clear();
+            cs.counter = 0;
+
+            is_valid = s.mark_nodes(cs, s.dual[rs.first], rs, 0);
+            if (!is_valid) continue;
+            is_valid &= s.mark_nodes(cs, s.dual[rs.second], rs, 1);
+            is_valid &= (cs.counter == 0);
+
+            if (is_valid) {
+                cs.valid_hairpins.push_back(rs);
+            }
         }
     }
+
+    GGQL_SNARL_TIMER_END(hairpin_val);
+
+    GGQL_SNARL_TIMER_BEGIN(merge_output);
+    // Merge dos outputs per-componente → BilliState.
+    for (auto& cs : cstates) {
+        s.valid_panbubbles.insert(s.valid_panbubbles.end(),
+                                   cs.valid_panbubbles.begin(),
+                                   cs.valid_panbubbles.end());
+        s.valid_hairpins.insert(s.valid_hairpins.end(),
+                                cs.valid_hairpins.begin(),
+                                cs.valid_hairpins.end());
+    }
+    cstates.clear(); cstates.shrink_to_fit();
+    GGQL_SNARL_TIMER_END(merge_output);
 
     // Converte para SnarlRecord (mapeia IDs Billi → IDs GFA originais)
     std::vector<SnarlRecord> out;
@@ -1038,8 +1280,8 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo) {
 
 // API pública: port literal do algoritmo Billi (não wrapper).
 std::vector<SnarlRecord> find_all_snarls(const GfaCsrTopology& topo,
-                                          int /*num_threads*/) {
-    return billi_port::run_billi_pipeline(topo);
+                                          int num_threads) {
+    return billi_port::run_billi_pipeline(topo, num_threads);
 }
 
 } // namespace ggql::snarl_decomposition
