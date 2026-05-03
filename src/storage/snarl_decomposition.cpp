@@ -596,10 +596,16 @@ struct BilliState {
             bool pushed = false;
             const int du = dual[u];
             const size_t deg_du = g_compacted_csr.deg(du);
+            const int tip_lim = tip_start[biedged_connected_comp[rs.second]];
             while (ci < deg_du) {
+                // Prefetch o próximo `child` (linha de cache à frente). g_compacted_csr.ed
+                // é contígua, então essa cache line cobre as próximas ~8 entries.
+                if (ci + 4 < deg_du) {
+                    __builtin_prefetch(&g_compacted_csr.at(du, ci + 4), 0, 0);
+                }
                 const auto& child = g_compacted_csr.at(du, ci++);
                 int v = child.first;
-                if (child.second >= tip_start[biedged_connected_comp[rs.second]]
+                if (child.second >= tip_lim
                     || child.second == -1
                     || end_gene(v, rs)) continue;
                 if (visit_order[v] == ty) continue;
@@ -904,7 +910,11 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
         s.mark[i] = true;
     }
 
-    // Swap black edge to position 0 in each adj
+    // Swap black edge to position 0 in each adj — embarrassingly parallel
+    // (cada slot de g_compacted é independente).
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static) num_threads(num_threads)
+#endif
     for (int i = 0; i < 2 * s.n; ++i) {
         for (auto& child : s.g_compacted[i]) {
             if (child.second == -1) {
@@ -1235,14 +1245,29 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
     GGQL_SNARL_TIMER_END(hairpin_val);
 
     GGQL_SNARL_TIMER_BEGIN(merge_output);
-    // Merge dos outputs per-componente → BilliState.
-    for (auto& cs : cstates) {
-        s.valid_panbubbles.insert(s.valid_panbubbles.end(),
-                                   cs.valid_panbubbles.begin(),
-                                   cs.valid_panbubbles.end());
-        s.valid_hairpins.insert(s.valid_hairpins.end(),
-                                cs.valid_hairpins.begin(),
-                                cs.valid_hairpins.end());
+    // Merge dos outputs per-componente → BilliState (paralelo).
+    // Prefix-sum dos sizes → cada thread escreve em range disjoint sem race.
+    {
+        const int K = static_cast<int>(cstates.size());
+        std::vector<size_t> off_pan(K + 1, 0);
+        std::vector<size_t> off_hp(K + 1, 0);
+        for (int i = 0; i < K; ++i) {
+            off_pan[i + 1] = off_pan[i] + cstates[i].valid_panbubbles.size();
+            off_hp[i + 1]  = off_hp[i]  + cstates[i].valid_hairpins.size();
+        }
+        s.valid_panbubbles.resize(off_pan[K]);
+        s.valid_hairpins.resize(off_hp[K]);
+#ifdef _OPENMP
+        #pragma omp parallel for schedule(dynamic, 4) num_threads(num_threads)
+#endif
+        for (int i = 0; i < K; ++i) {
+            std::copy(cstates[i].valid_panbubbles.begin(),
+                      cstates[i].valid_panbubbles.end(),
+                      s.valid_panbubbles.begin() + off_pan[i]);
+            std::copy(cstates[i].valid_hairpins.begin(),
+                      cstates[i].valid_hairpins.end(),
+                      s.valid_hairpins.begin() + off_hp[i]);
+        }
     }
     cstates.clear(); cstates.shrink_to_fit();
     GGQL_SNARL_TIMER_END(merge_output);
