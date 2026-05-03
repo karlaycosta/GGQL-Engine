@@ -1,22 +1,12 @@
-// snarl_decomposition_billi_port.cpp — PORT LITERAL do algoritmo Billi.
+// snarl_decomposition.cpp — Detecção de snarls (port nativo paralelo do
+// algoritmo Billi de Bhat, Mahajan, Jain 2025).
 //
-// Adaptação direta de at-cg/billi (Bhat, Mahajan, Jain 2025) para nossa
-// stack. Mantém EXATAMENTE a estrutura e lógica do código de Billi, com
-// adaptações apenas para:
-//   - Substituir parser GFA do Billi pela leitura de GfaCsrTopology
-//   - Envolver em namespace para evitar conflito com find_all_snarls_*
-//     (variáveis globais do Billi tornam-se members de uma struct)
-//   - Output via std::vector<SnarlRecord> em vez de stdout
-//
-// Funções portadas literalmente:
-//   - dfs_comp, find_unique_including_selfloop
-//   - dfs_depth, merge, sese_minbracket
-//   - sese (algoritmo principal SESE)
-//   - hairp (detecção de hairpins)
-//   - end_gene, root_leaf_path, upd_node, mark_nodes (validação brute force)
-//   - Decompose pipeline completo
-//
-// Macros do Billi (pb, F, S, etc.) substituídas por nomes claros.
+// Adaptado de at-cg/billi:
+//   - Lê GfaCsrTopology em vez de parser GFA próprio (sem reler arquivo)
+//   - Variáveis globais → members de BilliState; estado per-componente
+//     em ComponentState (cada thread opera em sua própria instância)
+//   - Pipeline pós-freeze paralelo via OpenMP por componente conexo
+//   - Output via std::vector<SnarlRecord>
 //
 // Refs: github.com/at-cg/billi src/{include,subcommand}/{commons,decompose}.{cpp,hpp}
 
@@ -708,19 +698,15 @@ static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo,
         count[2*i+1] = 1;
     }
     // Gray edges: race em count[id1] e count[id2] entre threads → atomic.
-    int orphan_count = 0;
 #ifdef _OPENMP
-    #pragma omp parallel for schedule(dynamic, 4096) num_threads(num_threads) reduction(+:orphan_count)
+    #pragma omp parallel for schedule(dynamic, 4096) num_threads(num_threads)
 #endif
     for (int64_t u = 0; u < static_cast<int64_t>(N); ++u) {
         const size_t out_sz = topo.out_neighbors(u).size();
         for (size_t k = 0; k < out_sz; ++k) {
             int id1, id2, n1, n2;
             char s1, s2;
-            if (!resolve_link(static_cast<uint64_t>(u), k, id1, id2, n1, n2, s1, s2)) {
-                ++orphan_count;
-                continue;
-            }
+            if (!resolve_link(static_cast<uint64_t>(u), k, id1, id2, n1, n2, s1, s2)) continue;
             __atomic_fetch_add(&count[id1], 1u, __ATOMIC_RELAXED);
             if (id1 != id2) __atomic_fetch_add(&count[id2], 1u, __ATOMIC_RELAXED);
         }
@@ -775,7 +761,6 @@ static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo,
         }
     }
     s.edges_count += local_edges;
-    (void)orphan_count;
     // cursor (= count buffer) descartado ao sair do escopo.
 }
 
@@ -1022,16 +1007,13 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
     // vector<vector<>> (~5 GB no HPRC) e usa CsrAdj para todos os reads
     // subsequentes (dfs_depth, sese, hairp, mark_nodes, validação hairpin).
     //
-    // 3 sub-passes (com timing detalhado para profilar variância):
+    // 3 passes:
     //   1. Fill off[i+1] = sizes — paralelo por nó.
-    //   2. Inclusive scan SEQUENCIAL (par_unseq mostrou variância alta no
-    //      HPRC — provável conflito TBB/OMP; scan serial sobre 220M ints
-    //      custa ~1 s, irrelevante).
+    //   2. Inclusive scan SEQUENCIAL: par_unseq tem overhead alto pra ~220M
+    //      ints (TBB/OMP coexistem mal); scan serial em ~1s é melhor.
     //   3. Copy per-node — paralelo por nó.
     {
         const int N2 = 2 * s.n;
-
-        GGQL_SNARL_TIMER_BEGIN(freeze_gc__sizes);
         s.g_compacted_csr.off.assign(N2 + 1, 0u);
 #ifdef _OPENMP
         #pragma omp parallel for schedule(static) num_threads(num_threads)
@@ -1039,20 +1021,10 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
         for (int i = 0; i < N2; ++i) {
             s.g_compacted_csr.off[i + 1] = static_cast<uint32_t>(s.g_compacted[i].size());
         }
-        GGQL_SNARL_TIMER_END(freeze_gc__sizes);
-
-        GGQL_SNARL_TIMER_BEGIN(freeze_gc__scan);
-        // Scan sequencial: 220M ints × ~5 ns/op = ~1 s. Cheap.
         for (int i = 0; i < N2; ++i) {
             s.g_compacted_csr.off[i + 1] += s.g_compacted_csr.off[i];
         }
-        GGQL_SNARL_TIMER_END(freeze_gc__scan);
-
-        GGQL_SNARL_TIMER_BEGIN(freeze_gc__alloc);
         s.g_compacted_csr.ed.resize(s.g_compacted_csr.off[N2]);
-        GGQL_SNARL_TIMER_END(freeze_gc__alloc);
-
-        GGQL_SNARL_TIMER_BEGIN(freeze_gc__copy);
 #ifdef _OPENMP
         #pragma omp parallel for schedule(static) num_threads(num_threads)
 #endif
@@ -1061,7 +1033,6 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
             std::copy(src.begin(), src.end(),
                       s.g_compacted_csr.ed.begin() + s.g_compacted_csr.off[i]);
         }
-        GGQL_SNARL_TIMER_END(freeze_gc__copy);
     }
 
     // ── Free de g_compacted em BACKGROUND ────────────────────────────
