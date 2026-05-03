@@ -226,7 +226,7 @@ struct BilliState {
             int u = stk.back(); stk.pop_back();
             for (const auto& child : g_compacted[u]) {
                 int v = child.first;
-                if (mark[v]) continue;
+                if (mark[v]) { continue; }
                 mark[v] = true;
                 biedged_connected_comp[v] = component;
                 stk.push_back(v);
@@ -237,7 +237,7 @@ struct BilliState {
     // Retorna 1 se u tem ao menos 1 vizinho diferente do dual, 0 caso contrário.
     [[nodiscard]] int find_unique_including_selfloop(int u) const noexcept {
         for (const auto& child : g_compacted[u]) {
-            if (child.first != dual[u]) return 1;
+            if (child.first != dual[u]) { return 1; }
         }
         return 0;
     }
@@ -257,19 +257,19 @@ struct BilliState {
             const size_t deg_u = g_compacted_csr.deg(f.u);
             while (f.ci < deg_u) {
                 int v = g_compacted_csr.at(f.u, f.ci++).first;
-                if (mark[v]) continue;
+                if (mark[v]) { continue; }
                 mark[v] = true;
                 depth[v] = depth[f.u] + 1;
                 stk.push_back({v, 0});
                 pushed = true;
                 break;
             }
-            if (!pushed) stk.pop_back();
+            if (!pushed) { stk.pop_back(); }
         }
     }
 
     static void merge(BracketList* bl1, BracketList* bl2) noexcept {
-        if (!bl2->start) return;
+        if (!bl2->start) { return; }
         if (!bl1->start) {
             bl1->start = bl2->start;
             bl1->d = bl2->d;
@@ -302,8 +302,8 @@ struct BilliState {
             while (f.ci < g_compacted[f.u].size()) {
                 const auto& child = g_compacted[f.u][f.ci++];
                 int v = child.first;
-                if (v == f.parent || v == f.u) continue;
-                if (mark[v]) continue;
+                if (v == f.parent || v == f.u) { continue; }
+                if (mark[v]) { continue; }
                 mark[v] = true;
                 depth[v] = depth[f.u] + 1;
                 stk.push_back({v, f.u, 0});
@@ -315,7 +315,7 @@ struct BilliState {
                 bl[u] = local_alloc();
                 for (const auto& child : g_compacted[u]) {
                     int v = child.first;
-                    if (depth[v] != depth[u] + 1) continue;
+                    if (depth[v] != depth[u] + 1) { continue; }
                     if (bl[v] && !bl[v]->merged) {
                         if (u == dual[v]) {
                             int bridge_cnt = bl[v]->sz;
@@ -328,7 +328,7 @@ struct BilliState {
                 bl[u]->sz -= rm_cnt[u];
                 for (const auto& child : g_compacted[u]) {
                     int v = child.first;
-                    if (depth[v] >= depth[u] - 1) continue;
+                    if (depth[v] >= depth[u] - 1) { continue; }
                     rm_cnt[v]++;
                     bl[u]->sz++;
                 }
@@ -386,7 +386,7 @@ struct BilliState {
                             f.h0 = std::min(f.h0, depth[v]);
                             continue;
                         }
-                        if (f.parent == -1 && child.second != -1) continue;
+                        if (f.parent == -1 && child.second != -1) { continue; }
                         if (mark[v]) {
                             if (depth[v] <= depth[f.u])
                                 f.h0 = std::min(f.h0, depth[v]);
@@ -401,9 +401,9 @@ struct BilliState {
             while (f.ci < deg_u) {
                 const auto& child = g_compacted_csr.at(f.u, f.ci++);
                 int v = child.first;
-                if (v == f.parent || v == f.u) continue;
-                if (f.parent == -1 && child.second != -1) continue;
-                if (mark[v]) continue;
+                if (v == f.parent || v == f.u) { continue; }
+                if (f.parent == -1 && child.second != -1) { continue; }
+                if (mark[v]) { continue; }
                 // Push child frame
                 stk.push_back({v, f.u, maxd, maxd, maxd, 0u, true, false});
                 pushed = true;
@@ -423,14 +423,14 @@ struct BilliState {
                     for (size_t k = 0; k < deg_u_post; ++k) {
                         const auto& child = g_compacted_csr.at(u, k);
                         int v = child.first;
-                        if (depth[v] != depth[u] + 1) continue;
-                        if (parent == -1 && child.second != -1) continue;
+                        if (depth[v] != depth[u] + 1) { continue; }
+                        if (parent == -1 && child.second != -1) { continue; }
                         if (bl[v]) {
                             if (bl[v]->d < h1) { h2 = h1; h1 = bl[v]->d; }
                             else                { h2 = std::min(h2, bl[v]->d); }
                             bl[v]->d = maxd;
                         }
-                        if (bl[v] && !bl[v]->merged) merge(bl[u], bl[v]);
+                        if (bl[v] && !bl[v]->merged) { merge(bl[u], bl[v]); }
                     }
                 }
                 bl[u]->d = std::min(h0, h1);
@@ -448,22 +448,22 @@ struct BilliState {
                             }
                         } else {
                             bl[u]->end_ = ed->back;
-                            if (ed->back) ed->back->front = nullptr;
-                            else          bl[u]->start = nullptr;
+                            if (ed->back) { ed->back->front = nullptr; }
+                            else { bl[u]->start = nullptr; }
                         }
                         bl[u]->sz--;
                     }
                     cs.pending_removals.erase(pr_it);
                 }
-                if (bl[u]->d == depth[u]) bl[u]->d = maxd;
+                if (bl[u]->d == depth[u]) { bl[u]->d = maxd; }
 
                 {
                     const size_t deg_u_back = g_compacted_csr.deg(u);
                     for (size_t k = 0; k < deg_u_back; ++k) {
                         const auto& child = g_compacted_csr.at(u, k);
                         int v = child.first;
-                        if (depth[v] >= depth[u] - 1) continue;
-                        if (parent == -1 && child.second != -1) continue;
+                        if (depth[v] >= depth[u] - 1) { continue; }
+                        if (parent == -1 && child.second != -1) { continue; }
                         Edge* ed = cs.alloc_edge(child.second);
                         cs.pending_removals[v].push_back(ed);
                         auto* tmp = cs.alloc_bracket(1, depth[v], ed, ed);
@@ -516,9 +516,9 @@ struct BilliState {
             const size_t deg_u = g_compacted_csr.deg(f.u);
             while (f.ci < deg_u) {
                 const auto& child = g_compacted_csr.at(f.u, f.ci++);
-                if (child.first == f.parent) continue;
+                if (child.first == f.parent) { continue; }
                 f.cnt++;
-                if (mark[child.first]) continue;
+                if (mark[child.first]) { continue; }
                 mark[child.first] = true;
                 stk.push_back({child.first, f.u, 0, false, 0});
                 pushed = true;
@@ -533,7 +533,7 @@ struct BilliState {
                     cs.possible_hairpins.push_back({u, u});
                 }
                 stk.pop_back();
-                if (!stk.empty()) stk.back().child_bridge |= result;
+                if (!stk.empty()) { stk.back().child_bridge |= result; }
             }
         }
     }
@@ -554,7 +554,7 @@ struct BilliState {
                 to_chk[gene] = static_cast<short>(ty_end[u]);
                 cs.considered.push_back(u);
             } else {
-                if (ty_end[u] != to_chk[gene]) to_chk[gene] = 2;
+                if (ty_end[u] != to_chk[gene]) { to_chk[gene] = 2; }
             }
         } else {
             if (to_chk[gene] == 2) {
@@ -563,7 +563,7 @@ struct BilliState {
             } else {
                 short required = static_cast<short>(1 - ty_end[u]);
                 if (to_chk[gene] == required || to_chk[gene] == -1) {
-                    if (to_chk[gene] == -1) cs.considered.push_back(u);
+                    if (to_chk[gene] == -1) { cs.considered.push_back(u); }
                     cs.counter--;
                     to_chk[gene] = -2;
                 }
@@ -581,7 +581,7 @@ struct BilliState {
                 if (is_bridge[black_edge_id[u]]
                     && (!root_leaf_path(dual[rs.first], u)
                         || !root_leaf_path(u, dual[rs.second]))) return false;
-                if (!end_gene(u, rs)) upd_node(cs, u, ty);
+                if (!end_gene(u, rs)) { upd_node(cs, u, ty); }
             }
             bool pushed = false;
             const int du = dual[u];
@@ -598,12 +598,12 @@ struct BilliState {
                 if (child.second >= tip_lim
                     || child.second == -1
                     || end_gene(v, rs)) continue;
-                if (visit_order[v] == ty) continue;
+                if (visit_order[v] == ty) { continue; }
                 stk.push_back({v, 0});
                 pushed = true;
                 break;
             }
-            if (!pushed) stk.pop_back();
+            if (!pushed) { stk.pop_back(); }
         }
         return true;
     }
@@ -650,7 +650,7 @@ static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo,
 
         size_t occ = 0;
         for (size_t j = 0; j < k; ++j) {
-            if ((out[j] >> 1) == v) ++occ;
+            if ((out[j] >> 1) == v) { ++occ; }
         }
 
         s1 = '+';
@@ -658,7 +658,7 @@ static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo,
         const auto in_v = topo.in_neighbors(v);
         size_t seen = 0;
         for (uint32_t enc : in_v) {
-            if ((enc >> 1) != u) continue;
+            if ((enc >> 1) != u) { continue; }
             if (seen == occ) {
                 s1 = (enc & 1u) ? '-' : '+';
                 found = true;
@@ -666,7 +666,7 @@ static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo,
             }
             ++seen;
         }
-        if (!found) return false;
+        if (!found) { return false; }
 
         n1 = static_cast<int>(u);
         n2 = static_cast<int>(v);
@@ -679,8 +679,8 @@ static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo,
         }
         id1 = n1 << 1;
         id2 = n2 << 1;
-        if (s1 == '+') id1++;
-        if (s2 == '-') id2++;
+        if (s1 == '+') { id1++; }
+        if (s2 == '-') { id2++; }
         return true;
     };
 
@@ -706,9 +706,11 @@ static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo,
         for (size_t k = 0; k < out_sz; ++k) {
             int id1, id2, n1, n2;
             char s1, s2;
-            if (!resolve_link(static_cast<uint64_t>(u), k, id1, id2, n1, n2, s1, s2)) continue;
+            if (!resolve_link(static_cast<uint64_t>(u), k, id1, id2, n1, n2, s1, s2)) {
+                continue;
+            }
             __atomic_fetch_add(&count[id1], 1u, __ATOMIC_RELAXED);
-            if (id1 != id2) __atomic_fetch_add(&count[id2], 1u, __ATOMIC_RELAXED);
+            if (id1 != id2) { __atomic_fetch_add(&count[id2], 1u, __ATOMIC_RELAXED); }
         }
     }
 
@@ -747,7 +749,9 @@ static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo,
         for (size_t k = 0; k < out_sz; ++k) {
             int id1, id2, n1, n2;
             char s1, s2;
-            if (!resolve_link(static_cast<uint64_t>(u), k, id1, id2, n1, n2, s1, s2)) continue;
+            if (!resolve_link(static_cast<uint64_t>(u), k, id1, id2, n1, n2, s1, s2)) {
+                continue;
+            }
             const uint32_t pos1 = __atomic_fetch_add(&cursor[id1], 1u, __ATOMIC_RELAXED);
             s.g.ed[pos1] = id2;
             if (id1 != id2) {
@@ -772,7 +776,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
     build_state_from_topo(s, topo, num_threads);
     GGQL_SNARL_TIMER_END(build_state);
 
-    if (s.n == 0) return {};
+    if (s.n == 0) { return {}; }
 
     GGQL_SNARL_TIMER_BEGIN(graph_cleaning);
     // *** Graph Cleaning ***
@@ -787,7 +791,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
             new_off[i] = static_cast<uint32_t>(write);
             const size_t lo = s.g.off[i];
             const size_t hi = s.g.off[i + 1];
-            if (hi == lo) continue;
+            if (hi == lo) { continue; }
 
             if (hi > lo + 1) {
                 std::sort(s.g.ed.begin() + lo + 1, s.g.ed.begin() + hi);
@@ -802,7 +806,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
             if (include_black) {
                 // Pula grays cujo target == black target (colapsados pelo
                 // unique do Billi original quando estão contíguos no sort).
-                while (j < hi && s.g.ed[j] == black_target) ++j;
+                while (j < hi && s.g.ed[j] == black_target) { ++j; }
             }
 
             if (j < hi) {
@@ -834,7 +838,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
     s.g_compacted.assign(2 * s.n, {});
 
     for (int i = 0; i < 2 * s.n; ++i) {
-        if (s.mark[i]) continue;
+        if (s.mark[i]) { continue; }
         if (s.chk_for_compaction(i)) {
             s.q_compact.push({i ^ 1, 0});
             s.q_compact.push({s.g.at(i, 1) ^ 1, 1});
@@ -846,7 +850,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
                     s.mark[pid.first] = true;
                     int neigh = s.g.at(pid.first, 1);
                     s.mark[neigh] = true;
-                    if (s.mark[neigh ^ 1]) continue;
+                    if (s.mark[neigh ^ 1]) { continue; }
                     if (pid.second == 0) {
                         left = neigh;
                         s.q_compact.push({left ^ 1, 0});
@@ -864,21 +868,21 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
             s.black_edge_id[l] = s.black_edge_id[r] = s.cnt_black_edge++;
             for (size_t j = 1, dl = s.g.deg(l); j < dl; ++j) {
                 int u = s.g.at(l, j);
-                if (s.mark[u] && u != r) continue;
-                if (l != u) s.g_compacted[l].push_back({u, s.cnt_gray_edge});
+                if (s.mark[u] && u != r) { continue; }
+                if (l != u) { s.g_compacted[l].push_back({u, s.cnt_gray_edge}); }
                 s.g_compacted[u].push_back({l, s.cnt_gray_edge++});
             }
             for (size_t j = 1, dr = s.g.deg(r); j < dr; ++j) {
                 int u = s.g.at(r, j);
-                if (s.mark[u]) continue;
-                if (r != u) s.g_compacted[r].push_back({u, s.cnt_gray_edge});
+                if (s.mark[u]) { continue; }
+                if (r != u) { s.g_compacted[r].push_back({u, s.cnt_gray_edge}); }
                 s.g_compacted[u].push_back({r, s.cnt_gray_edge++});
             }
             s.mark[l] = s.mark[r] = true;
         }
     }
     for (int i = 0; i < 2 * s.n; ++i) {
-        if (s.mark[i]) continue;
+        if (s.mark[i]) { continue; }
         if (!s.mark[i ^ 1]) {
             s.g_compacted[i].push_back({i ^ 1, -1});
             s.g_compacted[i ^ 1].push_back({i, -1});
@@ -888,8 +892,8 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
         }
         for (size_t j = 1, di = s.g.deg(i); j < di; ++j) {
             int u = s.g.at(i, j);
-            if (s.mark[u]) continue;
-            if (i != u) s.g_compacted[i].push_back({u, s.cnt_gray_edge});
+            if (s.mark[u]) { continue; }
+            if (i != u) { s.g_compacted[i].push_back({u, s.cnt_gray_edge}); }
             s.g_compacted[u].push_back({i, s.cnt_gray_edge++});
         }
         s.mark[i] = true;
@@ -920,7 +924,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
     std::fill(s.mark.begin(), s.mark.end(), false);
     s.biedged_connected_comp.assign(2 * s.n, 0);
     for (int i = 0; i < 2 * s.n; ++i) {
-        if (s.mark[i] || s.g_compacted[i].empty()) continue;
+        if (s.mark[i] || s.g_compacted[i].empty()) { continue; }
         s.dfs_comp(i);
         s.first_node.push_back(i);
         s.component++;
@@ -936,7 +940,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
         const int N2 = 2 * s.n;
         const int T = std::max(1, num_threads);
         std::vector<std::vector<std::vector<int>>> tips_local(T);
-        for (auto& tl : tips_local) tl.assign(s.component, {});
+        for (auto& tl : tips_local) { tl.assign(s.component, {}); }
 
 #ifdef _OPENMP
         #pragma omp parallel num_threads(num_threads)
@@ -951,7 +955,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
             #pragma omp for schedule(static)
 #endif
             for (int i = 0; i < N2; ++i) {
-                if (s.g_compacted[i].empty()) continue;
+                if (s.g_compacted[i].empty()) { continue; }
                 if (s.find_unique_including_selfloop(i) == 0) {
                     tl[s.biedged_connected_comp[i]].push_back(i);
                 }
@@ -961,7 +965,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
         for (int t = 0; t < T; ++t) {
             for (int c = 0; c < s.component; ++c) {
                 auto& src = tips_local[t][c];
-                if (src.empty()) continue;
+                if (src.empty()) { continue; }
                 s.tips[c].insert(s.tips[c].end(), src.begin(), src.end());
             }
         }
@@ -969,9 +973,9 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
 
     int cnt_zero = 0;
     for (int i = 0; i < s.component; ++i) {
-        if (s.tips[i].empty()) cnt_zero++;
+        if (s.tips[i].empty()) { cnt_zero++; }
     }
-    if (cnt_zero != 0) return {}; // Billi também aborta nesse caso
+    if (cnt_zero != 0) { return {}; } // Billi também aborta nesse caso
 
     // Finding S node + adding extra gray edges for tips
     constexpr int maxv = INT32_MAX;
@@ -990,13 +994,13 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
             s.Start[it] = s.tips[it][0];
             int u = s.Start[it];
             for (size_t i = 1; i < s.tips[it].size(); ++i) {
-                if (s.tip_start[it] == -1) s.tip_start[it] = s.cnt_gray_edge;
+                if (s.tip_start[it] == -1) { s.tip_start[it] = s.cnt_gray_edge; }
                 int v = s.tips[it][i];
                 s.g_compacted[u].push_back({v, s.cnt_gray_edge});
                 s.g_compacted[v].push_back({u, s.cnt_gray_edge++});
             }
         }
-        if (s.tips[it].size() <= 1) s.tip_start[it] = maxv;
+        if (s.tips[it].size() <= 1) { s.tip_start[it] = maxv; }
     }
     s.rm_cnt.clear(); s.first_node.clear();
     GGQL_SNARL_TIMER_END(cc_tip_id);
@@ -1090,7 +1094,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
     // A colisão fazia chaves (br, sz) em cs.canonical_sese aglomerar entries
     // estruturalmente diferentes → vec sizes explodiam → loop O(sz²) panbubble
     // val degradava de 42s → 702s no HPRC.
-    for (auto& cs : cstates) cs.cnt_gray_edge = s.cnt_gray_edge;
+    for (auto& cs : cstates) { cs.cnt_gray_edge = s.cnt_gray_edge; }
 
     // Phase 1: SESE per componente.
 #ifdef _OPENMP
@@ -1148,7 +1152,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
                         is_valid = false;
                         break;
                     }
-                    if (!s.root_leaf_path(rs.first, rs.second)) continue;
+                    if (!s.root_leaf_path(rs.first, rs.second)) { continue; }
                     cnt++;
                     if (cnt > s.offset) { is_valid = false; break; }
                     is_valid = true;
@@ -1161,7 +1165,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
                     cs.counter = 0;
 
                     is_valid = s.mark_nodes(cs, s.dual[rs.first], rs, 0);
-                    if (!is_valid) continue;
+                    if (!is_valid) { continue; }
                     is_valid &= s.mark_nodes(cs, s.dual[rs.second], rs, 1);
                     is_valid &= (cs.counter == 0);
 
@@ -1171,7 +1175,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
                         break;
                     }
                 }
-                if (!is_valid || j == sz) i++;
+                if (!is_valid || j == sz) { i++; }
             }
         }
         // NÃO limpa cs.considered — phase 4 (hairpin) precisa dele para
@@ -1192,7 +1196,9 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
             pii rs = cs.possible_hairpins[i];
             if ((s.g_compacted_csr.deg(rs.first) == 2
                  && s.g_compacted_csr.at(rs.first, 1).first == s.g_compacted_csr.at(rs.first, 0).first)
-                || s.g_compacted_csr.deg(rs.first) <= 1) continue;
+                || s.g_compacted_csr.deg(rs.first) <= 1) {
+                continue;
+            }
 
             bool is_valid = true;
             for (int u : cs.considered) {
@@ -1203,7 +1209,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
             cs.counter = 0;
 
             is_valid = s.mark_nodes(cs, s.dual[rs.first], rs, 0);
-            if (!is_valid) continue;
+            if (!is_valid) { continue; }
             is_valid &= s.mark_nodes(cs, s.dual[rs.second], rs, 1);
             is_valid &= (cs.counter == 0);
 
@@ -1249,7 +1255,7 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo,
     for (const auto& rs : s.valid_panbubbles) {
         const uint64_t a = static_cast<uint64_t>(rs.first  >> 1);
         const uint64_t b = static_cast<uint64_t>(rs.second >> 1);
-        if (a == b) continue;
+        if (a == b) { continue; }
         SnarlRecord rec{};
         rec.source = std::min(a, b);
         rec.sink   = std::max(a, b);
