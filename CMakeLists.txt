@@ -126,6 +126,14 @@ target_compile_options(bench_gbwt PRIVATE
 target_link_options(bench_gbwt PRIVATE -flto=auto)
 target_link_libraries(bench_gbwt PRIVATE ggql_ingest)
 
+# bench_metadata — isola tempo de load() e queries de GfaMetadataStore.
+add_executable(bench_metadata tools/bench_metadata.cpp)
+target_compile_options(bench_metadata PRIVATE
+    -O3 -flto=auto -march=native
+)
+target_link_options(bench_metadata PRIVATE -flto=auto)
+target_link_libraries(bench_metadata PRIVATE ggql_ingest)
+
 # ── bubble_vs_snarl (diagnóstico) ─────────────────────────
 # Tool de diagnóstico que compara find_snarls_streaming (cactus) com
 # find_bubbles (Onodera 2013) no mesmo .idx. Usado para validar

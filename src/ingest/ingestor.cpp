@@ -1539,7 +1539,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
     stats.elapsed_ingest_s = sec(t1 - t_built).count();
     stats.node_count = res_.mphf->nbKeys();
 
-    std::vector<char> fm_seq_for_build;
+    std::unique_ptr<char[]> fm_seq_for_build;
+    size_t fm_seq_for_build_size = 0;
     // Mantido vivo além do bloco write_db para build_path_stats após GBWT.
     std::unique_ptr<GfaMetadataStore> store_up;
 
@@ -1563,7 +1564,9 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
             records.swap(tmp);
         }
         if (build_fm_index) {
-            fm_seq_for_build = store_up->take_sequences();
+            auto pair = store_up->take_sequences();
+            fm_seq_for_build = std::move(pair.first);
+            fm_seq_for_build_size = pair.second;
         }
     }
 
@@ -1590,17 +1593,17 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
     }
     res_.mmap.reset();
 
-    if (!fm_seq_for_build.empty()) {
+    if (fm_seq_for_build_size > 0) {
         if (verbose) {
             cli::phase(3, "FM-Index");
         }
         auto t_fm0 = clock::now();
         GfaSequenceIndex fm_index;
-        fm_index.build(fm_seq_for_build, num_threads);
-        {
-            std::vector<char> tmp;
-            fm_seq_for_build.swap(tmp);
-        }
+        fm_index.build(std::span<const char>(fm_seq_for_build.get(),
+                                             fm_seq_for_build_size),
+                       num_threads);
+        fm_seq_for_build.reset();
+        fm_seq_for_build_size = 0;
         fm_index.save(cache_dir);
         auto t_fm1 = clock::now();
         stats.elapsed_fm_index_s = sec(t_fm1 - t_fm0).count();

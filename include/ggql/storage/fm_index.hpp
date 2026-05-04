@@ -23,6 +23,7 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -42,7 +43,7 @@ class GfaSequenceIndex {
 
     // Constrói o índice a partir das sequências concatenadas de segmentos GFA.
     // seq_chars deve conter sentinelas '$' (0x24) separando cada sequência.
-    void build(const std::vector<char>& seq_chars, int num_threads = 1);
+    void build(std::span<const char> seq_chars, int num_threads = 1);
 
     // Backward search sobre BWT. Retorna offsets (0-based) na string concatenada.
     // Retorna vazio para k-mers com '$', caracteres fora de {A,C,G,N,T} ou N_==0.

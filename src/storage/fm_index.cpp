@@ -157,7 +157,7 @@ std::vector<uint64_t> GfaSequenceIndex::search_kmer(std::string_view kmer) const
 
 // ── build ────────────────────────────────────────────────────────────────────
 
-void GfaSequenceIndex::build(const std::vector<char>& seq_chars, int num_threads) {
+void GfaSequenceIndex::build(std::span<const char> seq_chars, int num_threads) {
     const int64_t N = static_cast<int64_t>(seq_chars.size());
     if (N == 0) { return; }
 
