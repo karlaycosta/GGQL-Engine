@@ -151,6 +151,15 @@ target_compile_options(bench_graph_algorithms PRIVATE
 target_link_options(bench_graph_algorithms PRIVATE -flto=auto)
 target_link_libraries(bench_graph_algorithms PRIVATE ggql_ingest)
 
+# bench_fm_index — mede compute_payload_hash, search_kmer, load/save
+# isolados de GfaSequenceIndex.
+add_executable(bench_fm_index tools/bench_fm_index.cpp)
+target_compile_options(bench_fm_index PRIVATE
+    -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
+)
+target_link_options(bench_fm_index PRIVATE -flto=auto)
+target_link_libraries(bench_fm_index PRIVATE ggql_storage)
+
 # ── bubble_vs_snarl (diagnóstico) ─────────────────────────
 # Tool de diagnóstico que compara find_snarls_streaming (cactus) com
 # find_bubbles (Onodera 2013) no mesmo .idx. Usado para validar

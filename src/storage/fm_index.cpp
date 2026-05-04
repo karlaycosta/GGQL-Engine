@@ -15,7 +15,6 @@
 #include <bit>
 #include <chrono>
 #include <fstream>
-#include <fmt/color.h>
 #include <fmt/core.h>
 #include <memory>
 #include <stdexcept>
@@ -68,8 +67,8 @@ uint64_t GfaSequenceIndex::get_occ(uint8_t c, int64_t idx) const noexcept {
 }
 
 // ── get_occ_pair ─────────────────────────────────────────────────────────────
-// PERF-FM-3: Occ(c, idxL) e Occ(c, idxR) num único load de OccBlock quando
-// ambos os índices caem no mesmo bloco de 64 posições (economiza 1 cache miss
+// Funde Occ(c, idxL) e Occ(c, idxR) num único load de OccBlock quando ambos
+// os índices caem no mesmo bloco de 64 posições (economiza 1 cache miss
 // por iteração do backward search assim que [L,R] cabe num bloco).
 
 std::pair<uint64_t, uint64_t>
@@ -101,7 +100,8 @@ GfaSequenceIndex::get_occ_pair(uint8_t c, int64_t idxL, int64_t idxR) const noex
 uint64_t GfaSequenceIndex::locate(int64_t i) const noexcept {
     int64_t steps = 0;
     int64_t cur = i;
-    // BUG-FM-2: limite evita loop infinito se blocks_ estiver corrompido.
+    // Limite SA_SAMPLE×2 evita loop infinito se blocks_ estiver corrompido
+    // (LF-walk normal converge em ≤ SA_SAMPLE passos).
     for (int64_t guard = 0; guard <= SA_SAMPLE * 2; ++guard) {
         if (cur < 0 || cur >= static_cast<int64_t>(N_)) {
             return kInvalidPos;
@@ -136,8 +136,8 @@ std::vector<uint64_t> GfaSequenceIndex::search_kmer(std::string_view kmer) const
 
     for (int i = static_cast<int>(kmer.size()) - 1; i >= 0; --i) {
         const uint8_t c = map_char(kmer[i]);
-        // PERF-FM-3: get_occ_pair funde as duas chamadas em 1 cache miss
-        // quando L-1 e R caem no mesmo OccBlock.
+        // get_occ_pair funde as duas chamadas em 1 cache miss quando L-1
+        // e R caem no mesmo OccBlock.
         const auto [occL, occR] = get_occ_pair(c, L - 1, R);
         L = static_cast<int64_t>(C_[c]) + static_cast<int64_t>(occL);
         R = static_cast<int64_t>(C_[c]) + static_cast<int64_t>(occR) - 1;
@@ -191,15 +191,18 @@ void GfaSequenceIndex::build(std::span<const char> seq_chars, int num_threads) {
     auto sa_buf = std::make_unique_for_overwrite<int64_t[]>(static_cast<size_t>(N));
     int64_t* const sa = sa_buf.get();
 
+    // B4: usa libsais64 (single-thread) quando nt==1 — evita overhead OMP
+    // do libsais64_omp para casos de 1 thread.
 #ifdef LIBSAIS_OPENMP
-    if (libsais64_omp(mapped.data(), sa, N, 0, freq, static_cast<int64_t>(num_threads)) != 0) {
-        throw std::runtime_error("Falha fatal em libsais64_omp");
-    }
+    const int64_t sais_ret = (nt > 1)
+        ? libsais64_omp(mapped.data(), sa, N, 0, freq, static_cast<int64_t>(nt))
+        : libsais64(mapped.data(), sa, N, 0, freq);
 #else
-    if (libsais64(mapped.data(), sa, N, 0, freq) != 0) {
+    const int64_t sais_ret = libsais64(mapped.data(), sa, N, 0, freq);
+#endif
+    if (sais_ret != 0) {
         throw std::runtime_error("Falha fatal em libsais64");
     }
-#endif
 
     const auto t1 = clock::now();
     cli::step_ok("SA pronto",
@@ -275,7 +278,7 @@ void GfaSequenceIndex::build(std::span<const char> seq_chars, int num_threads) {
         }
     }
 
-    // PERF-FM-4: fill paralelo de sampled_vals_ via prefix-sum de offsets por thread.
+    // Fill paralelo de sampled_vals_ via prefix-sum de offsets por thread.
     // schedule(static) no BWT loop garante ordem global crescente — invariante do rank.
     sampled_vals_.resize(total_samp);
     {
@@ -309,7 +312,7 @@ void GfaSequenceIndex::build(std::span<const char> seq_chars, int num_threads) {
     }
     N_ = static_cast<uint64_t>(N);
 
-    // ── Tabela Occ: 2 passes paralelos (PERF-FM-2) ──────────────────────────
+    // ── Tabela Occ: 2 passes paralelos ──────────────────────────────────────
     const size_t num_blocks = (static_cast<size_t>(N) + 63) / 64;
     blocks_.assign(num_blocks, OccBlock{});
 
@@ -389,16 +392,23 @@ void GfaSequenceIndex::build(std::span<const char> seq_chars, int num_threads) {
 }
 
 // ── compute_payload_hash ─────────────────────────────────────────────────────
+// Cobre N_, C_, BWT, bitmap de samples, vetor de samples, e blocos Occ
+// (mask + occ).
+//
+// Versão anterior iterava blocos com `cb.add(blk.occ)` apenas — deixava
+// `blk.mask` (50% dos dados) sem checksum, e estourava kMaxParts=32 ao
+// gerar 47M parts (jogando para heap fallback do ChecksumBuilder).
+// Hashing o blob inteiro de `blocks_` num único XXH64 cobre mask+occ
+// e é mais rápido (sem overhead de 47M chamadas de função).
 
 uint64_t GfaSequenceIndex::compute_payload_hash() const noexcept {
     const uint64_t bv_words = (sampled_bv_.size() + 63) / 64;
-    // BUG-FM-1: blocks_ incluído para detectar corrupção silenciosa em disco.
     ChecksumBuilder cb;
     cb.add(N_).add(C_).add(bwt_)
       .add(sampled_bv_.data(), bv_words * 8)
       .add(sampled_vals_);
-    for (const auto& blk : blocks_) {
-        cb.add(blk.occ);
+    if (!blocks_.empty()) {
+        cb.add(blocks_.data(), blocks_.size() * sizeof(OccBlock));
     }
     return cb.finalize();
 }
@@ -414,7 +424,7 @@ void GfaSequenceIndex::save(const std::string& dir) const {
                                  "/fm_index.bin para escrita");
     }
 
-    out.write(reinterpret_cast<const char*>(&kMagicV7), sizeof(kMagicV7));
+    out.write(reinterpret_cast<const char*>(&kMagicV8), sizeof(kMagicV8));
     out.write(reinterpret_cast<const char*>(&N_), sizeof(N_));
     out.write(reinterpret_cast<const char*>(C_), sizeof(C_));
     out.write(reinterpret_cast<const char*>(bwt_.data()), static_cast<std::streamsize>(N_));
@@ -460,7 +470,14 @@ void GfaSequenceIndex::load(const std::string& dir) {
     uint64_t magic = 0;
     in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
     if (!in) { fail("header truncado"); }
-    if (magic != kMagicV7) { N_ = 0; return; } // formato antigo — caller regenera
+    if (magic != kMagicV8) {
+        // Formato antigo (V7 ou anterior) — caller regenera. Log para o
+        // usuário saber que o cache vai ser reconstruído.
+        cli::note(fmt::format("FM-Index magic obsoleto em {}/fm_index.bin "
+                              "(esperado V8) — reingest necessário", dir));
+        N_ = 0;
+        return;
+    }
 
     in.read(reinterpret_cast<char*>(&N_), sizeof(N_));
     if (!in) { fail("N_ truncado"); }

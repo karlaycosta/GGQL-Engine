@@ -68,7 +68,9 @@ class GfaSequenceIndex {
     //   nsamp (8B) | sampled_vals_ (nsamp*8 B)
     //   nblocks (8B) | blocks_ (nblocks*128 B, AoS: occ[8]+mask[8] interleaved)
     //   xxh64_hash (8B)
-    static constexpr uint64_t kMagicV7 = 0x464D49445837ULL; // "FMIDX7"
+    // V8 (2026-05-04): hash agora cobre blocks_[].mask além de occ.
+    // Caches V7 são rejeitados pelo load() — caller regenera.
+    static constexpr uint64_t kMagicV8 = 0x464D49445838ULL; // "FMIDX8"
 
   private:
     // AoS de 128 bytes = 2 cache lines (occ e mask sempre carregados juntos).
@@ -81,7 +83,7 @@ class GfaSequenceIndex {
 
     // Mapeamento ASCII → símbolo denso [0..6]. Implementado no .cpp.
     // Permanece privado — callers usam search_kmer() como API pública.
-    static uint8_t map_char(char c) noexcept;
+    [[nodiscard]] static uint8_t map_char(char c) noexcept;
 
     [[nodiscard]] uint64_t get_occ(uint8_t c, int64_t idx) const noexcept;
     [[nodiscard]] std::pair<uint64_t, uint64_t>
