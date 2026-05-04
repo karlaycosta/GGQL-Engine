@@ -1,31 +1,21 @@
-// graph_algorithms.cpp — Algoritmos de grafo: superbubbles, remap de IDs, componentes.
-//
+// graph_algorithms.cpp — Algoritmos de grafo: bubbles, remap, componentes,
+// particionamento.
 
 #include "ggql/storage/topology.hpp"
 
 #include "ggql/cli/console.hpp"
-#include "ggql/cli/progress_tracker.hpp"
-
-// Headers pesados — incluídos só aqui, não no .hpp público.
-#include "ggql/storage/checksum_builder.hpp"
+#include "ggql/util/memory_monitor.hpp"
 
 #include <algorithm>
 #include <atomic>
-#include <cassert>
-#include <charconv>
-#include <chrono>
+#include <cerrno>
 #include <cstdint>
-#include <execution>
-#include <filesystem>
-#include <fmt/color.h>
+#include <cstring> // strerror
 #include <fmt/core.h>
-#include <fstream>
-#include <future>
-#include <gbwt/dynamic_gbwt.h> // GBWTBuilder, DynamicGBWT
+#include <gbwt/dynamic_gbwt.h> // text_buffer_type, ENDMARKER
 #include <numeric>
+#include <stdexcept>
 #include <string>
-#include <string_view>
-#include <thread>
 #include <unistd.h> // ::unlink
 
 #ifdef _OPENMP
@@ -35,89 +25,14 @@
 namespace ggql {
 
 namespace {
-
-/// Helper para monitoramento isolado de Resident Set Size (RSS).
-/// Usa std::jthread com stop_token (C++23) — auto-join no destrutor.
-class MemoryMonitor {
-  public:
-    explicit MemoryMonitor(std::chrono::milliseconds interval = std::chrono::milliseconds(100))
-        : interval_(interval) {
-        worker_ = std::jthread([this, interval](std::stop_token st) {
-            while (!st.stop_requested()) {
-                const size_t current = get_current_rss_kb();
-                size_t m = peak_.load(std::memory_order_relaxed);
-                while (current > m && !peak_.compare_exchange_weak(m, current)) {
-                    // spin or retry
-                }
-                std::this_thread::sleep_for(interval);
-            }
-        });
-    }
-
-    ~MemoryMonitor() { stop(); }
-
-    void stop() {
-        worker_.request_stop();
-        if (worker_.joinable()) {
-            worker_.join();
-        }
-    }
-
-    size_t peak_kb() const { return peak_.load(); }
-
-  private:
-    static size_t get_current_rss_kb() {
-        std::ifstream status("/proc/self/status");
-        std::string line;
-        while (std::getline(status, line)) {
-            if (line.starts_with("VmRSS:")) {
-                std::string_view sv(line);
-                sv.remove_prefix(6);
-                while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.front()))) {
-                    sv.remove_prefix(1);
-                }
-                size_t val = 0;
-                std::from_chars(sv.data(), sv.data() + sv.size(), val);
-                return val; // Linux: KB
-            }
-        }
-        return 0;
-    }
-
-    std::atomic<size_t> peak_{0};
-    std::chrono::milliseconds interval_;
-    std::jthread worker_;
-};
-
-/// Lê MemAvailable de /proc/meminfo (Linux).
-/// Retorna 0 se não conseguir ler (fallback conservador no chamador).
-static size_t available_ram_kb() {
-    std::ifstream f("/proc/meminfo");
-    std::string line;
-    while (std::getline(f, line)) {
-        if (line.starts_with("MemAvailable:")) {
-            std::string_view sv(line);
-            sv.remove_prefix(13);
-            while (!sv.empty() && sv.front() == ' ') {
-                sv.remove_prefix(1);
-            }
-            size_t val = 0;
-            std::from_chars(sv.data(), sv.data() + sv.size(), val);
-            return val;
-        }
-    }
-    return 0;
-}
-
-/// Barra de progresso ANSI para stderr — thread-safe apenas para o chamador;
-/// exibe somente quando stderr é um terminal (isatty).
-// (ProgressBar removido — usando ggql::cli::step_progress)
-
+// MemoryMonitor + available_ram_kb consolidados em
+// include/ggql/util/memory_monitor.hpp para evitar duplicação com
+// path_index.cpp.
+using ggql::util::MemoryMonitor;
+using ggql::util::available_ram_kb;
 } // namespace
 
-// graph_algorithms.cpp — Algoritmos de grafo: bubbles, remap, componentes, particionamento.
-std::vector<Bubble> GfaCsrTopology::find_bubbles(int /*max_depth*/, size_t /*max_nodes_per_branch*/,
-                                                 int num_threads) const {
+std::vector<Bubble> GfaCsrTopology::find_bubbles(int num_threads) const {
     if (num_nodes_ == 0) {
         return {};
     }
@@ -126,6 +41,14 @@ std::vector<Bubble> GfaCsrTopology::find_bubbles(int /*max_depth*/, size_t /*max
     // Popula cache de offsets antes do DFS (com paralelismo disponível).
     ensure_offsets_cache(num_threads);
 
+    // B5: Frame compartilhado entre as duas fases de Kosaraju (antes,
+    // duplicado em escopos aninhados). `node` = vértice, `ei` = cursor
+    // na adjacency list (forward em 1a, backward em 1b).
+    struct Frame {
+        uint64_t node;
+        uint32_t ei;
+    };
+
     // ── FASE 1 — Condensação via Kosaraju iterativo O(V + E) ────────────────
     std::vector<uint32_t> scc_id(N, UINT32_MAX);
 
@@ -133,12 +56,8 @@ std::vector<Bubble> GfaCsrTopology::find_bubbles(int /*max_depth*/, size_t /*max
     std::vector<uint64_t> finish_order;
     {
         finish_order.reserve(N);
-        struct Frame {
-            uint64_t node;
-            uint32_t ei;
-        };
         std::vector<Frame> stk;
-        // PERF-TOPO-4: reserva proporcional a N para evitar realocações em grafos grandes.
+        // Reserva proporcional a N para evitar realocações em grafos grandes.
         stk.reserve(std::min(static_cast<size_t>(1u << 20), static_cast<size_t>(N)));
         std::vector<uint8_t> visited(N, 0);
 
@@ -170,12 +89,8 @@ std::vector<Bubble> GfaCsrTopology::find_bubbles(int /*max_depth*/, size_t /*max
     // 1b. DFS sobre G^T em ordem finish decrescente → SCCs.
     uint32_t num_scc = 0;
     {
-        struct Frame {
-            uint64_t node;
-            uint32_t ei;
-        };
         std::vector<Frame> stk;
-        // PERF-TOPO-4: reserva proporcional a N para evitar realocações em grafos grandes.
+        // Reserva proporcional a N para evitar realocações em grafos grandes.
         stk.reserve(std::min(static_cast<size_t>(1u << 20), static_cast<size_t>(N)));
         for (int64_t fi = static_cast<int64_t>(finish_order.size()) - 1; fi >= 0; --fi) {
             uint64_t root = finish_order[static_cast<size_t>(fi)];
@@ -304,7 +219,7 @@ std::vector<Bubble> GfaCsrTopology::find_bubbles(int /*max_depth*/, size_t /*max
 
 // ════════════════════════════════════════════════════════════════════════════
 void GfaCsrTopology::remap_node_ids(const std::vector<uint32_t>& remap) {
-    // BUG-TOPO-1: assert removido em release — substitui por throw para detectar mismatch em prod.
+    // Throw em vez de assert: detecta mismatch tanto em debug quanto release.
     if (remap.size() != num_nodes_) {
         throw std::invalid_argument(
             "remap_node_ids: remap.size()=" + std::to_string(remap.size()) +
@@ -313,7 +228,9 @@ void GfaCsrTopology::remap_node_ids(const std::vector<uint32_t>& remap) {
     const size_t N = num_nodes_;
     const size_t E_sz = E_fwd_.size();
     const size_t E_bsz = E_bwd_.size();
-    // PERF-TOPO-5: distância de prefetch para os loops scatter fwd e bwd.
+    // Distância de prefetch para os loops scatter fwd e bwd. Reduz cache miss
+    // em cursor[remap[u+kPrefetchAhead]] para N grande (~340 MB de cursor[]
+    // no HPRC com 85M nós).
     static constexpr size_t kPrefetchAhead = 32;
 
     const int nt = [] {
@@ -338,7 +255,7 @@ void GfaCsrTopology::remap_node_ids(const std::vector<uint32_t>& remap) {
     }
 
     // ── Reconstrói cache a partir da EF antiga (old from_ids) ─────────────
-    // PERF-TOPO-1: paraleliza via OMP (mesmo padrão de ensure_offsets_cache).
+    // Paraleliza via OMP (mesmo padrão de ensure_offsets_cache).
     // Serial: ~3,4 s para N=85M; OMP 4t: ~45 ms.
     offsets_cache_fwd_.resize(N + 1);
 #ifdef _OPENMP
@@ -365,8 +282,7 @@ void GfaCsrTopology::remap_node_ids(const std::vector<uint32_t>& remap) {
         }
 
         // 3. Scatter: escreve arestas na nova ordem usando cursor separado
-        // PERF-TOPO-5: prefetch do cursor kPrefetchAhead iterações à frente.
-        // Reduz latência de cache miss em cursor[] para N > L3/4 (≈85M nós: cursor = 340 MB).
+        // Prefetch do cursor kPrefetchAhead iterações à frente.
         std::vector<uint32_t> E_fwd_new(E_sz);
         std::vector<uint32_t> cursor(new_off.begin(), new_off.begin() + N);
         for (size_t u = 0; u < N; ++u) {
@@ -393,7 +309,7 @@ void GfaCsrTopology::remap_node_ids(const std::vector<uint32_t>& remap) {
     }
 
     // ── Analogamente para E_bwd_ ───────────────────────────────────────────
-    // PERF-TOPO-1: paraleliza via OMP (mesmo padrão de ensure_offsets_cache).
+    // Paraleliza via OMP (mesmo padrão de ensure_offsets_cache).
     offsets_cache_bwd_.resize(N + 1);
 #ifdef _OPENMP
     #pragma omp parallel for schedule(static) num_threads(nt)
@@ -542,6 +458,13 @@ GfaCsrTopology::RemapResult GfaCsrTopology::make_component_remap(int num_threads
         result.node_component[new_id] = new_cid;
     }
 
+    // B4: K > 0 é garantido porque (a) função retorna cedo se N==0 (linha
+    // anterior), (b) Union-Find sobre N>0 produz pelo menos 1 componente.
+    // Defendemos contra futuras mudanças que possam violar isso.
+    if (K == 0) {
+        throw std::logic_error(
+            "[topology] make_component_remap: K=0 com N=" + std::to_string(N));
+    }
     cli::step_info(fmt::format("make_component_remap: {} componentes, maior={} nós",
                                K, comp_sizes[sorted_comps[0]]));
     return result;
@@ -589,11 +512,18 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
     std::vector<std::string>                             comp_tmp(target_n);
     std::vector<std::unique_ptr<gbwt::text_buffer_type>> comp_buf(target_n);
 
+    // B2: contador atômico estático garante unicidade entre chamadas
+    // múltiplas na mesma instância (uintptr_t do `this` sozinho colidiria).
+    // Mantemos o `this` no nome para inspeção em logs/cores.
+    static std::atomic<uint64_t> call_seq{0};
+    const uint64_t seq = call_seq.fetch_add(1, std::memory_order_relaxed);
+
     // Garante buffer de disco para o componente c; drena in_ram_seqs acumuladas.
     const auto ensure_disk_buf = [&](size_t c) -> gbwt::text_buffer_type& {
         if (!comp_buf[c]) {
             comp_tmp[c] = data_dir + "/gbwt_comp_" + std::to_string(c) + "_" +
-                          std::to_string(reinterpret_cast<uintptr_t>(this)) + ".tmp";
+                          std::to_string(reinterpret_cast<uintptr_t>(this)) + "_" +
+                          std::to_string(seq) + ".tmp";
             comp_buf[c] = std::make_unique<gbwt::text_buffer_type>(comp_tmp[c], std::ios::out,
                                                                     64u << 20, node_width);
             output_is_disk[c] = true;
@@ -677,7 +607,13 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
                     out[c].path_names.push_back(std::move(g.path_names[pidx]));
                 }
             }
-            ::unlink(g.tmp_path.c_str());
+            // B3: unlink pode falhar (FS read-only, permissões); registra
+            // warning mas não trata como fatal — tmp file é descartável.
+            // Alinha com B4 do path_index.
+            if (::unlink(g.tmp_path.c_str()) != 0 && errno != ENOENT) {
+                cli::note(fmt::format("falha ao remover tmp '{}': {}",
+                                      g.tmp_path, std::strerror(errno)));
+            }
         }
     }
 
@@ -700,32 +636,48 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
 // Extrai a sequência de IDs internos de nós de um path via gBWT.
 // O gBWT armazena cada nó com encoding gbwt_encode_node (shift +1 para
 // reservar valor 0 a ENDMARKER). Decodificamos com gbwt_decode_node.
+//
+// B7: gbwts_ e gbwt_offsets_ devem ter tamanhos consistentes
+// (gbwts_.size() == gbwt_offsets_.size() em uso normal).
+// O cache load valida; mismatch só ocorre se alguém mexer manualmente.
 
-std::vector<uint64_t> GfaCsrTopology::path_nodes(size_t global_path_id) const {
-    if (gbwts_.empty() || gbwt_offsets_.empty() || global_path_id >= path_names_.size()) {
-        return {};
+// P2: overload com out-param para reusar buffer entre chamadas.
+// Evita malloc por chamada — relevante em build_path_stats (loop de N paths).
+void GfaCsrTopology::path_nodes(size_t global_path_id,
+                                 std::vector<uint64_t>& out) const {
+    out.clear();
+    if (gbwts_.empty() || gbwt_offsets_.empty() ||
+        global_path_id >= path_names_.size()) {
+        return;
     }
 
-    // Localiza o shard que contém este path usando busca binária em gbwt_offsets_.
-    // gbwt_offsets_[i] = primeiro path_id global do shard i.
-    auto it = std::upper_bound(gbwt_offsets_.begin(), gbwt_offsets_.end(), global_path_id);
-    if (it == gbwt_offsets_.begin()) { return {}; }
+    // Localiza o shard via busca binária em gbwt_offsets_.
+    auto it = std::upper_bound(gbwt_offsets_.begin(), gbwt_offsets_.end(),
+                               global_path_id);
+    if (it == gbwt_offsets_.begin()) { return; }
     --it;
 
     const size_t shard    = static_cast<size_t>(std::distance(gbwt_offsets_.begin(), it));
     const size_t local_id = global_path_id - *it;
 
-    if (shard >= gbwts_.size() || !gbwts_[shard]) { return {}; }
-    if (local_id >= static_cast<size_t>(gbwts_[shard]->sequences())) { return {}; }
+    if (shard >= gbwts_.size() || !gbwts_[shard]) { return; }
+    if (local_id >= static_cast<size_t>(gbwts_[shard]->sequences())) { return; }
 
     const auto seq = gbwts_[shard]->extract(static_cast<gbwt::size_type>(local_id));
 
-    std::vector<uint64_t> nodes;
-    nodes.reserve(seq.size());
+    out.reserve(seq.size());
     for (const auto enc : seq) {
         if (enc == gbwt::ENDMARKER) { continue; }
-        nodes.push_back(gbwt_decode_node(static_cast<uint64_t>(enc)));
+        out.push_back(gbwt_decode_node(static_cast<uint64_t>(enc)));
     }
+}
+
+// Wrapper conveniente que aloca o vetor por chamada — preservado para callers
+// existentes (query_planner.cpp:1004). Para hot loops, prefira o overload
+// com out-param acima.
+std::vector<uint64_t> GfaCsrTopology::path_nodes(size_t global_path_id) const {
+    std::vector<uint64_t> nodes;
+    path_nodes(global_path_id, nodes);
     return nodes;
 }
 
@@ -739,14 +691,32 @@ void GfaCsrTopology::build_path_stats(std::span<const uint32_t> lengths) {
     const size_t n = path_names_.size();
     path_node_counts_.resize(n);
     path_bp_lengths_.resize(n);
-    for (size_t pid = 0; pid < n; ++pid) {
-        const auto nodes = path_nodes(pid);
-        path_node_counts_[pid] = static_cast<uint32_t>(nodes.size());
-        int64_t total = 0;
-        for (const uint64_t nid : nodes) {
-            if (nid < lengths.size()) { total += static_cast<int64_t>(lengths[nid]); }
+    // P1: paraleliza o loop sobre paths. Cada path_nodes(pid, buf) é
+    // independente (read-only sobre gBWT) e writes em índices únicos não
+    // conflitam. schedule(dynamic, 8) lida com paths de tamanhos
+    // heterogêneos (no chm13 path médio ~160k nós; varia 1000×).
+    // P2: cada thread mantém um buffer local reusável (firstprivate) para
+    // evitar malloc/free a cada path_nodes — vetor cresce até a maior
+    // sequência vista pela thread e é reaproveitado.
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+    {
+        std::vector<uint64_t> buf;
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic, 8)
+#endif
+        for (size_t pid = 0; pid < n; ++pid) {
+            path_nodes(pid, buf);
+            path_node_counts_[pid] = static_cast<uint32_t>(buf.size());
+            int64_t total = 0;
+            for (const uint64_t nid : buf) {
+                if (nid < lengths.size()) {
+                    total += static_cast<int64_t>(lengths[nid]);
+                }
+            }
+            path_bp_lengths_[pid] = total;
         }
-        path_bp_lengths_[pid] = total;
     }
 }
 

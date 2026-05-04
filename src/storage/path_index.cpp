@@ -5,6 +5,7 @@
 
 #include "ggql/cli/console.hpp"
 #include "ggql/cli/progress_tracker.hpp"
+#include "ggql/util/memory_monitor.hpp"
 
 // Headers pesados — incluídos só aqui, não no .hpp público.
 #include "ggql/storage/checksum_builder.hpp"
@@ -12,20 +13,16 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
-#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstring> // strerror
 #include <filesystem>
-#include <fmt/color.h>
 #include <fmt/core.h>
 #include <fstream>
 #include <future>
 #include <gbwt/dynamic_gbwt.h> // GBWTBuilder, DynamicGBWT
 #include <string>
-#include <string_view>
-#include <thread>
-#include <unistd.h> // ::unlink, sysconf
+#include <unistd.h> // ::unlink
 
 #ifdef _OPENMP
     #include <omp.h>
@@ -35,74 +32,11 @@ namespace ggql {
 
 namespace {
 
-/// Helper para monitoramento isolado de Resident Set Size (RSS).
-/// Usa std::jthread com stop_token (C++23) — auto-join no destrutor.
-///
-/// P3: lê /proc/self/statm (uma linha, 2 syscalls) em vez de /proc/self/status
-/// (parser linha-a-linha em ~50 linhas). Custo por amostra: ~10 µs vs ~50 µs.
-class MemoryMonitor {
-  public:
-    explicit MemoryMonitor(std::chrono::milliseconds interval = std::chrono::milliseconds(100)) {
-        worker_ = std::jthread([this, interval](std::stop_token st) {
-            while (!st.stop_requested()) {
-                const size_t current = get_current_rss_kb();
-                // P6: compare_exchange_strong elimina spin de spurious failures
-                // weak. Para um único monitor (sem contention), strong é
-                // equivalente em custo e não retorna falso negativo.
-                size_t m = peak_.load(std::memory_order_relaxed);
-                while (current > m && !peak_.compare_exchange_strong(m, current)) {
-                }
-                std::this_thread::sleep_for(interval);
-            }
-        });
-    }
-
-    ~MemoryMonitor() { stop(); }
-
-    void stop() {
-        worker_.request_stop();
-        if (worker_.joinable()) {
-            worker_.join();
-        }
-    }
-
-    [[nodiscard]] size_t peak_kb() const noexcept { return peak_.load(); }
-
-  private:
-    // /proc/self/statm: "<size> <resident> <shared> <text> <lib> <data> <dt>"
-    // (em pages). Resident é o 2º campo. Mais barato que /proc/self/status.
-    static size_t get_current_rss_kb() {
-        std::ifstream f("/proc/self/statm");
-        size_t total_pages = 0;
-        size_t rss_pages = 0;
-        f >> total_pages >> rss_pages;
-        const long page_kb = ::sysconf(_SC_PAGESIZE) / 1024;
-        return rss_pages * static_cast<size_t>(page_kb);
-    }
-
-    std::atomic<size_t> peak_{0};
-    std::jthread worker_;
-};
-
-/// Lê MemAvailable de /proc/meminfo (Linux).
-/// Retorna 0 se não conseguir ler (fallback conservador no chamador).
-static size_t available_ram_kb() {
-    std::ifstream f("/proc/meminfo");
-    std::string line;
-    while (std::getline(f, line)) {
-        if (line.starts_with("MemAvailable:")) {
-            std::string_view sv(line);
-            sv.remove_prefix(13);
-            while (!sv.empty() && sv.front() == ' ') {
-                sv.remove_prefix(1);
-            }
-            size_t val = 0;
-            std::from_chars(sv.data(), sv.data() + sv.size(), val);
-            return val;
-        }
-    }
-    return 0;
-}
+// MemoryMonitor + available_ram_kb consolidados em
+// include/ggql/util/memory_monitor.hpp para evitar duplicação com
+// graph_algorithms.cpp. Aliases locais para legibilidade do call site.
+using ggql::util::MemoryMonitor;
+using ggql::util::available_ram_kb;
 
 // ── I/O helpers — fail loud (B1+B2+B3+B7) ──────────────────────────────
 // Política: open/write/read parciais lançam imediatamente. Para arquivos
@@ -110,7 +44,7 @@ static size_t available_ram_kb() {
 // "ausente" (fallback) de "presente mas corrompido" (lança).
 // Mensagens prefixadas com [topology] para rastreabilidade.
 
-inline std::ofstream open_out_or_throw(const std::string& path) {
+[[nodiscard]] inline std::ofstream open_out_or_throw(const std::string& path) {
     std::ofstream o(path, std::ios::binary);
     if (!o) {
         throw std::runtime_error("[topology] Falha ao abrir para escrita: " + path);
@@ -122,7 +56,7 @@ inline void check_write_ok(std::ofstream& o, const std::string& path) {
         throw std::runtime_error("[topology] Falha ao escrever: " + path);
     }
 }
-inline std::ifstream open_in_or_throw(const std::string& path) {
+[[nodiscard]] inline std::ifstream open_in_or_throw(const std::string& path) {
     std::ifstream i(path, std::ios::binary);
     if (!i) {
         throw std::runtime_error("[topology] Falha ao abrir para leitura: " + path);
@@ -199,7 +133,6 @@ inline void write_path_stats_payload(std::ofstream& out,
 
 } // namespace
 
-// path_index.cpp — Construção paralela gBWT e persistência (save/load).
 // ════════════════════════════════════════════════════════════════════════════
 // build_path_index_parallel
 // ════════════════════════════════════════════════════════════════════════════

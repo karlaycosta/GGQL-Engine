@@ -192,7 +192,7 @@ class GfaCsrTopology {
     // Retorna RemapResult com remap + node_component[new_id] = comp_id.
     // node_component é necessário para repartition_groups_topological().
     // Complexidade: O(N × alpha(N)) + O(N log K).
-    RemapResult make_component_remap(int num_threads = 1) const;
+    [[nodiscard]] RemapResult make_component_remap(int num_threads = 1) const;
 
     // Aplica remap em E_fwd_, E_bwd_ e reconstrói ef_fwd_, ef_bwd_.
     // Invalida offsets_cache_fwd_/bwd_ (reconstrução lazy na próxima chamada).
@@ -202,7 +202,7 @@ class GfaCsrTopology {
     // target_n jobs (um por componente). Recebe o mapa node_component[new_id]=comp_id
     // de make_component_remap() e o node_width.
     // Cada job resultante contém paths exclusivamente de um componente → merge OK.
-    std::vector<GbwtGroup>
+    [[nodiscard]] std::vector<GbwtGroup>
     repartition_groups_topological(std::vector<GbwtGroup> input_groups,
                                    const std::vector<uint32_t>& node_component, size_t target_n,
                                    uint8_t node_width, const std::string& data_dir = "/tmp") const;
@@ -357,9 +357,8 @@ class GfaCsrTopology {
     }
 
     // Detecção de superbubbles — algoritmo Onodera et al. (2013), O(V+E).
-    // Implementação em gfa_topology.cpp.
-    std::vector<Bubble> find_bubbles(int max_depth = 5, size_t max_nodes_per_branch = 1024,
-                                     int num_threads = 1) const;
+    // Implementação em graph_algorithms.cpp.
+    [[nodiscard]] std::vector<Bubble> find_bubbles(int num_threads = 1) const;
 
     // ── Camada 2 — Construção do índice gBWT ─────────────────────────────────
 
@@ -381,7 +380,10 @@ class GfaCsrTopology {
     // Retorna IDs internos de nós (sem bit de orientação) na ordem do path.
     // Retorna vetor vazio se path_id está fora do intervalo ou gBWT não disponível.
     // Complexidade: O(L) onde L = número de nós no path.
-    std::vector<uint64_t> path_nodes(size_t path_id) const;
+    [[nodiscard]] std::vector<uint64_t> path_nodes(size_t path_id) const;
+    // Overload com out-param: reusa buffer entre chamadas. Preferir em hot
+    // loops (build_path_stats, etc.) para evitar malloc por chamada.
+    void path_nodes(size_t path_id, std::vector<uint64_t>& out) const;
 
     // ── Cache de estatísticas de path (node_count + bp_length) ───────────────
     //

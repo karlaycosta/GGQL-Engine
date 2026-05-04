@@ -142,6 +142,15 @@ target_compile_options(bench_topology PRIVATE
 target_link_options(bench_topology PRIVATE -flto=auto)
 target_link_libraries(bench_topology PRIVATE ggql_storage)
 
+# bench_graph_algorithms — mede build_path_stats, path_nodes,
+# make_component_remap e find_bubbles em isolamento.
+add_executable(bench_graph_algorithms tools/bench_graph_algorithms.cpp)
+target_compile_options(bench_graph_algorithms PRIVATE
+    -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
+)
+target_link_options(bench_graph_algorithms PRIVATE -flto=auto)
+target_link_libraries(bench_graph_algorithms PRIVATE ggql_ingest)
+
 # ── bubble_vs_snarl (diagnóstico) ─────────────────────────
 # Tool de diagnóstico que compara find_snarls_streaming (cactus) com
 # find_bubbles (Onodera 2013) no mesmo .idx. Usado para validar
