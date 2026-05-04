@@ -134,6 +134,14 @@ target_compile_options(bench_metadata PRIVATE
 target_link_options(bench_metadata PRIVATE -flto=auto)
 target_link_libraries(bench_metadata PRIVATE ggql_ingest)
 
+# bench_topology — isola tempo de GfaCsrTopology::load() e save().
+add_executable(bench_topology tools/bench_topology.cpp)
+target_compile_options(bench_topology PRIVATE
+    -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
+)
+target_link_options(bench_topology PRIVATE -flto=auto)
+target_link_libraries(bench_topology PRIVATE ggql_storage)
+
 # ── bubble_vs_snarl (diagnóstico) ─────────────────────────
 # Tool de diagnóstico que compara find_snarls_streaming (cactus) com
 # find_bubbles (Onodera 2013) no mesmo .idx. Usado para validar
