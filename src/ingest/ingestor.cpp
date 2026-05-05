@@ -134,8 +134,7 @@ GfaIngestorMmapParallel::collect_keys_and_links_parallel(int num_threads, bool c
 // ══════════════════════════════════════════════════════════════════════════════
 
 void GfaIngestorMmapParallel::build_remap_from_pairs(
-    [[maybe_unused]] Pass1Result::LinkNamePair* /*tag*/, int num_threads,
-    std::vector<std::vector<Pass1Result::LinkNamePair>>& thread_pairs) {
+    int num_threads, std::vector<std::vector<Pass1Result::LinkNamePair>>& thread_pairs) {
 
     const size_t N = res_.mphf->nbKeys();
 
@@ -299,7 +298,7 @@ bool GfaIngestorMmapParallel::parse_w_line(const char*& p, const char* end,
                                            uint64_t& first_mphf_id, boophf_parallel_t& mphf,
                                            bool has_remap, const std::vector<uint32_t>& remap) {
     size_t ntok = tokenize(p, end, tokens, 6);
-    if (ntok < 6 || tokens[0].empty() || tokens[5].empty()) {
+    if (ntok < 6 || tokens[0].empty() || tokens[5].empty()) [[unlikely]] {
         return false;
     }
     path_name.clear();
@@ -326,7 +325,7 @@ bool GfaIngestorMmapParallel::parse_w_line(const char*& p, const char* end,
             continue;
         }
         uint64_t nid = mphf.lookup(seg_name);
-        if (nid == ULLONG_MAX) {
+        if (nid == ULLONG_MAX) [[unlikely]] {
             continue;
         }
         if (first_mphf_id == ULLONG_MAX) {
@@ -346,7 +345,7 @@ bool GfaIngestorMmapParallel::parse_p_line(const char*& p, const char* end,
                                            uint64_t& first_mphf_id, boophf_parallel_t& mphf,
                                            bool has_remap, const std::vector<uint32_t>& remap) {
     size_t ntok = tokenize(p, end, tokens, 3);
-    if (ntok < 2 || tokens[0].empty() || tokens[1].empty()) {
+    if (ntok < 2 || tokens[0].empty() || tokens[1].empty()) [[unlikely]] {
         return false;
     }
     path_name = std::string(tokens[0]);
@@ -373,7 +372,7 @@ bool GfaIngestorMmapParallel::parse_p_line(const char*& p, const char* end,
             continue;
         }
         uint64_t nid = mphf.lookup(entry);
-        if (nid == ULLONG_MAX) {
+        if (nid == ULLONG_MAX) [[unlikely]] {
             continue;
         }
         if (first_mphf_id == ULLONG_MAX) {
@@ -824,7 +823,7 @@ profile_name_from_flags(const GfaIngestorMmapParallel::CachedFlags& f) noexcept 
 }
 
 // ISO-8601 com fuso UTC ("2026-04-30T12:34:56Z"). Independente de locale.
-static std::string iso_utc_now() {
+[[nodiscard]] static std::string iso_utc_now() {
     const auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     std::tm tm{};
     ::gmtime_r(&t, &tm);
@@ -1121,22 +1120,18 @@ GfaIngestorMmapParallel::load_index(const std::string& dir, std::optional<uint64
         return std::nullopt;
     }
 
-    bool valid = false;
     if (file_sz > 0 && file_sz == cached_sz && file_mtime_ns_val != 0 &&
         file_mtime_ns_val == cached_mtime_ns) {
-        valid = true;
         cli::step_info("cache válido (mtime+size) — carregando");
     } else if (expected_hash.has_value()) {
         if (*expected_hash != hash) {
             cli::step_info("cache inválido (hash mismatch) — re-ingerindo");
             return std::nullopt;
         }
-        valid = true;
         cli::step_info("cache válido (hash) — carregando");
     } else {
         return std::nullopt;
     }
-    (void)valid;
 
     const auto t_start = std::chrono::steady_clock::now();
 
@@ -1498,7 +1493,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
 
         if (do_early_remap) {
             auto t_uf0 = clock::now();
-            build_remap_from_pairs(nullptr, num_threads, pass1.thread_pairs);
+            build_remap_from_pairs(num_threads, pass1.thread_pairs);
             auto t_uf1 = clock::now();
             if (verbose) {
                 cli::step_ok_end("Union-Find + bin-packing",

@@ -704,3 +704,66 @@ original (~40 ms P1 + ganho de heap reuse no parsing W).
 
 Redução modesta porque marcadores reformulados ocupam linhas similares;
 removida a lambda (8 linhas) compensou.
+
+---
+
+## Re-análise pós-P1+P3 (2026-05-05)
+
+Após P1+P3 aplicados, varredura adicional do arquivo identificou:
+
+### Código morto encontrado e removido
+
+1. **Parâmetro fantasma em `build_remap_from_pairs`** — assinatura
+   tinha `Pass1Result::LinkNamePair* /*tag*/` sem uso (tag dispatcher
+   morto). Caller passava `nullptr`. Removido do header (`ingestor.hpp:361`),
+   da definição (`ingestor.cpp:136`) e do call site (`ingestor.cpp:1500`).
+
+2. **Variável `bool valid` morta** em `load_index` — atribuída em ambos
+   os ramos do if/else mas nunca lida (havia `(void)valid;`). Removida.
+
+3. **3 includes comentados** no header (`<algorithm>`, `<atomic>`,
+   `<utility>`) — vestígio de iteração anterior.
+
+### Atributos C++23/20 adicionais
+
+| Local | Antes | Depois |
+|---|---|---|
+| `MmapFileParallel::open()` | sem | `[[nodiscard]]` |
+| `StringViewHasherParallel::operator()` | sem | `[[nodiscard]] noexcept` |
+| `calc_node_width()` | `noexcept` | `[[nodiscard]] noexcept` |
+| `topology()` getter | `noexcept` | `[[nodiscard]] noexcept` |
+| `prune_cache_for_downgrade()` | `const` | `[[nodiscard]] const` |
+| `iso_utc_now()` (file-local) | sem | `[[nodiscard]]` |
+
+### Branch hints `[[unlikely]]`
+
+Adicionados em casos de erro frequentes em hot paths de parsing
+(`parse_w_line`, `parse_p_line`):
+
+- `if (ntok < 6 || tokens[0].empty() || tokens[5].empty())` — linha mal-formada (raro)
+- `if (nid == ULLONG_MAX)` — MPHF lookup miss (raro em GFA bem-formado)
+
+### Itens avaliados e descartados
+
+- **`std::ranges::move`** vs `std::move(begin,end,back_inserter)` — só
+  cosmético; mantido pois mistura com `std::back_inserter` torna o
+  código `ranges` menos legível.
+- **`std::print` (C++23)** — `fmt::print` já usado, equivalente; troca
+  custaria reescrita sem ganho.
+- **Refator de `try_cache_fast`/`try_cache_hash`** (mesma classificação
+  de cache parcial repetida) — refator estrutural, não cleanup.
+- **Lambdas `fc_u64`/`fc_u32`/`fc_i32` duplicadas** entre `load_index`
+  e `read_cached_flags` — extrair helper templated requer mover para
+  header; ganho marginal.
+
+### Tamanho final
+
+| Métrica | Antes (post-P1+P3) | Depois (re-análise) | Δ |
+|---|---:|---:|---:|
+| `src/ingest/ingestor.cpp` | 2.038 LOC | 2.033 LOC | -5 |
+| `include/ggql/ingest/ingestor.hpp` | 551 LOC | 547 LOC | -4 |
+| **Total** | **2.589 LOC** | **2.580 LOC** | **-9** |
+
+**Validação:** 17/17 testes passando. Mudanças são puramente de
+qualidade (`[[nodiscard]]` faz compilador alertar valores ignorados;
+`[[unlikely]]` melhora layout do hot loop em arquivos GFA grandes).

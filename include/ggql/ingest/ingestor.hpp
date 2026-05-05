@@ -23,15 +23,12 @@
 //   9. In-RAM threshold per-bin por sigma
 //  10. fmt::format para nomes de paths (C++23)
 
-// #include "ggql/cli/console.hpp"
 #include "ggql/cli/progress_tracker.hpp"
 #include "ggql/ingest/metadata_store.hpp"
 #include "ggql/ingest/gbwt_group.hpp"
 #include "ggql/storage/topology.hpp"
 
-// #include <algorithm>
 #include <array>
-// #include <atomic>
 #include <bit>
 #include <charconv>
 #include <chrono>
@@ -48,7 +45,6 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-// #include <utility>
 #include <vector>
 
 #include "mphf/BooPHF.h"
@@ -69,7 +65,7 @@ struct MmapFileParallel {
     MmapFileParallel() = default;
 
     // Fábrica retorna expected em vez de throw no construtor (C++23)
-    static std::expected<MmapFileParallel, std::string> open(const std::string& path) {
+    [[nodiscard]] static std::expected<MmapFileParallel, std::string> open(const std::string& path) {
         int fd = ::open(path.c_str(), O_RDONLY);
         if (fd < 0) {
             return std::unexpected("mmap: nao foi possivel abrir: " + path);
@@ -128,7 +124,7 @@ struct MmapFileParallel {
 // ── Hasher
 // ─────────────────────────────────────────────────────────────────────
 struct StringViewHasherParallel {
-    uint64_t operator()(std::string_view key, uint64_t seed = 0) const {
+    [[nodiscard]] uint64_t operator()(std::string_view key, uint64_t seed = 0) const noexcept {
         return XXH64(key.data(), key.size(), seed);
     }
 };
@@ -178,7 +174,7 @@ using ggql::ProgressTracker;
 //   ((internal_id + 1) << 1) | orient. Para nkeys nós (IDs em [0, nkeys-1]),
 // o maior valor encoded é ((nkeys-1+1)*2) | 1 = 2*nkeys + 1.
 // Bits necessários = bit_width(2*nkeys + 1).
-constexpr uint8_t calc_node_width(uint64_t nkeys) noexcept {
+[[nodiscard]] constexpr uint8_t calc_node_width(uint64_t nkeys) noexcept {
     return nkeys > 0 ? static_cast<uint8_t>(std::bit_width(nkeys * 2ull + 1ull)) : uint8_t(1);
 }
 
@@ -254,7 +250,7 @@ class GfaIngestorMmapParallel {
            bool build_gbwt = true, bool build_snarls = true);
 
     // Retorna ponteiro para a topologia CSR construída (nullptr se build_topology=false)
-    GfaCsrTopology* topology() noexcept { return res_.topology.get(); }
+    [[nodiscard]] GfaCsrTopology* topology() noexcept { return res_.topology.get(); }
 
     // Libera na ordem correta: topology → mphf → mmap (backing das string_views).
     void reset() noexcept { res_ = {}; }
@@ -358,7 +354,7 @@ class GfaIngestorMmapParallel {
     // Passada 1b: executa Union-Find sobre pares já resolvidos via MPHF.
     // Preenche remap_, comp_for_node_, comp_sigma_, comp_to_bin_, bin_sigma_,
     // num_components_, num_bins_packed_.
-    void build_remap_from_pairs(Pass1Result::LinkNamePair* /*unused*/, int num_threads,
+    void build_remap_from_pairs(int num_threads,
                                 std::vector<std::vector<Pass1Result::LinkNamePair>>& thread_pairs);
 
     // Passada 2 PARALELA: cada thread processa seu chunk.
@@ -452,9 +448,9 @@ class GfaIngestorMmapParallel {
     // Apaga arquivos órfãos do cache quando o usuário fez downgrade do
     // perfil (ex: gBWT estava true, agora é false → remove gbwts.bin).
     // Retorna true se algo foi removido (caller deve regravar o manifest).
-    bool prune_cache_for_downgrade(const std::string& dir,
-                                   CachedFlags old_flags,
-                                   CachedFlags new_flags, bool verbose) const;
+    [[nodiscard]] bool prune_cache_for_downgrade(const std::string& dir,
+                                                 CachedFlags old_flags,
+                                                 CachedFlags new_flags, bool verbose) const;
 
     // Regrava manifest preservando todos os campos exceto os flags e o
     // perfil (recomputado de new_flags). Atualiza indexed_at para o agora.
