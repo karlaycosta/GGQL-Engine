@@ -361,8 +361,9 @@ class GfaCsrTopology {
     // ── Camada 2 — Construção do índice gBWT ─────────────────────────────────
 
     // Constrói em paralelo a partir de N GbwtGroups.
-    GbwtTimings build_path_index_parallel(std::vector<GbwtGroup> groups, uint8_t node_width,
-                                          int num_threads = 1);
+    [[nodiscard]] GbwtTimings build_path_index_parallel(std::vector<GbwtGroup> groups,
+                                                        uint8_t node_width,
+                                                        int num_threads = 1);
 
     // ── Consultas ao índice de paths (inline triviais) ────────────────────────
     [[nodiscard]] size_t path_count() const noexcept { return path_names_.size(); }

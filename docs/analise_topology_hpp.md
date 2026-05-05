@@ -272,6 +272,52 @@ duplicação via inline). Mantém uma única fonte da invariante.
 
 ---
 
+## Re-auditoria final pós-fixes (2026-05-05)
+
+Único cleanup adicional encontrado:
+
+**A1-extra** — `build_path_index_parallel` retorna `GbwtTimings`
+(struct com métricas de timing/memória do build) mas não tinha
+`[[nodiscard]]`. As métricas são úteis para profiling e monitoramento
+de regressão (wall_s, cpu_avg_s, total_nodes, peak_rss_kb,
+index_size_b); ignorá-las silenciosamente pode ser bug semântico.
+
+Adicionado:
+```cpp
+[[nodiscard]] GbwtTimings build_path_index_parallel(...);
+```
+
+### Demais aspectos confirmados em estado bom
+
+- **`[[nodiscard]]`** — agora 21 getters/queries (incluindo
+  `build_path_index_parallel`).
+- **`const`** — todos os métodos de leitura são const.
+- **`noexcept`** — aplicado em hot paths e operações simples (move
+  semantics em setters, getters inline).
+- **`[[likely]]`** — `edge_range_*` (offsets_cache check).
+- **C++23 features:**
+  - `std::span<const T>` em retornos (out_neighbors, in_neighbors,
+    snarls, build_path_stats arg)
+  - `static_assert(__cplusplus >= 202302L)` garante compilação em C++23
+  - Move ctor/assign explícito noexcept
+  - `mutable` para lazy caches em const methods
+  - `[[likely]]` para branch prediction em hot paths
+- **Inline preservado** para `find_tips`/`find_repeats`/getters
+  triviais (decisão documentada na linha 224-226).
+
+### Inconsistência menor não corrigida (intencional)
+
+`find_tips` paralelo soma `total` linearmente após o `pragma parallel`
+fechar; `find_repeats` usa `std::atomic<size_t>` via `fetch_add`
+dentro do bloco. Ambos corretos e equivalentes em performance —
+diferença é apenas estilo. Manter.
+
+**Auditoria do `topology.hpp` definitivamente concluída.** Não há
+mais bugs latentes, código morto ou pontos de melhoria significativos
+no header.
+
+---
+
 ## Apêndice — itens avaliados e descartados
 
 - **Mover `find_tips`/`find_repeats` para `.cpp`** — header explícitamente
