@@ -418,6 +418,66 @@ struct mas reduziu o corpo das `plan_*`).
 
 17/17 testes passando.
 
+---
+
+## Re-auditoria pós-refator (2026-05-05)
+
+Achados adicionais após os 9 itens iniciais:
+
+### Bugs / fragilidades encontrados — **0**
+
+Nenhum bug latente novo. As 7 funções de execução estão consistentes
+(usam `Paginator::Decision`), validações de campo estão centralizadas,
+indices secundários em `plan_segments` continuam corretos.
+
+### Performance / cleanup aplicados
+
+**P1-extra** — `execute_search_kmer` ainda tinha o hot loop antigo
+`for (col : cols) { if (col == "...") }` (escapou da pass anterior P1
+que cobriu apenas as 6 `plan_*`). Agora reusa `detail::map_segment_cols`
+e `switch (e)` sobre `vector<SegmentCol>`, idêntico ao caminho de
+`plan_segments`.
+
+**A1** — `[[nodiscard]]` adicionado em `Paginator::advance`. O retorno
+`Decision::Stop/Skip/Emit` indica ação obrigatória; ignorá-lo é bug
+silencioso (loop sem break/continue).
+
+**A2** — `noexcept` adicionado em lambda interna `is_string_field` em
+`validate_query` (operações são todas noexcept após a troca para
+`std::ranges::contains`).
+
+### C++23 — `std::ranges::contains` (P2522R3)
+
+Substituídas 6 ocorrências de `std::ranges::any_of(c, [](){ return f == X; })`
+pela mais idiomática `std::ranges::contains(c, X)` (C++23):
+
+- `validate_query`: 2× (lambda `is_string_field` + WHERE field check
+  + return_field check)
+- `plan_segments`: 3× (`needs_name`, `ret_rc`, `ret_dp`)
+- `execute_search_kmer`: 1× (validação de return_fields)
+
+Equivalência semântica garantida para igualdade exata; mais conciso e
+auto-documentado.
+
+### Status final
+
+LOC: 1.088 → 1.090 (+2 — pequeno aumento devido a switch-case em
+`execute_search_kmer` substituindo if-else cadeia).
+
+17/17 testes passando. Auditoria do `query_planner.cpp` **completa**.
+
+### Itens avaliados e descartados nesta passada
+
+- **`std::expected::and_then`/`transform`** em `execute()` — switch sobre
+  `std::variant` é mais legível que monadic chain.
+- **`std::flat_map` em `KmerCache`** — overhead de transformar
+  `unordered_map` < ganho para 1-3 kmers por query.
+- **`std::generator`** para iteração de paths — exigiria refator que
+  troca complexidade por elegância sintática.
+- **`Paginator::pag_skipped` private** — struct está em `detail::`,
+  sem callers externos; getter/setter seria boilerplate.
+- **Refator do lambda `format_num`** em `format_table` — não é hot path.
+
 **Itens 1-3** (cleanup + 2 bugs simples, ~20 min) podem ser aplicados
 imediatamente.
 

@@ -92,16 +92,14 @@ validate_query(const FindQuery& q, std::span<const std::string_view> valid_colum
         return false;
     };
 
-    auto is_string_field = [](std::string_view field) {
-        return std::ranges::any_of(kStringFields, [&](auto f) { return field == f; });
+    auto is_string_field = [](std::string_view field) noexcept {
+        return std::ranges::contains(kStringFields, field);
     };
 
     if (q.where) {
         for (const auto& cond : q.where->conditions) {
             if (const auto* cc = std::get_if<CompareCondition>(&cond)) {
-                bool found = std::ranges::any_of(
-                    valid_columns, [&](std::string_view col) { return cc->field == col; });
-                if (!found) {
+                if (!std::ranges::contains(valid_columns, std::string_view{cc->field})) {
                     return "Erro de execução: campo desconhecido";
                 }
                 if (!is_string_field(cc->field) && !is_numeric_value(cc->value)) {
@@ -111,9 +109,7 @@ validate_query(const FindQuery& q, std::span<const std::string_view> valid_colum
         }
     }
     for (const auto& f : q.return_fields) {
-        bool found =
-            std::ranges::any_of(valid_columns, [&](std::string_view col) { return f == col; });
-        if (!found) {
+        if (!std::ranges::contains(valid_columns, std::string_view{f})) {
             return "Erro de execução: campo desconhecido";
         }
     }
@@ -321,7 +317,7 @@ struct Paginator {
         return p;
     }
 
-    Decision advance(QueryResult& result) noexcept {
+    [[nodiscard]] Decision advance(QueryResult& result) noexcept {
         ++result.total_hits;
         if (result.total_hits > kMaxTotalHitsCount) {
             result.total_hits_truncated = true;
@@ -548,8 +544,7 @@ std::expected<QueryResult, std::string> QueryPlanner::execute_find(const FindQue
 std::expected<QueryResult, std::string>
 QueryPlanner::execute_search_kmer(const SearchKmerQuery& q) const {
     bool all_valid = std::ranges::all_of(q.return_fields, [](const std::string& f) {
-        return std::ranges::any_of(detail::kSegmentColumns,
-                                   [&](std::string_view col) { return f == col; });
+        return std::ranges::contains(detail::kSegmentColumns, std::string_view{f});
     });
     if (!all_valid) {
         return std::unexpected{"Erro de execução: campo desconhecido"};
@@ -572,6 +567,7 @@ QueryPlanner::execute_search_kmer(const SearchKmerQuery& q) const {
 
     auto cols = detail::resolve_return_fields(q.return_fields, detail::kSegmentColumns);
     const size_t ncols = cols.size();
+    const auto emitters = detail::map_segment_cols(cols);
 
     // SEARCH KMER: sem offset (não há cláusula OFFSET no parser para kmer);
     // usa o mesmo Paginator para safety/truncation consistente com plan_*.
@@ -583,7 +579,7 @@ QueryPlanner::execute_search_kmer(const SearchKmerQuery& q) const {
     }
 
     QueryResult result;
-    result.columns = cols;
+    result.columns = std::move(cols);
     result.flat.reserve(std::min(ids.size(), size_t{pag.take_n}) * ncols);
 
     for (uint64_t id : ids) {
@@ -595,19 +591,25 @@ QueryPlanner::execute_search_kmer(const SearchKmerQuery& q) const {
         const int32_t rc_raw = metadata_->read_count(id);
         const float dp_raw = metadata_->depth(id);
 
-        for (const auto& col : cols) {
-            if (col == "id") {
-                result.flat.emplace_back(int64_t(id));
-            } else if (col == "name") {
-                result.flat.emplace_back(std::string(metadata_->original_id(id)));
-            } else if (col == "length") {
-                result.flat.emplace_back(int64_t(len));
-            } else if (col == "read_count") {
-                result.flat.push_back(rc_raw >= 0 ? Value{int64_t(rc_raw)}
-                                                  : Value{std::string{"NULL"}});
-            } else if (col == "depth") {
-                result.flat.push_back(dp_raw >= 0.f ? Value{double(dp_raw)}
-                                                    : Value{std::string{"NULL"}});
+        for (const auto e : emitters) {
+            switch (e) {
+                case detail::SegmentCol::Id:
+                    result.flat.emplace_back(int64_t(id));
+                    break;
+                case detail::SegmentCol::Name:
+                    result.flat.emplace_back(std::string(metadata_->original_id(id)));
+                    break;
+                case detail::SegmentCol::Length:
+                    result.flat.emplace_back(int64_t(len));
+                    break;
+                case detail::SegmentCol::ReadCount:
+                    result.flat.push_back(rc_raw >= 0 ? Value{int64_t(rc_raw)}
+                                                      : Value{std::string{"NULL"}});
+                    break;
+                case detail::SegmentCol::Depth:
+                    result.flat.push_back(dp_raw >= 0.f ? Value{double(dp_raw)}
+                                                        : Value{std::string{"NULL"}});
+                    break;
             }
         }
         ++result.row_count;
@@ -784,7 +786,7 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_segments(const FindQu
     // Analisa quais campos o WHERE realmente usa para evitar computar Values desnecessários.
     // Ex.: WHERE length > X não precisa de "depth" ou "read_count" — evita N alocações de
     // std::string{"NULL"} por linha em datasets sem essas tags (CHM13 não tem dp:f:).
-    bool needs_name = std::ranges::any_of(cols, [](const auto& f) { return f == "name"; });
+    bool needs_name = std::ranges::contains(cols, "name");
     bool where_depth = false, where_rc = false;
     if (q.where) {
         for (const auto& cond : q.where->conditions) {
@@ -803,8 +805,8 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_segments(const FindQu
     }
 
     // Campos opcionais no resultado (fora do loop — constantes por query)
-    const bool ret_rc = std::ranges::any_of(cols, [](const auto& c) { return c == "read_count"; });
-    const bool ret_dp = std::ranges::any_of(cols, [](const auto& c) { return c == "depth"; });
+    const bool ret_rc = std::ranges::contains(cols, "read_count");
+    const bool ret_dp = std::ranges::contains(cols, "depth");
 
     auto pag = detail::Paginator::from_query(q);
 
