@@ -10,9 +10,9 @@ namespace ggql {
 
 // ─── Enumerações ──────────────────────────────────────────────────────────────
 
-enum class EntityType { SEGMENT, EDGE, PATH, BUBBLE, TIP, REPEAT };
-enum class Operator { EQ, NEQ, GT, LT, GEQ, LEQ };
-enum class LogicalOp { AND, OR };
+enum class EntityType : uint8_t { SEGMENT, EDGE, PATH, BUBBLE, TIP, REPEAT };
+enum class Operator   : uint8_t { EQ, NEQ, GT, LT, GEQ, LEQ };
+enum class LogicalOp  : uint8_t { AND, OR };
 
 // ─── Value (número inteiro ou string entre aspas) ─────────────────────────────
 

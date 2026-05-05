@@ -246,6 +246,55 @@ de estilo (switch+unreachable vs array+to_underlying).
 
 17/17 testes passando.
 
+---
+
+## Re-auditoria final pós-cleanup (2026-05-05)
+
+Único cleanup adicional encontrado:
+
+**A2** — Os 3 `enum class` não declaravam underlying type explícito.
+Sem `:`, o tipo padrão é `int` (4 bytes). Para enums com poucos
+valores (≤256), `: uint8_t` documenta intent e pode ajudar layout
+em alguns contextos:
+```cpp
+enum class EntityType : uint8_t { SEGMENT, EDGE, PATH, BUBBLE, TIP, REPEAT };
+enum class Operator   : uint8_t { EQ, NEQ, GT, LT, GEQ, LEQ };
+enum class LogicalOp  : uint8_t { AND, OR };
+```
+
+Em CompareCondition (string + enum + Value), o alignment dos vizinhos
+mantém o tamanho total inalterado em x86_64 (padding compensa). Mas
+em arrays de enums (p.ex. `std::vector<LogicalOp>`), agora cabem 4×
+mais por cache line. Para queries com 4+ AND/OR (raro mas possível),
+ganho marginal de cache.
+
+Mudança principalmente **documental** — sinaliza ao leitor que estes
+enums são limitados a um byte.
+
+### Demais aspectos confirmados em estado bom
+
+- **`[[nodiscard]]`** — `is_valid` (único método com retorno).
+- **`noexcept`** — `is_valid` (sem exceções; só compara `vector::size`).
+- **`const`** — `is_valid` é const.
+- **Defaults explícitos** — `FindQuery::entity = EntityType::SEGMENT`.
+  Outros membros usam ctor padrão (string vazia, vector vazio,
+  optional nullopt).
+- **C++23 features apropriadas:**
+  - `std::variant` para soma tipo (`Value`, `ConditionExpr`,
+    `GgqlQuery`)
+  - `std::optional` para opcionais (`WhereClause`, `limit`,
+    `offset`)
+  - `std::string`, `std::vector` idiomáticos
+  - `enum class` (com underlying type explícito agora)
+- **Includes mínimos** — apenas 5 headers essenciais:
+  `<cstdint>`, `<optional>`, `<string>`, `<variant>`, `<vector>`.
+
+**Auditoria do `ast.hpp` 100% concluída.** Header é POD-only:
+zero funções utility (todas as conversões são feitas no `query_planner.cpp`),
+estado e invariante claros, layout otimizado.
+
+17/17 testes passando.
+
 **Recomendação:** começar com **B1** (fix bug latente, sempre seguro).
 Para M1, **escolher A ou B** dependendo do roadmap:
 
