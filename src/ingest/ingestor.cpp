@@ -254,10 +254,6 @@ void GfaIngestorMmapParallel::build_remap_from_pairs(
         ++cc[c];
     }
 
-    comp_sigma_.resize(K);
-    for (uint32_t c = 0; c < K; ++c) {
-        comp_sigma_[comp_rank[c]] = comp_size[c];
-    }
     num_components_ = K;
 
     // Bin-packing: K componentes → max_bins bins com min-heap O(K log B)
@@ -1578,10 +1574,6 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
     {
         std::vector<uint32_t> tmp;
         comp_for_node_.swap(tmp);
-    }
-    {
-        std::vector<uint64_t> tmp;
-        comp_sigma_.swap(tmp);
     }
     {
         std::vector<uint32_t> tmp;

@@ -11,17 +11,9 @@
 // Isso reduz sigma do DynamicGBWT de ~85M (global) para ~M_i (componente),
 // habilitando paralelismo efetivo igual ao do vg.
 //
-// Otimizações implementadas:
-//   1. Paralelização com OpenMP (Passada 1 e 2)
-//   2. posix_fadvise(POSIX_FADV_SEQUENTIAL) antes do mmap
-//   3. MADV_HUGEPAGE para reduzir TLB misses (requer huge pages habilitadas)
-//   4. MADV_SEQUENTIAL mantido para readahead (MADV_RANDOM antes da pass 2)
-//   5. Chunking do arquivo por thread com alinhamento em '\n'
-//   6. Fusão Pass 1 + Pass 1b: coleta S-keys e L-pairs em um único scan
-//   7. Union-Find lock-free com std::atomic_ref (C++23)
-//   8. Bin-packing de componentes → ~32 bins (elimina 2443 tmp files)
-//   9. In-RAM threshold per-bin por sigma
-//  10. fmt::format para nomes de paths (C++23)
+// Para análise detalhada de bugs, performance e código morto, ver:
+//   docs/analise_ingestor.md      (.cpp)
+//   docs/analise_ingestor_hpp.md  (este header)
 
 #include "ggql/cli/progress_tracker.hpp"
 #include "ggql/ingest/metadata_store.hpp"
@@ -166,10 +158,7 @@ struct IngestStatsParallel {
 // PERF-FM-6: ProgressTracker movido para ggql/cli/progress_tracker.hpp.
 using ggql::ProgressTracker;
 
-// ── GfaIngestorMmapParallel
-// ───────────────────────────────────────────────────
-// C++23: constexpr node_width calculation
-//
+// ── GfaIngestorMmapParallel ─────────────────────────────────────────────────
 // Encoding GBWT-bound: gbwt_encode_node(internal_id, orient) =
 //   ((internal_id + 1) << 1) | orient. Para nkeys nós (IDs em [0, nkeys-1]),
 // o maior valor encoded é ((nkeys-1+1)*2) | 1 = 2*nkeys + 1.
@@ -269,12 +258,10 @@ class GfaIngestorMmapParallel {
     // Option A: remap e componente calculados na passada 1 (após MPHF + L-lines).
     // remap_[mphf_id] = sequential_id contíguo por componente (maior primeiro).
     // comp_for_node_[mphf_id] = component_rank (0..K-1).
-    // comp_sigma_[comp_rank] = nós no componente.
     // comp_to_bin_[comp_rank] = bin_id (after bin-packing of K comps → ~32 bins).
     // Preenchidos por build_remap_from_links() e liberados após passada 2.
     std::vector<uint32_t> remap_;
     std::vector<uint32_t> comp_for_node_;
-    std::vector<uint64_t> comp_sigma_;
     std::vector<uint32_t> comp_to_bin_; // bin-packing: comp → bin
     std::vector<uint64_t> bin_sigma_;   // sigma acumulado por bin
     uint32_t num_components_ = 0;
