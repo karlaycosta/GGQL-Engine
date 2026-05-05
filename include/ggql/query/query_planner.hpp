@@ -4,15 +4,15 @@
 //
 // Recebe AST GgqlQuery e executa contra os backends:
 //
-//   EntityType   │ Backend                            │ Estado
-//   ─────────────┼────────────────────────────────────┼──────────────
-//   TIP          │ GfaCsrTopology::find_tips()        │ ✅
-//   REPEAT       │ GfaCsrTopology::find_repeats()     │ ✅
-//   BUBBLE       │ GfaCsrTopology::find_bubbles()     │ ⚠️  (→ snarls Phase 2)
-//   SEGMENT      │ GfaMetadataStore (binário .idx)    │ ✅
-//   EDGE         │ GfaCsrTopology::out_neighbors()    │ ✅
-//   PATH         │ GfaCsrTopology::path_nodes()       │ ✅
-//   SEARCH KMER  │ FM-Index                           │ ✅
+//   EntityType   │ Backend                                       │ Estado
+//   ─────────────┼───────────────────────────────────────────────┼──────
+//   TIP          │ GfaCsrTopology::find_tips()                   │ ✅
+//   REPEAT       │ GfaCsrTopology::find_repeats()                │ ✅
+//   BUBBLE       │ GfaCsrTopology::snarls() (pré-computado)      │ ✅
+//   SEGMENT      │ GfaMetadataStore (binário .idx)               │ ✅
+//   EDGE         │ GfaCsrTopology::out_neighbors()               │ ✅
+//   PATH         │ path_stats / path_nodes() (fallback)          │ ✅
+//   SEARCH KMER  │ FM-Index                                      │ ✅
 //
 // Implementação: src/query/query_planner.cpp + query_evaluator.cpp
 
@@ -45,6 +45,7 @@ struct RowFields {
     size_t                                   count = 0;
 
     void insert(std::string_view k, Value v) noexcept {
+        if (count >= kMaxFields) [[unlikely]] { return; }
         keys[count] = k;
         vals[count] = std::move(v);
         ++count;
@@ -87,8 +88,10 @@ class QueryPlanner {
                           const GfaSequenceIndex* seq_index = nullptr);
     ~QueryPlanner() = default;
 
-    QueryPlanner(const QueryPlanner&)            = delete;
-    QueryPlanner& operator=(const QueryPlanner&) = delete;
+    QueryPlanner(const QueryPlanner&)                     = delete;
+    QueryPlanner& operator=(const QueryPlanner&)          = delete;
+    QueryPlanner(QueryPlanner&&) noexcept                 = default;
+    QueryPlanner& operator=(QueryPlanner&&) noexcept      = default;
 
     [[nodiscard]] std::expected<QueryResult, std::string> execute(const GgqlQuery& query) const;
 
