@@ -172,8 +172,6 @@ GgqlIngestStats do_ingest_ffi(
             stats.elapsed_metadata_s = result->elapsed_metadata_s;
             stats.elapsed_topology_s = result->elapsed_topology_s;
             stats.elapsed_gbwt_s = result->elapsed_gbwt_s;
-            stats.elapsed_gbwt_insert_s = result->elapsed_gbwt_insert_s;
-            stats.elapsed_gbwt_compress_s = result->elapsed_gbwt_compress_s;
             stats.elapsed_fm_index_s = result->elapsed_fm_index_s;
             stats.gbwt_cpu_avg_s = result->gbwt_cpu_avg_s;
             stats.gbwt_cpu_max_s = result->gbwt_cpu_max_s;

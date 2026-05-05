@@ -148,8 +148,6 @@ struct IngestStatsParallel {
     double elapsed_metadata_s = 0.0;      // 0 se save_metadata=false
     double elapsed_topology_s = 0.0;      // 0 se build_topology=false
     double elapsed_gbwt_s = 0.0;          // Tempo real total do gBWT (wall_s)
-    double elapsed_gbwt_insert_s = 0.0;   // Tempo acumulado em DynamicGBWT::insert()
-    double elapsed_gbwt_compress_s = 0.0; // Tempo acumulado em GBWT(dynamic) compress
     double elapsed_fm_index_s = 0.0;      // 0 se build_fm_index=false
     double gbwt_cpu_avg_s = 0.0;          // Média CPU/thread
     double gbwt_cpu_max_s = 0.0;          // Máximo CPU (thread mais lenta)
@@ -159,9 +157,10 @@ struct IngestStatsParallel {
     double elapsed_total_s = 0.0;
 
     // Campos opcionais — preenchidos apenas quando keep_gbwt_tmp=true em ingest().
-    // Permitem que o chamador re-execute build_path_index() com diferentes batch sizes
-    // (e.g., Fase 10 do bench_topology). O chamador é responsável por excluir o arquivo.
-    std::string gbwt_tmp_path;                // caminho do arquivo temporário em disco
+    // Permitem que o chamador inspecione metadados do gBWT recém-construído
+    // (nomes dos paths e largura do símbolo). Após o refator de bin-packing
+    // os paths ficam distribuídos em múltiplos tmp files internos e não são
+    // mais expostos individualmente.
     std::vector<std::string> gbwt_path_names; // nomes dos paths (cópia salva antes do move)
     uint8_t gbwt_node_width = 0;              // bits/símbolo usado no text_buffer_type
 };
@@ -222,12 +221,11 @@ class GfaIngestorMmapParallel {
     //                     0 (padrão) → ignora W/P-lines; evita OOM em grafos
     //                     muito grandes. construct_im precisa de 5–9× |paths|
     //                     de RAM — use com cautela.
-    //   keep_gbwt_tmp   — se true, não exclui o arquivo temporário do gBWT
-    //                     após a construção; preenche gbwt_tmp_path,
-    //                     gbwt_path_names e gbwt_node_width em
-    //                     IngestStatsParallel. Útil para benchmarks de
-    //                     batch_size. O CHAMADOR deve excluir o arquivo com
-    //                     ::unlink(st.gbwt_tmp_path.c_str()).
+    //   keep_gbwt_tmp   — se true, preenche gbwt_path_names e gbwt_node_width
+    //                     em IngestStatsParallel para inspeção do caller.
+    //                     Os tmp files internos do gBWT (um por bin) são
+    //                     gerenciados pelo ingestor; o caller não recebe
+    //                     paths individuais.
     //   cache_dir       — subdiretório (relativo ao pai de filepath) onde os
     //                     arquivos de cache são lidos/gravados (padrão: ".idx/").
     //   build_gbwt      — se true (padrão), constrói o índice gBWT de paths

@@ -25,8 +25,6 @@ typedef struct {
     double elapsed_metadata_s;
     double elapsed_topology_s;
     double elapsed_gbwt_s;
-    double elapsed_gbwt_insert_s;
-    double elapsed_gbwt_compress_s;
     double elapsed_fm_index_s;
     double gbwt_cpu_avg_s;
     double gbwt_cpu_max_s;

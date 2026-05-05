@@ -322,8 +322,8 @@ explícito é redundante. **Não alterar.**
 | 5 | B1 — `MmapFileParallel::open()` rejeitar arquivo vazio com erro | bug | baixo | ✅ aplicado |
 | 6 | B2 — Adicionar move-assign explícito em `MmapFileParallel` | API | baixo | ✅ aplicado |
 | 7 | B4 — Validar `isalpha` em `parse_optional_tags` | bug | baixo | ✅ aplicado |
-| 8 | M1 — Marcar `elapsed_gbwt_*_s` como `[[deprecated]]` | API/FFI | médio (FFI) | future work |
-| 9 | B3 — Remover `gbwt_tmp_path` ou expor `std::vector` | API | médio (breaking) | future work |
+| 8 | M1 — Remover `elapsed_gbwt_*_s` (campos zumbi) | API/FFI | médio (FFI) | ✅ aplicado |
+| 9 | B3 — Remover `gbwt_tmp_path` (nunca setado) | API | médio (breaking) | ✅ aplicado |
 
 ### Itens 1-4 aplicados (2026-05-05)
 
@@ -350,6 +350,32 @@ letras ASCII (a-z/A-Z) antes de aplicar o bit-trick `& ~0x20`. Antes,
 chars não-letra resultavam em comparações incorretas; agora a tag é
 rejeitada silenciosamente como antes mas sem o risco de falso positivo
 em `c0 == 'D' && c1 == 'P'` para chars binários.
+
+17/17 testes passando.
+
+### Itens 8-9 aplicados (2026-05-05) — **BREAKING ABI**
+
+**M1** — Removidos `elapsed_gbwt_insert_s` e `elapsed_gbwt_compress_s`
+de `IngestStatsParallel` (`ingestor.hpp`), `GgqlIngestStats` (`ffi.h`)
+e dos assignments em `ffi.cpp`. Esses campos eram zumbi: declarados,
+inicializados a 0.0, propagados pela FFI a callers Rust/Dart, mas
+**nunca setados** no pipeline. Migrar callers para `gbwt_cpu_avg_s`
+e `gbwt_cpu_max_s` (que de fato carregam timing por-thread do
+`build_path_index_parallel`).
+
+**B3** — Removido `gbwt_tmp_path` de `IngestStatsParallel`. Documentado
+como populado quando `keep_gbwt_tmp=true` mas **nunca recebia valor**:
+o refator de bin-packing dividiu paths em múltiplos tmp files (um por
+bin) que ficam encapsulados no ingestor. O campo single-string
+representava conceito obsoleto. `keep_gbwt_tmp` flag e os campos
+`gbwt_path_names`/`gbwt_node_width` permanecem (estes últimos são de
+fato preenchidos). Comentário do parâmetro `keep_gbwt_tmp` atualizado
+para refletir a realidade.
+
+**Impacto ABI:** `GgqlIngestStats` perdeu 2 campos `double` no meio da
+struct — qualquer caller (Dart binding, Rust crate) precisa recompilar
+contra `ffi.h` atualizado. Versões antigas de bindings lerão valores
+deslocados.
 
 17/17 testes passando.
 
