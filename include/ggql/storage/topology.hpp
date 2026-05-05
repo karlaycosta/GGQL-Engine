@@ -106,8 +106,10 @@ class GfaCsrTopology {
         size_t index_size_b = 0;  // Tamanho final do índice em bytes
 
         // Helpers de performance
-        double nodes_per_s() const { return wall_s > 0 ? (double)total_nodes / wall_s : 0; }
-        double bits_per_node() const {
+        [[nodiscard]] double nodes_per_s() const noexcept {
+            return wall_s > 0 ? (double)total_nodes / wall_s : 0;
+        }
+        [[nodiscard]] double bits_per_node() const noexcept {
             return total_nodes > 0 ? (double)index_size_b * 8 / total_nodes : 0;
         }
     };
@@ -131,20 +133,13 @@ class GfaCsrTopology {
     }
 
     // ── Consultas de grau (inline — hot path, ~27 ns/op no benchmark) ────────
-    uint64_t out_degree(uint64_t node) const noexcept {
-        if (node >= num_nodes_ || E_fwd_.empty()) {
-            return 0;
-        }
-
+    // edge_range_* já retorna {0,0} para node fora de bounds ou E vazio.
+    [[nodiscard]] uint64_t out_degree(uint64_t node) const noexcept {
         auto [lo, hi] = edge_range_fwd(node);
         return hi - lo;
     }
 
-    uint64_t in_degree(uint64_t node) const noexcept {
-        if (node >= num_nodes_ || E_bwd_.empty()) {
-            return 0;
-        }
-
+    [[nodiscard]] uint64_t in_degree(uint64_t node) const noexcept {
         auto [lo, hi] = edge_range_bwd(node);
         return hi - lo;
     }
@@ -155,7 +150,7 @@ class GfaCsrTopology {
     //   bit  0       → orientação (0='+', 1='-')
     //   bits [31:1]  → node_id    (suporta até 2^31 ≈ 2.1 B nós)
     // Use decode(encoded) → EdgeRef{uint64_t, char} para tipos semânticos.
-    std::span<const uint32_t> out_neighbors(uint64_t node) const noexcept {
+    [[nodiscard]] std::span<const uint32_t> out_neighbors(uint64_t node) const noexcept {
         auto [lo, hi] = edge_range_fwd(node);
         if (hi <= lo) {
             return {};
@@ -163,7 +158,7 @@ class GfaCsrTopology {
         return {E_fwd_.data() + lo, hi - lo};
     }
 
-    std::span<const uint32_t> in_neighbors(uint64_t node) const noexcept {
+    [[nodiscard]] std::span<const uint32_t> in_neighbors(uint64_t node) const noexcept {
         auto [lo, hi] = edge_range_bwd(node);
         if (hi <= lo) {
             return {};
@@ -173,7 +168,7 @@ class GfaCsrTopology {
     }
 
     // ── Decodificação ─────────────────────────────────────────────────────────
-    static EdgeRef decode(uint32_t encoded) noexcept {
+    [[nodiscard]] static EdgeRef decode(uint32_t encoded) noexcept {
         return {static_cast<uint64_t>(encoded >> 1), (encoded & 1u) ? '-' : '+'};
     }
 
@@ -216,8 +211,8 @@ class GfaCsrTopology {
     [[nodiscard]] size_t memory_bytes() const noexcept;
 
     // ── Dimensões do grafo ────────────────────────────────────────────────────
-    uint64_t num_nodes() const noexcept { return num_nodes_; }
-    uint64_t num_edges() const noexcept { return E_fwd_.size(); }
+    [[nodiscard]] uint64_t num_nodes() const noexcept { return num_nodes_; }
+    [[nodiscard]] uint64_t num_edges() const noexcept { return E_fwd_.size(); }
 
     // ── Algoritmos de análise de grafo ────────────────────────────────────────
     //
@@ -226,7 +221,7 @@ class GfaCsrTopology {
     // compilador no kParallelNodeThreshold_ e elimina o overhead de call site.
 
     // Retorna IDs de nós "ponta" (tip): in_degree=0 OU out_degree=0.
-    std::vector<uint64_t> find_tips(int num_threads = 1) const {
+    [[nodiscard]] std::vector<uint64_t> find_tips(int num_threads = 1) const {
         if (offsets_cache_fwd_.empty() || offsets_cache_bwd_.empty()) {
             std::vector<uint64_t> tips;
             tips.reserve(num_nodes_ / 64);
@@ -293,10 +288,13 @@ class GfaCsrTopology {
     }
 
     // Retorna IDs de nós "repeat": out_degree >= min_degree.
-    std::vector<uint64_t> find_repeats(uint64_t min_degree = 2, int num_threads = 1) const {
+    [[nodiscard]] std::vector<uint64_t> find_repeats(uint64_t min_degree = 2, int num_threads = 1) const {
         if (offsets_cache_fwd_.empty()) {
             std::vector<uint64_t> repeats;
-            repeats.reserve(num_nodes_ / 4);
+            // Heurística: ~6% dos nós são repeats em pangenomas típicos
+            // (CHM13 ~5%, HPRC ~10%). Reserve N/16 evita 168 MB pré-alocados
+            // do antigo N/4 em datasets grandes.
+            repeats.reserve(num_nodes_ / 16);
             for (uint64_t i = 0; i < num_nodes_; ++i) {
                 if (out_degree(i) >= min_degree) {
                     repeats.push_back(i);
@@ -333,9 +331,9 @@ class GfaCsrTopology {
                 total.fetch_add(local.size(), std::memory_order_relaxed);
             }
             std::vector<uint64_t> repeats;
-            if (total.load(std::memory_order_relaxed) > 1'000'000) {
-                repeats.reserve(total.load(std::memory_order_relaxed));
-            }
+            // Sempre reserva o total exato (já calculado pelos atomic counters)
+            // — antes só reservava se >1M, deixando casos médios com realocações.
+            repeats.reserve(total.load(std::memory_order_relaxed));
 
             for (auto& v : t_rep) {
                 repeats.insert(repeats.end(), v.begin(), v.end());
@@ -345,7 +343,7 @@ class GfaCsrTopology {
         }
 
         std::vector<uint64_t> repeats;
-        repeats.reserve(N / 4);
+        repeats.reserve(N / 16);
         for (uint64_t i = 0; i < N; ++i) {
             if (static_cast<uint64_t>(offsets_cache_fwd_[i + 1] - offsets_cache_fwd_[i]) >=
                 min_degree) {
@@ -367,9 +365,9 @@ class GfaCsrTopology {
                                           int num_threads = 1);
 
     // ── Consultas ao índice de paths (inline triviais) ────────────────────────
-    size_t path_count() const noexcept { return path_names_.size(); }
+    [[nodiscard]] size_t path_count() const noexcept { return path_names_.size(); }
 
-    std::string_view path_name(size_t path_id) const noexcept {
+    [[nodiscard]] std::string_view path_name(size_t path_id) const noexcept {
         if (path_id >= path_names_.size()) {
             return {};
         }
@@ -403,26 +401,27 @@ class GfaCsrTopology {
         path_bp_lengths_  = std::move(bp);
     }
 
-    bool has_path_stats() const noexcept {
+    [[nodiscard]] bool has_path_stats() const noexcept {
         return !path_node_counts_.empty() &&
                path_node_counts_.size() == path_names_.size();
     }
 
-    uint32_t path_node_count(size_t path_id) const noexcept {
+    [[nodiscard]] uint32_t path_node_count(size_t path_id) const noexcept {
         return path_id < path_node_counts_.size() ? path_node_counts_[path_id] : 0;
     }
 
-    int64_t path_bp_length(size_t path_id) const noexcept {
+    [[nodiscard]] int64_t path_bp_length(size_t path_id) const noexcept {
         return path_id < path_bp_lengths_.size() ? path_bp_lengths_[path_id] : 0;
     }
 
     // ── Snarls (FIND BUBBLE) — persistido em snarls.bin ───────────────────────
     //
-    // Computado uma única vez durante o ingest via find_snarls_streaming().
-    // Carregado em load() com fallback gracioso (vazio se snarls.bin ausente).
-    bool has_snarls() const noexcept { return !snarls_.empty(); }
+    // Computado uma única vez durante o ingest via
+    // snarl_decomposition::find_all_snarls(). Carregado em load() com fallback
+    // gracioso (vazio se snarls.bin ausente).
+    [[nodiscard]] bool has_snarls() const noexcept { return !snarls_.empty(); }
 
-    std::span<const SnarlRecord> snarls() const noexcept {
+    [[nodiscard]] std::span<const SnarlRecord> snarls() const noexcept {
         return std::span<const SnarlRecord>(snarls_.data(), snarls_.size());
     }
 
@@ -489,7 +488,7 @@ class GfaCsrTopology {
                                    int num_threads = 1);
 
     // Helpers de acesso ao cache/EF (inline — hot path em find_bubbles DFS).
-    std::pair<uint64_t, uint64_t> edge_range_fwd(uint64_t node) const noexcept {
+    [[nodiscard]] std::pair<uint64_t, uint64_t> edge_range_fwd(uint64_t node) const noexcept {
         if (node >= num_nodes_ || E_fwd_.empty()) {
             return {0, 0};
         }
@@ -501,7 +500,7 @@ class GfaCsrTopology {
         return {ef_fwd_sel_(node + 1), ef_fwd_sel_(node + 2)};
     }
 
-    std::pair<uint64_t, uint64_t> edge_range_bwd(uint64_t node) const noexcept {
+    [[nodiscard]] std::pair<uint64_t, uint64_t> edge_range_bwd(uint64_t node) const noexcept {
         if (node >= num_nodes_ || E_bwd_.empty()) {
             return {0, 0};
         }
