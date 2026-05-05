@@ -70,9 +70,9 @@ struct MmapFileParallel {
         }
 
         size_t new_size = static_cast<size_t>(st.st_size);
-        if (new_size == 0) {
+        if (new_size == 0) [[unlikely]] {
             ::close(fd);
-            return MmapFileParallel{};
+            return std::unexpected("mmap: arquivo vazio (0 bytes): " + path);
         }
 
         // posix_fadvise ANTES do mmap — dica ao kernel de acesso sequencial
@@ -110,6 +110,18 @@ struct MmapFileParallel {
     MmapFileParallel(MmapFileParallel&& o) noexcept : data(o.data), size(o.size) {
         o.data = nullptr;
         o.size = 0;
+    }
+    MmapFileParallel& operator=(MmapFileParallel&& o) noexcept {
+        if (this != &o) {
+            if (data && size) {
+                ::munmap(const_cast<char*>(data), size);
+            }
+            data = o.data;
+            size = o.size;
+            o.data = nullptr;
+            o.size = 0;
+        }
+        return *this;
     }
 };
 
@@ -366,14 +378,20 @@ class GfaIngestorMmapParallel {
     // Preenche out_rc (RC:i), out_dp (DP:f) e out_ln (LN:i) se presentes.
     static void parse_optional_tags(const std::string_view* toks, size_t ntok, size_t start_idx,
                                     int32_t& out_rc, float& out_dp, uint32_t& out_ln) noexcept {
+        constexpr auto is_ascii_alpha = [](char c) noexcept {
+            const unsigned char u = static_cast<unsigned char>(c);
+            return (u >= 'A' && u <= 'Z') || (u >= 'a' && u <= 'z');
+        };
         for (size_t i = start_idx; i < ntok; ++i) {
             std::string_view sv = toks[i];
-            // Formato mínimo: XX:Y:V (5 chars)
-            if (sv.size() < 5 || sv[2] != ':' || sv[4] != ':') {
+            // Formato mínimo: XX:Y:V (5 chars), com XX letras (GFA spec)
+            if (sv.size() < 5 || sv[2] != ':' || sv[4] != ':' ||
+                !is_ascii_alpha(sv[0]) || !is_ascii_alpha(sv[1])) {
                 continue;
             }
 
-            // Normaliza para maiúsculas para comparação (GFA spec não padroniza caixa)
+            // Normaliza para maiúsculas (GFA spec não padroniza caixa).
+            // Bit-trick `& ~0x20` é seguro pois sv[0]/sv[1] são letras ASCII.
             const char c0   = static_cast<char>(sv[0] & ~0x20);
             const char c1   = static_cast<char>(sv[1] & ~0x20);
             const char type = sv[3];

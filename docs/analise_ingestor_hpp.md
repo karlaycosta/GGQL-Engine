@@ -319,9 +319,9 @@ explícito é redundante. **Não alterar.**
 | 2 | M3 — Atualizar/remover lista "Otimizações" | doc | mínimo | ✅ aplicado |
 | 3 | A2 — `noexcept` em `parse_optional_tags` | qualifier | mínimo | ✅ já existia |
 | 4 | M4 — Remover comentário "C++23: constexpr" stale | doc | mínimo | ✅ aplicado |
-| 5 | B1 — `MmapFileParallel::open()` rejeitar arquivo vazio com erro | bug | baixo | future work |
-| 6 | B2 — Adicionar move-assign explícito em `MmapFileParallel` | API | baixo | future work |
-| 7 | B4 — Validar `isalpha` em `parse_optional_tags` | bug | baixo | future work |
+| 5 | B1 — `MmapFileParallel::open()` rejeitar arquivo vazio com erro | bug | baixo | ✅ aplicado |
+| 6 | B2 — Adicionar move-assign explícito em `MmapFileParallel` | API | baixo | ✅ aplicado |
+| 7 | B4 — Validar `isalpha` em `parse_optional_tags` | bug | baixo | ✅ aplicado |
 | 8 | M1 — Marcar `elapsed_gbwt_*_s` como `[[deprecated]]` | API/FFI | médio (FFI) | future work |
 | 9 | B3 — Remover `gbwt_tmp_path` ou expor `std::vector` | API | médio (breaking) | future work |
 
@@ -330,6 +330,26 @@ explícito é redundante. **Não alterar.**
 LOC: 2.580 → 2.559 (-21).
 - `.hpp`: 547 → 534 (-13)
 - `.cpp`: 2.033 → 2.025 (-8)
+
+17/17 testes passando.
+
+### Itens 5-7 aplicados (2026-05-05)
+
+**B1** — `MmapFileParallel::open()` para arquivo vazio agora retorna
+`std::unexpected("mmap: arquivo vazio (0 bytes): <path>")` em vez de
+`MmapFileParallel{}` com `data=nullptr`. Elimina UB latente em
+`data_start + total_size` e `XXH64(nullptr, 0, 0)`.
+
+**B2** — Adicionado `MmapFileParallel& operator=(MmapFileParallel&&) noexcept`
+explícito que faz `munmap` do estado antigo antes de assumir o novo.
+Move-ctor já existia; antes só copy-assign era explicitamente deletado
+e move-assign era implicitamente deletado. Padroniza rule-of-5.
+
+**B4** — `parse_optional_tags` agora valida que `sv[0]` e `sv[1]` são
+letras ASCII (a-z/A-Z) antes de aplicar o bit-trick `& ~0x20`. Antes,
+chars não-letra resultavam em comparações incorretas; agora a tag é
+rejeitada silenciosamente como antes mas sem o risco de falso positivo
+em `c0 == 'D' && c1 == 'P'` para chars binários.
 
 17/17 testes passando.
 
