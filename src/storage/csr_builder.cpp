@@ -1,32 +1,13 @@
 // csr_builder.cpp — Construção CSR, Elias-Fano e offsets cache de GfaCsrTopology.
-//
 
 #include "ggql/storage/topology.hpp"
 
-#include "ggql/cli/console.hpp"
 #include "ggql/cli/progress_tracker.hpp"
 
-// Headers pesados — incluídos só aqui, não no .hpp público.
-#include "ggql/storage/checksum_builder.hpp"
-
 #include <algorithm>
-#include <atomic>
-#include <cassert>
-#include <charconv>
-#include <chrono>
 #include <cstdint>
 #include <execution>
-#include <filesystem>
-#include <fmt/color.h>
-#include <fmt/core.h>
-#include <fstream>
-#include <future>
-#include <gbwt/dynamic_gbwt.h> // GBWTBuilder, DynamicGBWT
 #include <numeric>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <unistd.h> // ::unlink
 
 #ifdef _OPENMP
     #include <omp.h>
@@ -34,88 +15,6 @@
 
 namespace ggql {
 
-namespace {
-
-/// Helper para monitoramento isolado de Resident Set Size (RSS).
-/// Usa std::jthread com stop_token (C++23) — auto-join no destrutor.
-class MemoryMonitor {
-  public:
-    explicit MemoryMonitor(std::chrono::milliseconds interval = std::chrono::milliseconds(100))
-        : interval_(interval) {
-        worker_ = std::jthread([this, interval](std::stop_token st) {
-            while (!st.stop_requested()) {
-                const size_t current = get_current_rss_kb();
-                size_t m = peak_.load(std::memory_order_relaxed);
-                while (current > m && !peak_.compare_exchange_weak(m, current)) {
-                    // spin or retry
-                }
-                std::this_thread::sleep_for(interval);
-            }
-        });
-    }
-
-    ~MemoryMonitor() { stop(); }
-
-    void stop() {
-        worker_.request_stop();
-        if (worker_.joinable()) {
-            worker_.join();
-        }
-    }
-
-    size_t peak_kb() const { return peak_.load(); }
-
-  private:
-    static size_t get_current_rss_kb() {
-        std::ifstream status("/proc/self/status");
-        std::string line;
-        while (std::getline(status, line)) {
-            if (line.starts_with("VmRSS:")) {
-                std::string_view sv(line);
-                sv.remove_prefix(6);
-                while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.front()))) {
-                    sv.remove_prefix(1);
-                }
-                size_t val = 0;
-                std::from_chars(sv.data(), sv.data() + sv.size(), val);
-                return val; // Linux: KB
-            }
-        }
-        return 0;
-    }
-
-    std::atomic<size_t> peak_{0};
-    std::chrono::milliseconds interval_;
-    std::jthread worker_;
-};
-
-/// Lê MemAvailable de /proc/meminfo (Linux).
-/// Retorna 0 se não conseguir ler (fallback conservador no chamador).
-static size_t available_ram_kb() {
-    std::ifstream f("/proc/meminfo");
-    std::string line;
-    while (std::getline(f, line)) {
-        if (line.starts_with("MemAvailable:")) {
-            std::string_view sv(line);
-            sv.remove_prefix(13);
-            while (!sv.empty() && sv.front() == ' ') {
-                sv.remove_prefix(1);
-            }
-            size_t val = 0;
-            std::from_chars(sv.data(), sv.data() + sv.size(), val);
-            return val;
-        }
-    }
-    return 0;
-}
-
-/// Barra de progresso ANSI para stderr — thread-safe apenas para o chamador;
-/// exibe somente quando stderr é um terminal (isatty).
-// (ProgressBar removido — usando ggql::cli::step_progress)
-
-} // namespace
-
-// csr_builder.cpp — Construção CSR, Elias-Fano e offsets cache.
 // ════════════════════════════════════════════════════════════════════════════
 // Destrutor — definido aqui onde gbwt::GBWT é tipo completo.
 // unique_ptr<gbwt::GBWT> requer destrutor completo no ponto de instanciação.
@@ -199,7 +98,11 @@ void GfaCsrTopology::radix_sort_by_from(std::vector<LinkRecord>& links, uint64_t
         return;
     }
 
-    // OPT 1: passes fixos via num_nodes
+    // B4: clamp para evitar div-by-zero em chunk = (n + nt - 1) / nt
+    // se caller passar num_threads <= 0 (improvável mas defensivo).
+    const int nt = std::max(1, num_threads);
+
+    // Passes fixos via num_nodes — elimina varredura serial para max_val.
     int n_passes_real = 0;
     for (uint64_t v = (num_nodes > 0 ? num_nodes - 1 : 0); v; v >>= 8) {
         ++n_passes_real;
@@ -208,7 +111,9 @@ void GfaCsrTopology::radix_sort_by_from(std::vector<LinkRecord>& links, uint64_t
         n_passes_real = 1;
     }
 
-    // OPT 3: paridade de passes — garante src == links.data() ao retornar.
+    // Paridade de passes — garante src == links.data() ao retornar (evita
+    // std::copy de até 2,8 GB no HPRC). Pass extra com shift=0 custa ~120 ms
+    // vs ~280 ms de copy alternativo → -160 ms net.
     const int n_passes_total = (n_passes_real % 2 == 0) ? n_passes_real : n_passes_real + 1;
 
     std::vector<LinkRecord> buf(n);
@@ -216,19 +121,19 @@ void GfaCsrTopology::radix_sort_by_from(std::vector<LinkRecord>& links, uint64_t
     LinkRecord* dst = buf.data();
 
     const size_t chunk =
-        (n + static_cast<size_t>(num_threads) - 1) / static_cast<size_t>(num_threads);
+        (n + static_cast<size_t>(nt) - 1) / static_cast<size_t>(nt);
 
     // OPT 2: alignas(64) elimina false sharing
     struct alignas(64) Hist {
         std::array<uint32_t, 256> h;
     };
-    std::vector<Hist> lhist(static_cast<size_t>(num_threads));
+    std::vector<Hist> lhist(static_cast<size_t>(nt));
 
     for (int pass = 0; pass < n_passes_total; ++pass) {
         const int shift = (pass < n_passes_real) ? pass * 8 : 0;
 
         // 1. Histograma paralelo
-#pragma omp parallel num_threads(num_threads)
+#pragma omp parallel num_threads(nt)
         {
             int tid = 0;
 #ifdef _OPENMP
@@ -243,13 +148,13 @@ void GfaCsrTopology::radix_sort_by_from(std::vector<LinkRecord>& links, uint64_t
             }
         }
 
-        // 2. Prefix-sum global — OPT 5: loop fusionado (3 passes → 1)
-        std::vector<std::array<uint32_t, 256>> starts(static_cast<size_t>(num_threads));
+        // 2. Prefix-sum global — loop fusionado (3 passes → 1)
+        std::vector<std::array<uint32_t, 256>> starts(static_cast<size_t>(nt));
         {
             uint32_t running = 0;
             for (int d = 0; d < 256; ++d) {
                 uint32_t digit_total = 0;
-                for (int t = 0; t < num_threads; ++t) {
+                for (int t = 0; t < nt; ++t) {
                     starts[static_cast<size_t>(t)][static_cast<size_t>(d)] = running + digit_total;
                     digit_total += lhist[static_cast<size_t>(t)].h[static_cast<size_t>(d)];
                 }
@@ -257,8 +162,8 @@ void GfaCsrTopology::radix_sort_by_from(std::vector<LinkRecord>& links, uint64_t
             }
         }
 
-        // 3. Scatter paralelo com prefetch — OPT 4
-#pragma omp parallel num_threads(num_threads)
+        // 3. Scatter paralelo com prefetch
+#pragma omp parallel num_threads(nt)
         {
             int tid = 0;
 #ifdef _OPENMP
@@ -303,11 +208,13 @@ void GfaCsrTopology::build_csr(std::vector<LinkRecord>& links, std::vector<uint3
     // Ordena por from_id — LSD radix sort paralelo O(n/p)
     radix_sort_by_from(links, num_nodes_, num_threads);
 
-    // Offsets CSR temporários — varredura sequencial sobre array já ordenado
+    // Offsets CSR temporários — varredura sequencial sobre array já ordenado.
+    // Nota: NÃO usar #pragma GCC ivdep aqui. Links com mesmo from_id (após
+    // sort) escrevem no mesmo `tmp_off[k]`, gerando dependência verdadeira
+    // entre iterações sucessivas. ivdep promete ausência de loop-carried
+    // dependence, o que seria mentira → vetorização incorreta perderia
+    // contagens. Compilador detecta e mantém o loop serial corretamente.
     std::vector<uint32_t> tmp_off(num_nodes_ + 1, 0u);
-#ifdef __GNUC__
-    #pragma GCC ivdep
-#endif
     for (const auto& lk : links) {
         tmp_off[lk.from_id() + 1]++;
     }
@@ -325,13 +232,12 @@ void GfaCsrTopology::build_csr(std::vector<LinkRecord>& links, std::vector<uint3
     sdsl::sd_vector_builder builder(m + 1, num_nodes_ + 1, /*multiset=*/true);
     {
         const size_t total_ef = num_nodes_ + 1;
-        // BUG-TOPO-3: substitui tracker inline por ggql::ProgressTracker.
         // step amortiza o custo de add_progress (evita steady_clock::now() a cada nó).
         const size_t step = std::max(size_t(1), total_ef / 200); // atualiza a cada ~0,5%
         const char* lbl = is_fwd ? "Elias-Fano fwd" : "Elias-Fano bwd";
         ggql::ProgressTracker tracker_ef(total_ef, lbl, true, "nodes/s", 1.0);
 
-        // PERF-TOPO-3: contador decrescente elimina divisão modular a cada iteração.
+        // Contador decrescente elimina divisão modular a cada iteração.
         size_t countdown = step;
         for (uint64_t i = 0; i <= num_nodes_; ++i) {
             builder.set(static_cast<uint64_t>(tmp_off[i]));
@@ -376,13 +282,10 @@ void GfaCsrTopology::ensure_offsets_cache(int num_threads) const {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// find_bubbles — algoritmo Onodera et al. (2013), Kosaraju iterativo + sweep.
-// Complexidade: O(V + E) no DAG condensado.
+// rebuild_offsets_ — recalcula gbwt_offsets_ a partir de gbwts_.
+// Chamado após mudanças em gbwts_ (build_path_index_parallel, load).
 // ════════════════════════════════════════════════════════════════════════════
-// ════════════════════════════════════════════════════════════════════════════
-// rebuild_offsets_
-// ════════════════════════════════════════════════════════════════════════════
-void GfaCsrTopology::rebuild_offsets_() noexcept {
+void GfaCsrTopology::rebuild_offsets_() {
     gbwt_offsets_.resize(gbwts_.size() + 1);
     gbwt_offsets_[0] = 0;
     for (size_t i = 0; i < gbwts_.size(); ++i) {

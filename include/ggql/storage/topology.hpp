@@ -213,7 +213,7 @@ class GfaCsrTopology {
     void load(const std::string& dir);
 
     // ── Estatísticas de memória ───────────────────────────────────────────────
-    size_t memory_bytes() const noexcept;
+    [[nodiscard]] size_t memory_bytes() const noexcept;
 
     // ── Dimensões do grafo ────────────────────────────────────────────────────
     uint64_t num_nodes() const noexcept { return num_nodes_; }
@@ -514,7 +514,8 @@ class GfaCsrTopology {
     }
 
     // Reconstrói gbwt_offsets_ após modificações em gbwts_.
-    void rebuild_offsets_() noexcept;
+    // Não noexcept: vector::resize pode lançar bad_alloc.
+    void rebuild_offsets_();
 
 
 }; // class GfaCsrTopology
