@@ -200,7 +200,7 @@ class GfaIngestorMmapParallel {
     // Lê flags do manifest existente. Retorna nullopt se manifest ausente
     // ou em versão antiga (sem campos de flags). Útil para inspeção do
     // cache (auditoria/UI), não usado pelo pipeline de ingestão.
-    std::optional<CachedFlags> read_cached_flags(const std::string& dir) const;
+    [[nodiscard]] std::optional<CachedFlags> read_cached_flags(const std::string& dir) const;
 
     // Ingere um arquivo GFA e constrói os índices solicitados.
     //
@@ -351,8 +351,9 @@ class GfaIngestorMmapParallel {
         std::vector<std::vector<LinkNamePair>> thread_pairs;
     };
 
-    Pass1Result collect_keys_and_links_parallel(int num_threads, bool collect_links_for_uf,
-                                                bool verbose = true);
+    [[nodiscard]] Pass1Result collect_keys_and_links_parallel(int num_threads,
+                                                              bool collect_links_for_uf,
+                                                              bool verbose = true);
 
     // Passada 1b: executa Union-Find sobre pares já resolvidos via MPHF.
     // Preenche remap_, comp_for_node_, comp_sigma_, comp_to_bin_, bin_sigma_,
@@ -374,7 +375,7 @@ class GfaIngestorMmapParallel {
         std::vector<GbwtGroup> gbwt_groups; // um por thread
         uint8_t node_width = 1;             // bits por símbolo (igual para todos)
     };
-    PassadaDoisResult process_data_parallel(int num_threads, bool collect_records,
+    [[nodiscard]] PassadaDoisResult process_data_parallel(int num_threads, bool collect_records,
                                             bool collect_links, bool collect_paths = false,
                                             size_t max_paths = 0, bool verbose = true);
 
@@ -463,11 +464,11 @@ class GfaIngestorMmapParallel {
     //   expected_hash    : hash XXH64 calculado pelo chamador (nullopt = não verificar).
     //   file_sz          : tamanho atual do GFA (0 = ignorar pré-filtro).
     //   file_mtime_ns_val: mtime em ns (0 = ignorar pré-filtro).
-    std::optional<IngestStatsParallel>
+    [[nodiscard]] std::optional<IngestStatsParallel>
     load_index(const std::string& dir, std::optional<uint64_t> expected_hash = std::nullopt,
                uint64_t file_sz = 0, int64_t file_mtime_ns_val = 0);
 
-    // ── ARCH-4: parsers W/P extraídos de process_data_parallel ───────────────
+    // ── parsers W/P extraídos de process_data_parallel ──────────────────────
     // Funções estáticas para possibilitar teste unitário isolado (ARCH-5).
     // Retornam false se a linha for inválida ou vazia (sem nós).
     static bool parse_w_line(const char*& p, const char* end,
@@ -484,11 +485,11 @@ class GfaIngestorMmapParallel {
                              boophf_parallel_t& mphf, bool has_remap,
                              const std::vector<uint32_t>& remap);
 
-    // ── ARCH-3: orquestrador ingest() — métodos auxiliares ────────────────────
+    // ── orquestrador ingest() — métodos auxiliares ──────────────────────────
 
     // Tenta cache via mtime+size (O(1)). Retorna stats em hit completo; nullopt em miss ou
     // hit parcial (MPHF ok, mas algum índice ausente). Define out_skip=true em hit parcial.
-    std::optional<IngestStatsParallel>
+    [[nodiscard]] std::optional<IngestStatsParallel>
     try_cache_fast(const std::string& cache_dir,
                    uint64_t file_sz, int64_t file_mtime_ns,
                    bool save_metadata, bool build_fm_index,
@@ -502,11 +503,11 @@ class GfaIngestorMmapParallel {
     // Define out_hash e out_skip=true em hit parcial. mmap_data_ fica fechado ao retornar.
     // Define out_complete_snarls_only=true quando o cache cobre tudo exceto
     // snarls; nesse caso retorna *res (não nullopt) e o caller deve completar
-    // com find_snarls_streaming antes de retornar (cache em RAM permanece).
+    // com snarl_decomposition::find_all_snarls antes de retornar (cache em RAM permanece).
     // Define out_complete_gbwt_only=true quando falta apenas gbwts.bin (e
     // possivelmente snarls.bin); nesse caso retorna nullopt para o caller
     // abrir mmap e fazer Pass2 paths-only.
-    std::optional<IngestStatsParallel>
+    [[nodiscard]] std::optional<IngestStatsParallel>
     try_cache_hash(const std::string& cache_dir,
                    bool save_metadata, bool build_gbwt, bool build_snarls,
                    bool verbose, uint64_t& out_hash, bool& out_skip,
@@ -519,7 +520,7 @@ class GfaIngestorMmapParallel {
     // FASE 1 do upgrade incremental de cache: completa snarls.bin a partir
     // da topology já carregada em res_.topology, sem reler o GFA. Atualiza
     // stats.elapsed_total_s e grava snarls.bin no cache_dir.
-    IngestStatsParallel complete_with_snarls(
+    [[nodiscard]] IngestStatsParallel complete_with_snarls(
         const std::string& cache_dir,
         IngestStatsParallel stats, bool verbose,
         std::chrono::high_resolution_clock::time_point t_start);
@@ -530,13 +531,13 @@ class GfaIngestorMmapParallel {
     // gbwts.bin + topology.bin atualizado. Não toca em E_*/ef_*/metadata.bin.
     // Pré-condição: res_.mphf, res_.topology e remap_ já estão carregados.
     // Se build_snarls=true e snarls.bin falta, completa snarls após gBWT.
-    std::expected<IngestStatsParallel, std::string> complete_with_gbwt(
+    [[nodiscard]] std::expected<IngestStatsParallel, std::string> complete_with_gbwt(
         const std::string& filepath, const std::string& cache_dir,
         int num_threads, size_t max_gbwt_paths, bool build_snarls,
         bool verbose, IngestStatsParallel stats,
         std::chrono::high_resolution_clock::time_point t_start);
 
-    std::expected<IngestStatsParallel, std::string>
+    [[nodiscard]] std::expected<IngestStatsParallel, std::string>
     run_full_ingest(int num_threads, double gamma, bool verbose,
                     bool save_metadata, bool build_topology,
                     bool build_fm_index, size_t max_gbwt_paths,

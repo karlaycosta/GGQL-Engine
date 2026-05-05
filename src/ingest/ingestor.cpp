@@ -1,13 +1,13 @@
 // ingestor.cpp — Implementações de GfaIngestorMmapParallel.
 //
-// Separado do header em ARCH-1 para que alterações neste arquivo não
+// Mantido separado do header para que alterações neste arquivo não
 // disparem recompilação de todos os binários que incluem ingestor.hpp.
 // Compilado uma única vez em ggql_topology_vg.
 
 #include "ggql/ingest/ingestor.hpp"
 
-#include "ggql/storage/cactus_finder.hpp"
 #include "ggql/storage/fm_index.hpp"
+#include "ggql/storage/snarl_decomposition.hpp"
 #include "ggql/utils.hpp"
 
 #include <cstring>
@@ -289,7 +289,7 @@ void GfaIngestorMmapParallel::build_remap_from_pairs(
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ARCH-4: parse_w_line / parse_p_line
+// parse_w_line / parse_p_line — extraídos de process_data_parallel
 // ══════════════════════════════════════════════════════════════════════════════
 
 bool GfaIngestorMmapParallel::parse_w_line(const char*& p, const char* end,
@@ -492,7 +492,7 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
 
     const size_t chunk_size_p2 = total_size / static_cast<size_t>(num_threads);
 
-    // PERF-5: per-thread accumulators para bins em RAM — sem mutex no loop paralelo.
+    // Per-thread accumulators para bins em RAM — sem mutex no loop paralelo.
     // Bins em disco continuam usando disk_mutexes (I/O é o gargalo, não a contenção).
     std::vector<std::mutex> disk_mutexes(collect_paths ? num_bins : 0);
     using SeqVec = std::vector<gbwt::vector_type>;
@@ -530,14 +530,6 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
         std::array<std::string_view, 8> tokens;
 
         auto lookup = [&](std::string_view sv) -> uint64_t { return res_.mphf->lookup(sv); };
-        auto lookup_remapped = [&](std::string_view sv) -> uint64_t {
-            uint64_t id = res_.mphf->lookup(sv);
-            if (id != ULLONG_MAX && has_remap) {
-                id = static_cast<uint64_t>(remap_[id]);
-            }
-            return id;
-        };
-        (void)lookup_remapped; // silencia warning se não usado
 
         std::string path_name;
         std::vector<uint64_t> local_nodes;
@@ -620,7 +612,7 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
                 local_nodes.clear();
                 uint64_t first_mphf_id = ULLONG_MAX;
 
-                // ARCH-4: parsing delegado para métodos estáticos extraídos
+                // Parsing delegado para métodos estáticos extraídos.
                 if (first == 'W') {
                     parse_w_line(p, chunk_end, tokens, path_name, local_nodes, first_mphf_id,
                                  *res_.mphf, has_remap, remap_);
@@ -647,7 +639,7 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
                         }
                         gbwt::vector_type seq(local_nodes.begin(), local_nodes.end());
                         if (bin_use_in_ram[target]) {
-                            // PERF-5: sem mutex — cada thread escreve no seu slot privado
+                            // Sem mutex — cada thread escreve no seu slot privado.
                             thr_in_ram[static_cast<size_t>(tid)][target].push_back(std::move(seq));
                             thr_names[static_cast<size_t>(tid)][target].push_back(
                                 std::move(path_name));
@@ -678,7 +670,7 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
         }
     }
 
-    // PERF-5: merge serial dos acumuladores por thread para os vetores globais de bins em RAM.
+    // Merge serial dos acumuladores por thread para os vetores globais de bins em RAM.
     if (collect_paths) {
         for (size_t b = 0; b < num_bins; ++b) {
             for (int t = 0; t < num_threads; ++t) {
@@ -809,15 +801,23 @@ bool GfaIngestorMmapParallel::save_mphf_and_remap(const std::string& dir) {
 
 // Deriva o nome canônico do perfil a partir dos flags. Retorna "custom"
 // quando os flags não correspondem exatamente a nenhum perfil pré-definido.
-static const char* profile_name_from_flags(const GfaIngestorMmapParallel::CachedFlags& f) {
-    if ( f.save_metadata &&  f.build_fm_index &&  f.build_topology &&
-         f.build_gbwt    &&  f.build_snarls)        return "pangenome";
-    if ( f.save_metadata &&  f.build_fm_index &&  f.build_topology &&
-        !f.build_gbwt    && !f.build_snarls)        return "metagenomics";
-    if ( f.save_metadata && !f.build_fm_index &&  f.build_topology &&
-        !f.build_gbwt    &&  f.build_snarls)        return "assembly";
-    if ( f.save_metadata && !f.build_fm_index &&  f.build_topology &&
-         f.build_gbwt    && !f.build_snarls)        return "comparative";
+[[nodiscard]] static const char*
+profile_name_from_flags(const GfaIngestorMmapParallel::CachedFlags& f) noexcept {
+    if (f.save_metadata && f.build_fm_index && f.build_topology && f.build_gbwt && f.build_snarls) {
+        return "pangenome";
+    }
+    if (f.save_metadata && f.build_fm_index && f.build_topology && !f.build_gbwt &&
+        !f.build_snarls) {
+        return "metagenomics";
+    }
+    if (f.save_metadata && !f.build_fm_index && f.build_topology && !f.build_gbwt &&
+        f.build_snarls) {
+        return "assembly";
+    }
+    if (f.save_metadata && !f.build_fm_index && f.build_topology && f.build_gbwt &&
+        !f.build_snarls) {
+        return "comparative";
+    }
     return "custom";
 }
 
@@ -855,11 +855,11 @@ void GfaIngestorMmapParallel::write_manifest_atomic(const std::string& dir, uint
             << "num_bins=" << num_bins_packed_ << "\n"
             << "profile=" << profile_name_from_flags(flags) << "\n"
             << "indexed_at=" << iso_utc_now() << "\n"
-            << "flag_save_metadata="  << (flags.save_metadata  ? 1 : 0) << "\n"
+            << "flag_save_metadata=" << (flags.save_metadata ? 1 : 0) << "\n"
             << "flag_build_fm_index=" << (flags.build_fm_index ? 1 : 0) << "\n"
             << "flag_build_topology=" << (flags.build_topology ? 1 : 0) << "\n"
-            << "flag_build_gbwt="     << (flags.build_gbwt     ? 1 : 0) << "\n"
-            << "flag_build_snarls="   << (flags.build_snarls   ? 1 : 0) << "\n";
+            << "flag_build_gbwt=" << (flags.build_gbwt ? 1 : 0) << "\n"
+            << "flag_build_snarls=" << (flags.build_snarls ? 1 : 0) << "\n";
     }
     std::error_code ec;
     std::filesystem::rename(tmp_path, dir + "/manifest.txt", ec);
@@ -876,7 +876,9 @@ GfaIngestorMmapParallel::read_cached_flags(const std::string& dir) const {
         return std::nullopt;
     }
     std::ifstream in(dir + "/manifest.txt");
-    if (!in) { return std::nullopt; }
+    if (!in) {
+        return std::nullopt;
+    }
 
     int manifest_version = 1;
     CachedFlags f;
@@ -893,15 +895,20 @@ GfaIngestorMmapParallel::read_cached_flags(const std::string& dir) const {
         if (lv.starts_with("version=")) {
             manifest_version = fc_i(lv.substr(8));
         } else if (lv.starts_with("flag_save_metadata=")) {
-            f.save_metadata = fc_i(lv.substr(19)) != 0; any_flag_seen = true;
+            f.save_metadata = fc_i(lv.substr(19)) != 0;
+            any_flag_seen = true;
         } else if (lv.starts_with("flag_build_fm_index=")) {
-            f.build_fm_index = fc_i(lv.substr(20)) != 0; any_flag_seen = true;
+            f.build_fm_index = fc_i(lv.substr(20)) != 0;
+            any_flag_seen = true;
         } else if (lv.starts_with("flag_build_topology=")) {
-            f.build_topology = fc_i(lv.substr(20)) != 0; any_flag_seen = true;
+            f.build_topology = fc_i(lv.substr(20)) != 0;
+            any_flag_seen = true;
         } else if (lv.starts_with("flag_build_gbwt=")) {
-            f.build_gbwt = fc_i(lv.substr(16)) != 0; any_flag_seen = true;
+            f.build_gbwt = fc_i(lv.substr(16)) != 0;
+            any_flag_seen = true;
         } else if (lv.starts_with("flag_build_snarls=")) {
-            f.build_snarls = fc_i(lv.substr(18)) != 0; any_flag_seen = true;
+            f.build_snarls = fc_i(lv.substr(18)) != 0;
+            any_flag_seen = true;
         }
     }
     if (manifest_version < 4 || !any_flag_seen) {
@@ -917,7 +924,9 @@ GfaIngestorMmapParallel::read_cached_flags(const std::string& dir) const {
 void GfaIngestorMmapParallel::rewrite_manifest_flags(const std::string& dir,
                                                      CachedFlags new_flags) const {
     namespace fs = std::filesystem;
-    if (!fs::exists(dir + "/manifest.txt")) { return; }
+    if (!fs::exists(dir + "/manifest.txt")) {
+        return;
+    }
 
     std::vector<std::string> lines;
     {
@@ -936,12 +945,14 @@ void GfaIngestorMmapParallel::rewrite_manifest_flags(const std::string& dir,
     bool seen_profile = false, seen_indexed = false, seen_version = false;
     for (auto& l : lines) {
         if (starts_with(l, "version=")) {
-            l = "version=4"; seen_version = true;
+            l = "version=4";
+            seen_version = true;
         } else if (starts_with(l, "profile=")) {
             l = std::string("profile=") + profile_name_from_flags(new_flags);
             seen_profile = true;
         } else if (starts_with(l, "indexed_at=")) {
-            l = "indexed_at=" + iso_utc_now(); seen_indexed = true;
+            l = "indexed_at=" + iso_utc_now();
+            seen_indexed = true;
         } else if (starts_with(l, "flag_save_metadata=")) {
             l = std::string("flag_save_metadata=") + (new_flags.save_metadata ? "1" : "0");
             seen_save_meta = true;
@@ -959,19 +970,25 @@ void GfaIngestorMmapParallel::rewrite_manifest_flags(const std::string& dir,
             seen_snarls = true;
         }
     }
-    if (!seen_version) { lines.insert(lines.begin(), "version=4"); }
+    if (!seen_version) {
+        lines.insert(lines.begin(), "version=4");
+    }
     if (!seen_profile) {
         lines.push_back(std::string("profile=") + profile_name_from_flags(new_flags));
     }
-    if (!seen_indexed) { lines.push_back("indexed_at=" + iso_utc_now()); }
+    if (!seen_indexed) {
+        lines.push_back("indexed_at=" + iso_utc_now());
+    }
     if (!seen_save_meta) {
         lines.push_back(std::string("flag_save_metadata=") + (new_flags.save_metadata ? "1" : "0"));
     }
     if (!seen_fm) {
-        lines.push_back(std::string("flag_build_fm_index=") + (new_flags.build_fm_index ? "1" : "0"));
+        lines.push_back(std::string("flag_build_fm_index=") +
+                        (new_flags.build_fm_index ? "1" : "0"));
     }
     if (!seen_topo) {
-        lines.push_back(std::string("flag_build_topology=") + (new_flags.build_topology ? "1" : "0"));
+        lines.push_back(std::string("flag_build_topology=") +
+                        (new_flags.build_topology ? "1" : "0"));
     }
     if (!seen_gbwt) {
         lines.push_back(std::string("flag_build_gbwt=") + (new_flags.build_gbwt ? "1" : "0"));
@@ -987,20 +1004,22 @@ void GfaIngestorMmapParallel::rewrite_manifest_flags(const std::string& dir,
             fmt::print(stderr, "  [cache] AVISO: falha ao criar manifest.tmp em rewrite\n");
             return;
         }
-        for (const auto& l : lines) { out << l << '\n'; }
+        for (const auto& l : lines) {
+            out << l << '\n';
+        }
     }
     std::error_code ec;
     fs::rename(tmp, dir + "/manifest.txt", ec);
     if (ec) {
-        fmt::print(stderr, "  [cache] AVISO: rename manifest falhou em rewrite: {}\n", ec.message());
+        fmt::print(stderr, "  [cache] AVISO: rename manifest falhou em rewrite: {}\n",
+                   ec.message());
     }
 }
 
 // Apaga arquivos órfãos quando o novo perfil é mais restrito que o antigo.
 bool GfaIngestorMmapParallel::prune_cache_for_downgrade(const std::string& dir,
                                                         CachedFlags old_flags,
-                                                        CachedFlags new_flags,
-                                                        bool verbose) const {
+                                                        CachedFlags new_flags, bool verbose) const {
     namespace fs = std::filesystem;
     bool removed_any = false;
     auto try_remove = [&](const char* fname) {
@@ -1032,6 +1051,7 @@ bool GfaIngestorMmapParallel::prune_cache_for_downgrade(const std::string& dir,
         try_remove("metadata_seqs.bin");
         try_remove("metadata_strings.bin");
         try_remove("length_index.bin");
+        try_remove("depth_index.bin");
     }
     return removed_any;
 }
@@ -1184,17 +1204,15 @@ GfaIngestorMmapParallel::load_index(const std::string& dir, std::optional<uint64
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ARCH-3 — auxiliares do orquestrador ingest()
+// Auxiliares do orquestrador ingest()
 // ══════════════════════════════════════════════════════════════════════════════
 
 // FASE 1 — upgrade incremental de cache.
 // Quando o cache em disco cobre tudo exceto snarls.bin, derivamos snarls
-// diretamente da topology já carregada (find_snarls_streaming opera apenas
-// na CSR — não precisa do GFA original). Custo HPRC: ~5 s vs ~165 s da
-// reingestão completa.
+// diretamente da topology já carregada (snarl_decomposition::find_all_snarls opera
+// apenas na CSR — não precisa do GFA original).
 IngestStatsParallel GfaIngestorMmapParallel::complete_with_snarls(
-    const std::string& cache_dir,
-    IngestStatsParallel stats, bool verbose,
+    const std::string& cache_dir, IngestStatsParallel stats, bool verbose,
     std::chrono::high_resolution_clock::time_point t_start) {
     using clock = std::chrono::high_resolution_clock;
     using sec = std::chrono::duration<double>;
@@ -1204,19 +1222,14 @@ IngestStatsParallel GfaIngestorMmapParallel::complete_with_snarls(
     }
     try {
         const auto t0 = clock::now();
-        std::vector<SnarlRecord> snarls;
-        snarls.reserve(1024);
-        find_snarls_streaming(*res_.topology,
-                              [&](const SnarlRecord& r) { snarls.push_back(r); });
+        auto snarls = snarl_decomposition::find_all_snarls(*res_.topology, /*num_threads=*/1);
         const auto count = snarls.size();
         res_.topology->set_snarls(std::move(snarls));
         res_.topology->save_snarls_only(cache_dir);
         if (verbose) {
-            cli::step_ok_end(
-                "Snarls (FIND BUBBLE)",
-                fmt::format("{} snarls em {}",
-                            cli::format_count(count),
-                            ggql::format_seconds(sec(clock::now() - t0).count())));
+            cli::step_ok_end("Snarls (FIND BUBBLE)",
+                             fmt::format("{} snarls em {}", cli::format_count(count),
+                                         ggql::format_seconds(sec(clock::now() - t0).count())));
         }
     } catch (const std::exception& e) {
         fmt::print(stderr,
@@ -1234,11 +1247,9 @@ IngestStatsParallel GfaIngestorMmapParallel::complete_with_snarls(
 // apenas o gBWT. Custo HPRC estimado: ~30 s vs ~165 s da reingestão completa.
 //
 // Pré-condição: res_.mmap, res_.mphf, res_.topology e remap_ já carregados.
-std::expected<IngestStatsParallel, std::string>
-GfaIngestorMmapParallel::complete_with_gbwt(
-    const std::string& /*filepath*/, const std::string& cache_dir,
-    int num_threads, size_t max_gbwt_paths, bool build_snarls,
-    bool verbose, IngestStatsParallel stats,
+std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::complete_with_gbwt(
+    const std::string& /*filepath*/, const std::string& cache_dir, int num_threads,
+    size_t max_gbwt_paths, bool build_snarls, bool verbose, IngestStatsParallel stats,
     std::chrono::high_resolution_clock::time_point t_start) {
     using clock = std::chrono::high_resolution_clock;
     using sec = std::chrono::duration<double>;
@@ -1261,8 +1272,7 @@ GfaIngestorMmapParallel::complete_with_gbwt(
     auto pass2 = process_data_parallel(num_threads,
                                        /*collect_records=*/false,
                                        /*collect_links=*/false,
-                                       /*collect_paths=*/true,
-                                       mp, verbose);
+                                       /*collect_paths=*/true, mp, verbose);
     const auto t_p2_1 = clock::now();
     stats.elapsed_ingest_s = sec(t_p2_1 - t_p2_0).count();
     stats.path_count = pass2.stats.path_count;
@@ -1290,13 +1300,12 @@ GfaIngestorMmapParallel::complete_with_gbwt(
     // metadata já foram pulados (que era o ganho real da Fase 2).
     if (verbose) {
         cli::phase(5, fmt::format("gBWT serial (Fase 2) · {} paths em {} grupos",
-                                  cli::format_count(stats.path_count),
-                                  pass2.gbwt_groups.size()));
+                                  cli::format_count(stats.path_count), pass2.gbwt_groups.size()));
     }
     const uint8_t node_width = pass2.node_width;
     const auto t_gb0 = clock::now();
-    auto gbwt_t = res_.topology->build_path_index_parallel(
-        std::move(pass2.gbwt_groups), node_width, /*num_threads=*/1);
+    auto gbwt_t = res_.topology->build_path_index_parallel(std::move(pass2.gbwt_groups), node_width,
+                                                           /*num_threads=*/1);
     const auto t_gb1 = clock::now();
     stats.elapsed_gbwt_s = gbwt_t.wall_s;
     stats.gbwt_cpu_avg_s = gbwt_t.cpu_avg_s;
@@ -1307,8 +1316,7 @@ GfaIngestorMmapParallel::complete_with_gbwt(
     stats.path_count = res_.topology->path_count();
     if (verbose) {
         cli::step_ok_end("gBWT construído",
-                         fmt::format("{} paths · {} · {}",
-                                     cli::format_count(stats.path_count),
+                         fmt::format("{} paths · {} · {}", cli::format_count(stats.path_count),
                                      ggql::format_size(stats.gbwt_index_size_b),
                                      ggql::format_seconds(sec(t_gb1 - t_gb0).count())));
     }
@@ -1321,7 +1329,8 @@ GfaIngestorMmapParallel::complete_with_gbwt(
         if (meta.lengths_span().size() == res_.topology->num_nodes()) {
             res_.topology->build_path_stats(meta.lengths_span());
         }
-    } catch (...) { /* path_stats fica vazio — ok */ }
+    } catch (...) { /* path_stats fica vazio — ok */
+    }
 
     // Salva apenas gbwts.bin + path_stats.bin + topology.bin (não toca
     // metadata.bin/E_*/ef_*/fm_index.bin).
@@ -1336,22 +1345,19 @@ GfaIngestorMmapParallel::complete_with_gbwt(
     return stats;
 }
 
-std::optional<IngestStatsParallel>
-GfaIngestorMmapParallel::try_cache_fast(const std::string& cache_dir, uint64_t file_sz,
-                                        int64_t file_mtime_ns, bool save_metadata,
-                                        bool build_fm_index, bool build_gbwt, bool build_snarls,
-                                        bool verbose, bool& out_skip,
-                                        bool& out_complete_snarls_only,
-                                        bool& out_complete_gbwt_only) {
+std::optional<IngestStatsParallel> GfaIngestorMmapParallel::try_cache_fast(
+    const std::string& cache_dir, uint64_t file_sz, int64_t file_mtime_ns, bool save_metadata,
+    bool build_fm_index, bool build_gbwt, bool build_snarls, bool verbose, bool& out_skip,
+    bool& out_complete_snarls_only, bool& out_complete_gbwt_only) {
     auto res = load_index(cache_dir, std::nullopt, file_sz, file_mtime_ns);
     if (!res) {
         return std::nullopt;
     }
 
-    const bool meta_ok   = !save_metadata  || std::filesystem::exists(cache_dir + "/metadata.bin");
-    const bool fm_ok     = !build_fm_index || std::filesystem::exists(cache_dir + "/fm_index.bin");
-    const bool gbwt_ok   = !build_gbwt     || std::filesystem::exists(cache_dir + "/gbwts.bin");
-    const bool snarls_ok = !build_snarls   || std::filesystem::exists(cache_dir + "/snarls.bin");
+    const bool meta_ok = !save_metadata || std::filesystem::exists(cache_dir + "/metadata.bin");
+    const bool fm_ok = !build_fm_index || std::filesystem::exists(cache_dir + "/fm_index.bin");
+    const bool gbwt_ok = !build_gbwt || std::filesystem::exists(cache_dir + "/gbwts.bin");
+    const bool snarls_ok = !build_snarls || std::filesystem::exists(cache_dir + "/snarls.bin");
 
     if (meta_ok && fm_ok && gbwt_ok && snarls_ok) {
         if (verbose) {
@@ -1360,7 +1366,7 @@ GfaIngestorMmapParallel::try_cache_fast(const std::string& cache_dir, uint64_t f
         return *res;
     }
     // FASE 1: só snarls ausente, tudo o resto presente → derivar da CSR já
-    // carregada sem reler o GFA. Caller completa com find_snarls_streaming.
+    // carregada sem reler o GFA. Caller completa com snarl_decomposition::find_all_snarls.
     if (meta_ok && fm_ok && gbwt_ok && !snarls_ok && res_.topology) {
         out_complete_snarls_only = true;
         if (verbose) {
@@ -1386,12 +1392,10 @@ GfaIngestorMmapParallel::try_cache_fast(const std::string& cache_dir, uint64_t f
     return std::nullopt;
 }
 
-std::optional<IngestStatsParallel>
-GfaIngestorMmapParallel::try_cache_hash(const std::string& cache_dir, bool save_metadata,
-                                        bool build_gbwt, bool build_snarls,
-                                        bool verbose, uint64_t& out_hash, bool& out_skip,
-                                        bool& out_complete_snarls_only,
-                                        bool& out_complete_gbwt_only) {
+std::optional<IngestStatsParallel> GfaIngestorMmapParallel::try_cache_hash(
+    const std::string& cache_dir, bool save_metadata, bool build_gbwt, bool build_snarls,
+    bool verbose, uint64_t& out_hash, bool& out_skip, bool& out_complete_snarls_only,
+    bool& out_complete_gbwt_only) {
     out_hash = XXH64(res_.mmap->data, res_.mmap->size, 0);
     // NÃO reseta mmap aqui: caller pode precisar para Pass2 paths-only.
     // O reset original (que existia para liberar RAM) acontecerá quando
@@ -1404,9 +1408,9 @@ GfaIngestorMmapParallel::try_cache_hash(const std::string& cache_dir, bool save_
         return std::nullopt;
     }
 
-    const bool meta_ok   = !save_metadata || std::filesystem::exists(cache_dir + "/metadata.bin");
-    const bool gbwt_ok   = !build_gbwt    || std::filesystem::exists(cache_dir + "/gbwts.bin");
-    const bool snarls_ok = !build_snarls  || std::filesystem::exists(cache_dir + "/snarls.bin");
+    const bool meta_ok = !save_metadata || std::filesystem::exists(cache_dir + "/metadata.bin");
+    const bool gbwt_ok = !build_gbwt || std::filesystem::exists(cache_dir + "/gbwts.bin");
+    const bool snarls_ok = !build_snarls || std::filesystem::exists(cache_dir + "/snarls.bin");
 
     if (meta_ok && gbwt_ok && snarls_ok) {
         res_.mmap.reset(); // hit completo, mmap não é mais necessário
@@ -1442,9 +1446,8 @@ GfaIngestorMmapParallel::try_cache_hash(const std::string& cache_dir, bool save_
 std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_full_ingest(
     int num_threads, double gamma, bool verbose, bool save_metadata, bool build_topology,
     bool build_fm_index, size_t max_gbwt_paths, bool keep_gbwt_tmp, const std::string& cache_dir,
-    bool build_gbwt, bool build_snarls,
-    uint64_t file_sz, int64_t file_mtime_ns, uint64_t gfa_hash, bool skip_pass1,
-    std::chrono::high_resolution_clock::time_point t_start) {
+    bool build_gbwt, bool build_snarls, uint64_t file_sz, int64_t file_mtime_ns, uint64_t gfa_hash,
+    bool skip_pass1, std::chrono::high_resolution_clock::time_point t_start) {
     using clock = std::chrono::high_resolution_clock;
     using sec = std::chrono::duration<double>;
 
@@ -1475,7 +1478,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
         }
 
         res_.mphf = std::make_unique<boophf_parallel_t>(pass1.keys.size(), pass1.keys, num_threads,
-                                                    gamma, false, false);
+                                                        gamma, false, false);
         t_built = clock::now();
         if (verbose) {
             cli::step_ok("MPHF construído",
@@ -1675,8 +1678,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                             const uint64_t new_node = (old_node < remap.size())
                                                           ? static_cast<uint64_t>(remap[old_node])
                                                           : old_node;
-                            out_buf.push_back(static_cast<gbwt::size_type>(
-                                gbwt_encode_node(new_node, orient)));
+                            out_buf.push_back(
+                                static_cast<gbwt::size_type>(gbwt_encode_node(new_node, orient)));
                         }
                     }
                     out_buf.close();
@@ -1739,7 +1742,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
             //
             // Grupos vazios (in_ram_seqs e tmp_path ambos vazios) são ignorados.
             std::vector<uint32_t> precomp_nc;
-            std::vector<int64_t>  precomp_bp;
+            std::vector<int64_t> precomp_bp;
             bool stats_from_ram = false;
             if (store_up && res_.topology) {
                 const auto lengths = store_up->lengths_span();
@@ -1749,7 +1752,9 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                     if (!g.in_ram_seqs.empty()) {
                         // Grupo em RAM: iteração direta — O(nodes) a ~20 GB/s
                         for (const auto& seq : g.in_ram_seqs) {
-                            if (seq.empty()) continue;
+                            if (seq.empty()) {
+                                continue;
+                            }
                             precomp_nc.push_back(static_cast<uint32_t>(seq.size()));
                             int64_t bp = 0;
                             for (const uint64_t v : seq) {
@@ -1764,10 +1769,10 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                         // Grupo em disco: leitura sequencial do tmp file (muito mais
                         // rápido que GBWT decompression). gbwt_encode_node garante que
                         // valores armazenados nunca colidem com gbwt::ENDMARKER (0).
-                        gbwt::text_buffer_type buf(g.tmp_path, std::ios::in,
-                                                   size_t(64) << 20, node_width);
+                        gbwt::text_buffer_type buf(g.tmp_path, std::ios::in, size_t(64) << 20,
+                                                   node_width);
                         uint32_t cur_nc = 0;
-                        int64_t  cur_bp = 0;
+                        int64_t cur_bp = 0;
                         for (const gbwt::size_type val : buf) {
                             if (val == gbwt::ENDMARKER) {
                                 if (cur_nc > 0) {
@@ -1796,8 +1801,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
             }
 
             auto t_gbwt0 = clock::now();
-            auto gbwt_t = res_.topology->build_path_index_parallel(std::move(topo_groups), node_width,
-                                                               num_threads);
+            auto gbwt_t = res_.topology->build_path_index_parallel(std::move(topo_groups),
+                                                                   node_width, num_threads);
             auto t_gbwt1 = clock::now();
 
             stats.elapsed_gbwt_s = gbwt_t.wall_s;
@@ -1819,8 +1824,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
             // (fallback usado apenas se store_up existir mas precomp falhou —
             // shouldn't happen with v3 encoding, mas mantido como defesa).
             if (store_up) {
-                if (stats_from_ram &&
-                    precomp_nc.size() != res_.topology->path_count()) {
+                if (stats_from_ram && precomp_nc.size() != res_.topology->path_count()) {
                     // Não deveria ocorrer com gbwt_encode_node (v3); se ocorrer,
                     // fallback via GBWT decompression preserva correção.
                     if (verbose) {
@@ -1845,8 +1849,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                     const char* method = stats_from_ram ? "RAM+disco (pré-computado)"
                                                         : "GBWT decompression (fallback)";
                     cli::step_ok_end("Path stats",
-                                     fmt::format("{} · {}", method,
-                                                 ggql::format_seconds(ps_s)));
+                                     fmt::format("{} · {}", method, ggql::format_seconds(ps_s)));
                 }
                 store_up.reset();
             }
@@ -1857,29 +1860,26 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
 
     if (!skip_pass1) {
         // Snarls (FIND BUBBLE): pré-computa antes de salvar a topologia.
-        // Roda após GBWT/FM-Index para que estruturas pesadas do 3-ECC já tenham
-        // espaço; ainda assim, find_snarls_streaming aloca ~5 GB no HPRC (24 B
-        // por nó em TsinNode + UF + cactus). Single-thread por enquanto.
+        // Usa snarl_decomposition::find_all_snarls (port nativo otimizado de
+        // at-cg/billi): construção iterativa do biedged graph + SESE, paridade
+        // exata com o binário Billi. Single-thread por enquanto.
         if (build_snarls && res_.topology) {
             try {
                 auto t_snarls0 = clock::now();
-                std::vector<SnarlRecord> snarls;
-                snarls.reserve(1024);
-                find_snarls_streaming(*res_.topology,
-                                      [&](const SnarlRecord& r) { snarls.push_back(r); });
+                auto snarls = snarl_decomposition::find_all_snarls(*res_.topology, num_threads);
                 const auto count = snarls.size();
                 res_.topology->set_snarls(std::move(snarls));
                 if (verbose) {
                     cli::step_info(
                         "Snarls (FIND BUBBLE)",
-                        fmt::format("{} snarls em {}",
-                                    cli::format_count(count),
+                        fmt::format("{} snarls em {}", cli::format_count(count),
                                     ggql::format_seconds(sec(clock::now() - t_snarls0).count())));
                 }
             } catch (const std::exception& e) {
-                fmt::print(stderr,
-                           "  [snarls] AVISO: falha ao computar snarls — FIND BUBBLE indisponível: {}\n",
-                           e.what());
+                fmt::print(
+                    stderr,
+                    "  [snarls] AVISO: falha ao computar snarls — FIND BUBBLE indisponível: {}\n",
+                    e.what());
             }
         }
         try {
@@ -1890,10 +1890,9 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
             fmt::print(stderr, "  [cache] AVISO: falha ao salvar topologia: {}\n", e.what());
         }
         if (save_ok) {
-            CachedFlags cf{save_metadata, build_fm_index, build_topology,
-                           build_gbwt, build_snarls};
-            write_manifest_atomic(cache_dir, gfa_hash, file_sz, file_mtime_ns,
-                                  node_width, stats, cf);
+            CachedFlags cf{save_metadata, build_fm_index, build_topology, build_gbwt, build_snarls};
+            write_manifest_atomic(cache_dir, gfa_hash, file_sz, file_mtime_ns, node_width, stats,
+                                  cf);
         }
     }
 
@@ -1915,8 +1914,7 @@ std::expected<IngestStatsParallel, std::string>
 GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, double gamma,
                                 bool verbose, bool save_metadata, bool build_topology,
                                 bool build_fm_index, size_t max_gbwt_paths, bool keep_gbwt_tmp,
-                                const std::string& cache_dir,
-                                bool build_gbwt, bool build_snarls) {
+                                const std::string& cache_dir, bool build_gbwt, bool build_snarls) {
     using clock = std::chrono::high_resolution_clock;
 
     if (num_threads <= 0) {
@@ -1958,8 +1956,8 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
     // apaga arquivos órfãos antes de carregar. Reduz RAM no load() já que
     // topology->load() carrega tudo que está em disco.
     {
-        const CachedFlags requested{save_metadata, build_fm_index, build_topology,
-                                    build_gbwt, build_snarls};
+        const CachedFlags requested{save_metadata, build_fm_index, build_topology, build_gbwt,
+                                    build_snarls};
         if (auto cached_flags = read_cached_flags(cache_dir); cached_flags.has_value()) {
             if (prune_cache_for_downgrade(cache_dir, *cached_flags, requested, verbose)) {
                 rewrite_manifest_flags(cache_dir, requested);
@@ -1972,9 +1970,8 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
 
     // ── fast path O(1): mtime + size ─────────────────────────────────────────
     if (auto cached = try_cache_fast(cache_dir, file_sz, file_mtime_ns, save_metadata,
-                                     build_fm_index, build_gbwt, build_snarls,
-                                     verbose, skip_pass1, complete_snarls_only,
-                                     complete_gbwt_only)) {
+                                     build_fm_index, build_gbwt, build_snarls, verbose, skip_pass1,
+                                     complete_snarls_only, complete_gbwt_only)) {
         if (complete_snarls_only) {
             cached = complete_with_snarls(cache_dir, *cached, verbose, t_start);
         }
@@ -1994,16 +1991,15 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
     // FASE 2: try_cache_fast detectou só gBWT faltando — Pass2 paths-only.
     // try_cache_hash adiante seria redundante (mtime+size já casou).
     if (complete_gbwt_only) {
-        return complete_with_gbwt(filepath, cache_dir, num_threads,
-                                  max_gbwt_paths, build_snarls, verbose,
-                                  IngestStatsParallel{}, t_start);
+        return complete_with_gbwt(filepath, cache_dir, num_threads, max_gbwt_paths, build_snarls,
+                                  verbose, IngestStatsParallel{}, t_start);
     }
 
     // ── verificação por hash XXH64 (só se mtime não casou) ───────────────────
     if (!skip_pass1) {
-        if (auto cached = try_cache_hash(cache_dir, save_metadata, build_gbwt, build_snarls,
-                                         verbose, gfa_hash, skip_pass1,
-                                         complete_snarls_only, complete_gbwt_only)) {
+        if (auto cached =
+                try_cache_hash(cache_dir, save_metadata, build_gbwt, build_snarls, verbose,
+                               gfa_hash, skip_pass1, complete_snarls_only, complete_gbwt_only)) {
             if (complete_snarls_only) {
                 cached = complete_with_snarls(cache_dir, *cached, verbose, t_start);
             }
@@ -2020,9 +2016,8 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
                 }
                 res_.mmap = std::make_unique<MmapFileParallel>(std::move(*mmap_res2));
             }
-            return complete_with_gbwt(filepath, cache_dir, num_threads,
-                                      max_gbwt_paths, build_snarls, verbose,
-                                      IngestStatsParallel{}, t_start);
+            return complete_with_gbwt(filepath, cache_dir, num_threads, max_gbwt_paths,
+                                      build_snarls, verbose, IngestStatsParallel{}, t_start);
         }
         // try_cache_hash fechou mmap_data_; reabrir para pass1
         auto mmap_res2 = MmapFileParallel::open(filepath);
@@ -2034,9 +2029,8 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
 
     // ── ingestão completa (pass1 + MPHF + pass2 + topologia + save) ──────────
     return run_full_ingest(num_threads, gamma, verbose, save_metadata, build_topology,
-                           build_fm_index, max_gbwt_paths, keep_gbwt_tmp, cache_dir,
-                           build_gbwt, build_snarls, file_sz,
-                           file_mtime_ns, gfa_hash, skip_pass1, t_start);
+                           build_fm_index, max_gbwt_paths, keep_gbwt_tmp, cache_dir, build_gbwt,
+                           build_snarls, file_sz, file_mtime_ns, gfa_hash, skip_pass1, t_start);
 }
 
 } // namespace ggql
