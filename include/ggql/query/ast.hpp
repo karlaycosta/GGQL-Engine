@@ -1,11 +1,8 @@
 #pragma once
 
-#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <string_view>
-#include <utility>   // std::to_underlying, std::unreachable (C++23)
 #include <variant>
 #include <vector>
 
@@ -51,8 +48,14 @@ struct WhereClause {
     std::vector<LogicalOp> connectors;
 
     /// Verifica o invariante de tamanho em tempo de execução (debug builds).
+    /// Estado válido: WHERE vazio (sem conditions e sem connectors) OU
+    /// connectors.size() == conditions.size() - 1 (cada connector liga
+    /// duas conditions consecutivas).
     [[nodiscard]] bool is_valid() const noexcept {
-        return conditions.empty() || connectors.size() + 1 == conditions.size();
+        if (conditions.empty()) {
+            return connectors.empty(); // sem conditions → sem connectors
+        }
+        return connectors.size() + 1 == conditions.size();
     }
 };
 
@@ -75,40 +78,5 @@ struct SearchKmerQuery {
 };
 
 using GgqlQuery = std::variant<FindQuery, SearchKmerQuery>;
-
-// ─── Utilitários de conversão para string ─────────────────────────────────────
-
-// Enums são contíguos a partir de 0 — garantido por static_assert abaixo.
-static_assert(std::to_underlying(EntityType::REPEAT) == 5,
-    "EntityType deve ser contíguo 0..5");
-static_assert(std::to_underlying(Operator::LEQ) == 5,
-    "Operator deve ser contíguo 0..5");
-
-constexpr std::array<std::string_view, 6> k_entity_names {
-    "SEGMENT", "EDGE", "PATH", "BUBBLE", "TIP", "REPEAT"
-};
-
-constexpr std::array<std::string_view, 6> k_op_names {
-    "=", "!=", ">", "<", ">=", "<="
-};
-
-[[nodiscard("Use o nome retornado para exibição ou serialização")]]
-constexpr std::string_view entity_to_string(EntityType e) noexcept {
-    return k_entity_names[std::to_underlying(e)];
-}
-
-[[nodiscard("Use o operador retornado para exibição ou serialização")]]
-constexpr std::string_view op_to_string(Operator o) noexcept {
-    return k_op_names[std::to_underlying(o)];
-}
-
-[[nodiscard("Use o operador lógico retornado para exibição ou serialização")]]
-constexpr std::string_view logical_op_to_string(LogicalOp l) noexcept {
-    switch (l) {
-        case LogicalOp::AND: return "AND";
-        case LogicalOp::OR:  return "OR";
-    }
-    std::unreachable();
-}
 
 } // namespace ggql
