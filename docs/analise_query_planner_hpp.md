@@ -289,6 +289,49 @@ são redundantes mas auto-documentam intent. **Mantidos como-está.**
 6/6 itens cobertos: itens 1-5 aplicados em 2 commits sequenciais
 (`bb8f464` para 1-4, próximo para 5); item 6 confirmado como n/a.
 
+---
+
+## Re-auditoria final pós-P1 (2026-05-05)
+
+Único achado adicional encontrado:
+
+**A1-extra** — `QueryPlanner` constructor não tinha `noexcept`. O ctor
+apenas copia 3 ponteiros não-proprietários (zero-cost, nenhuma operação
+pode lançar). Adicionar `noexcept` documenta a garantia e habilita
+strong-exception-safety quando usado em `std::vector<QueryPlanner>`
+reservation/move:
+
+```cpp
+explicit QueryPlanner(const GfaCsrTopology* = nullptr,
+                      const GfaMetadataStore* = nullptr,
+                      const GfaSequenceIndex* = nullptr) noexcept;
+```
+
+Aplicado tanto na declaração (header) quanto na definição (.cpp).
+
+### Demais aspectos confirmados em bom estado
+
+- **`[[nodiscard]]`** — todos os métodos que retornam valor têm o
+  atributo: `execute`, `execute_*`, `plan_*`, `eval_*`, `compare_values`,
+  `format_table`, `find`.
+- **`noexcept`** — aplicado onde possível: `find`, `insert`,
+  `compare_values`, `eval_condition`, `eval_where`, ctor, ~dtor (default),
+  move ctor/assign.
+- **`const`** — todos os métodos `const`-correctos (ponteiros são
+  `const T*` para indicar não-proprietário read-only).
+- **C++23 features em uso direto ou indireto:**
+  - `std::expected<QueryResult, std::string>` — retorno padrão
+  - `std::span<const uint64_t>` — `plan_node_query`
+  - `std::format` / `std::formatted_size` — `value_to_string` / `value_text_size`
+  - `std::ranges::contains` (P2522R3) — validations no `.cpp`
+  - `std::variant` + `std::visit` — `Value` e `GgqlQuery`
+  - `requires { ... }` — `Paginator::from_query` (template-conditional)
+  - `[[nodiscard]]`/`[[unlikely]]` — applicados
+  - `std::array` value-init com `{}` — `RowFields`
+- **Forward-decls** aplicadas para reduzir transitive includes.
+
+17/17 testes passando. **Auditoria do `query_planner.hpp` 100% concluída.**
+
 **Itens 1-4** (cleanup baixo-risco, ~5 min) podem ser aplicados
 imediatamente. **Item 5** (forward-decls) tem ganho marginal e exige
 revalidar todos os 5 callers.

@@ -89,7 +89,7 @@ class QueryPlanner {
     /// Ponteiros não-proprietários. Podem ser null se o backend não for necessário.
     explicit QueryPlanner(const GfaCsrTopology*   topology  = nullptr,
                           const GfaMetadataStore* metadata  = nullptr,
-                          const GfaSequenceIndex* seq_index = nullptr);
+                          const GfaSequenceIndex* seq_index = nullptr) noexcept;
     ~QueryPlanner() = default;
 
     QueryPlanner(const QueryPlanner&)                     = delete;

@@ -421,7 +421,7 @@ map_path_cols(std::span<const std::string> cols) {
 // ── Construtor ────────────────────────────────────────────────────────────────
 
 QueryPlanner::QueryPlanner(const GfaCsrTopology* topology, const GfaMetadataStore* metadata,
-                           const GfaSequenceIndex* seq_index)
+                           const GfaSequenceIndex* seq_index) noexcept
     : topology_(topology), metadata_(metadata), seq_index_(seq_index) {}
 
 // ── QueryResult::format_table ────────────────────────────────────────────────
