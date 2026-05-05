@@ -351,9 +351,9 @@ Duplicado 6×. Faz parte de M2/D1 — refator conjunto resolveria.
 | 4 | P1 — Pré-computar emitters de coluna fora do hot loop | perf | médio | ✅ aplicado |
 | 5 | P2 — Reusar `RowFields` entre iterações | perf | baixo | ✅ aplicado |
 | 6 | D1 — Extrair `plan_node_query` (tips + repeats) | refactor | médio | ✅ aplicado |
-| 7 | M2/D2 — Extrair `Paginator` helper | refactor | médio (testes) | future work |
-| 8 | B3 — `formatted_size` em `format_table` | perf | baixo | future work |
-| 9 | B4 — Erro explícito em `plan_paths` quando metadata ausente | UX | baixo | future work |
+| 7 | M2/D2 — Extrair `Paginator` helper | refactor | médio (testes) | ✅ aplicado |
+| 8 | B3 — `formatted_size` em `format_table` | perf | baixo | ✅ aplicado |
+| 9 | B4 — Erro explícito em `plan_paths` quando metadata ausente | UX | baixo | ✅ aplicado |
 
 ### Itens 1-6 aplicados (2026-05-05)
 
@@ -379,6 +379,42 @@ reset via `row.count = 0` reusa storage.
 
 **D1** — `plan_tips` e `plan_repeats` agora delegam para
 `plan_node_query(q, node_ids)` privado. Eliminadas ~64 LOC duplicadas.
+
+17/17 testes passando.
+
+### Itens 7-9 aplicados (2026-05-05)
+
+**M2/D2 (#7)** — Extraído `detail::Paginator` que encapsula o pattern de
+paginação + safety/truncation. API:
+```cpp
+struct Paginator {
+    enum class Decision : uint8_t { Stop, Skip, Emit };
+    template <typename Q> static Paginator from_query(const Q& q);
+    Decision advance(QueryResult& result);
+};
+```
+`from_query` usa `requires { q.offset; }` (C++20 concepts) para suportar
+`FindQuery` (com offset) e `SearchKmerQuery` (sem offset). As 7 funções
+de execução (6× `plan_*` + `execute_search_kmer`) agora chamam
+`pag.advance(result)` e fazem switch entre `Stop`/`Skip`/`Emit`.
+Eliminadas ~80 LOC duplicadas.
+
+**B3 (#8)** — Adicionada `detail::value_text_size` que usa
+`std::formatted_size` (C++23) para calcular o tamanho da representação
+textual sem alocar `std::string`. Substitui o uso em `format_table` no
+loop de cálculo de larguras.
+
+**B4 (#9)** — `plan_paths` agora retorna erro explícito quando
+`!path_stats && !metadata_`:
+```
+"FIND PATH: requer path_stats no cache ou GfaMetadataStore para
+computar length (cache antigo sem path_stats — re-execute o ingest)"
+```
+Anteriormente retornava `length=0` ambíguo. O bloco else de
+`use_stats` agora pode confiar em `metadata_ != nullptr`.
+
+LOC final: 1.058 → 1.088 (+30; refator estrutural acrescentou Paginator
+struct mas reduziu o corpo das `plan_*`).
 
 17/17 testes passando.
 

@@ -55,6 +55,23 @@ static constexpr std::array<std::string_view, 4> kPathColumns = {"id", "name", "
         v);
 }
 
+// Tamanho da representação textual sem alocar a string.
+// Usado em format_table para calcular larguras sem N alocações.
+[[nodiscard]] static size_t value_text_size(const Value& v) noexcept {
+    return std::visit(
+        [](const auto& x) -> size_t {
+            using T = std::decay_t<decltype(x)>;
+            if constexpr (std::is_same_v<T, int64_t>) {
+                return std::formatted_size("{}", x);
+            } else if constexpr (std::is_same_v<T, double>) {
+                return std::formatted_size("{:.6g}", x);
+            } else {
+                return x.size();
+            }
+        },
+        v);
+}
+
 // Campos string conhecidos — aceitam valores não-numéricos em condições WHERE.
 static constexpr std::array<std::string_view, 2> kStringFields = {"name", "to_orient"};
 
@@ -279,6 +296,52 @@ extract_name_eq(const WhereClause& wc) noexcept {
     return std::nullopt;
 }
 
+// ── Paginator ───────────────────────────────────────────────────────────────
+// Encapsula o pattern de paginação + safety/truncation que aparece em todos
+// os plan_*. advance() incrementa total_hits e classifica a iteração atual:
+//   Stop  — break do loop (kMaxTotalHitsCount ou kSafetyHardLimit excedidos)
+//   Skip  — continue (offset ainda não satisfeito ou take_n já atingido)
+//   Emit  — emitir a row para result.flat
+struct Paginator {
+    uint32_t take_n = 0;
+    bool has_explicit = false;
+    uint32_t skip_n = 0;
+    uint32_t pag_skipped = 0;
+
+    enum class Decision : uint8_t { Stop, Skip, Emit };
+
+    template <typename Q>
+    [[nodiscard]] static Paginator from_query(const Q& q) noexcept {
+        Paginator p;
+        p.take_n = q.limit.value_or(kSafetyHardLimit);
+        p.has_explicit = q.limit.has_value();
+        if constexpr (requires { q.offset; }) {
+            p.skip_n = q.offset.value_or(0);
+        }
+        return p;
+    }
+
+    Decision advance(QueryResult& result) noexcept {
+        ++result.total_hits;
+        if (result.total_hits > kMaxTotalHitsCount) {
+            result.total_hits_truncated = true;
+            return Decision::Stop;
+        }
+        if (!has_explicit && result.total_hits > kSafetyHardLimit) {
+            result.safety_limit_hit = true;
+            return Decision::Stop;
+        }
+        if (pag_skipped < skip_n) {
+            ++pag_skipped;
+            return Decision::Skip;
+        }
+        if (result.row_count >= take_n) {
+            return Decision::Skip;
+        }
+        return Decision::Emit;
+    }
+};
+
 // ── Emitters de coluna pré-computados ───────────────────────────────────────
 // Pré-computa, fora do hot loop, qual valor cada coluna deve emitir.
 // Elimina N comparações de string (col == "...") por linha emitida.
@@ -380,7 +443,7 @@ std::string QueryResult::format_table() const {
     }
     for (size_t r = 0; r < row_count; ++r) {
         for (size_t c = 0; c < ncols; ++c) {
-            widths[c] = std::max(widths[c], detail::value_to_string(flat[r * ncols + c]).size());
+            widths[c] = std::max(widths[c], detail::value_text_size(flat[r * ncols + c]));
         }
     }
 
@@ -510,25 +573,23 @@ QueryPlanner::execute_search_kmer(const SearchKmerQuery& q) const {
     auto cols = detail::resolve_return_fields(q.return_fields, detail::kSegmentColumns);
     const size_t ncols = cols.size();
 
-    const uint32_t take_n = q.limit.value_or(static_cast<uint32_t>(ids.size()));
+    // SEARCH KMER: sem offset (não há cláusula OFFSET no parser para kmer);
+    // usa o mesmo Paginator para safety/truncation consistente com plan_*.
+    auto pag = detail::Paginator::from_query(q);
+    if (!q.limit.has_value()) {
+        // Comportamento legado: sem LIMIT, retorna todos os ids encontrados
+        // (FM-Index normalmente devolve poucos). O safety limit ainda protege.
+        pag.take_n = static_cast<uint32_t>(std::min(ids.size(), size_t{kSafetyHardLimit}));
+    }
 
     QueryResult result;
     result.columns = cols;
-    result.flat.reserve(std::min(ids.size(), size_t{take_n}) * ncols);
+    result.flat.reserve(std::min(ids.size(), size_t{pag.take_n}) * ncols);
 
     for (uint64_t id : ids) {
-        ++result.total_hits;
-        if (result.total_hits > kMaxTotalHitsCount) {
-            result.total_hits_truncated = true;
-            break;
-        }
-        if (!q.limit.has_value() && result.total_hits > kSafetyHardLimit) {
-            result.safety_limit_hit = true;
-            break;
-        }
-        if (result.row_count >= take_n) {
-            continue;
-        }
+        const auto d = pag.advance(result);
+        if (d == detail::Paginator::Decision::Stop) { break; }
+        if (d == detail::Paginator::Decision::Skip) { continue; }
 
         const int64_t len = metadata_->length(id);
         const int32_t rc_raw = metadata_->read_count(id);
@@ -589,15 +650,11 @@ QueryPlanner::plan_node_query(const FindQuery& q, std::span<const uint64_t> node
     auto cols = detail::resolve_return_fields(q.return_fields, detail::kNodeColumns);
     const size_t ncols = cols.size();
     const auto emitters = detail::map_node_cols(cols);
-
-    const uint32_t take_n = q.limit.value_or(kSafetyHardLimit);
-    const bool has_explicit = q.limit.has_value();
-    const uint32_t skip_n = q.offset.value_or(0);
-    uint32_t pag_skipped = 0;
+    auto pag = detail::Paginator::from_query(q);
 
     QueryResult result;
     result.columns = std::move(cols);
-    result.flat.reserve(std::min(node_ids.size(), size_t{take_n}) * ncols);
+    result.flat.reserve(std::min(node_ids.size(), size_t{pag.take_n}) * ncols);
 
     RowFields row;
 
@@ -615,22 +672,10 @@ QueryPlanner::plan_node_query(const FindQuery& q, std::span<const uint64_t> node
             }
         }
 
-        ++result.total_hits;
-        if (result.total_hits > kMaxTotalHitsCount) {
-            result.total_hits_truncated = true;
-            break;
-        }
-        if (!has_explicit && result.total_hits > kSafetyHardLimit) {
-            result.safety_limit_hit = true;
-            break;
-        }
-        if (pag_skipped < skip_n) {
-            ++pag_skipped;
-            continue;
-        }
-        if (result.row_count >= take_n) {
-            continue;
-        }
+        const auto d = pag.advance(result);
+        if (d == detail::Paginator::Decision::Stop) { break; }
+        if (d == detail::Paginator::Decision::Skip) { continue; }
+
         for (const auto e : emitters) {
             switch (e) {
                 case detail::NodeCol::Id:     result.flat.emplace_back(int64_t(nid)); break;
@@ -661,15 +706,11 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_bubbles(const FindQue
     auto cols = detail::resolve_return_fields(q.return_fields, detail::kBubbleColumns);
     const size_t ncols = cols.size();
     const auto emitters = detail::map_bubble_cols(cols);
-
-    const uint32_t take_n = q.limit.value_or(kSafetyHardLimit);
-    const bool has_explicit = q.limit.has_value();
-    const uint32_t skip_n = q.offset.value_or(0);
-    uint32_t pag_skipped = 0;
+    auto pag = detail::Paginator::from_query(q);
 
     QueryResult result;
     result.columns = std::move(cols);
-    result.flat.reserve(std::min(snarls.size(), size_t{take_n}) * ncols);
+    result.flat.reserve(std::min(snarls.size(), size_t{pag.take_n}) * ncols);
 
     RowFields row;
 
@@ -692,22 +733,10 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_bubbles(const FindQue
             }
         }
 
-        ++result.total_hits;
-        if (result.total_hits > kMaxTotalHitsCount) {
-            result.total_hits_truncated = true;
-            break;
-        }
-        if (!has_explicit && result.total_hits > kSafetyHardLimit) {
-            result.safety_limit_hit = true;
-            break;
-        }
-        if (pag_skipped < skip_n) {
-            ++pag_skipped;
-            continue;
-        }
-        if (result.row_count >= take_n) {
-            continue;
-        }
+        const auto d = pag.advance(result);
+        if (d == detail::Paginator::Decision::Stop) { break; }
+        if (d == detail::Paginator::Decision::Skip) { continue; }
+
         for (const auto e : emitters) {
             switch (e) {
                 case detail::BubbleCol::Source:        result.flat.emplace_back(src); break;
@@ -777,14 +806,11 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_segments(const FindQu
     const bool ret_rc = std::ranges::any_of(cols, [](const auto& c) { return c == "read_count"; });
     const bool ret_dp = std::ranges::any_of(cols, [](const auto& c) { return c == "depth"; });
 
-    const uint32_t take_n = q.limit.value_or(kSafetyHardLimit);
-    const bool has_explicit = q.limit.has_value();
-    const uint32_t skip_n = q.offset.value_or(0);
-    uint32_t pag_skipped = 0;
+    auto pag = detail::Paginator::from_query(q);
 
     QueryResult result;
     result.columns = cols;
-    result.flat.reserve(std::min(metadata_->size(), size_t{take_n}) * ncols);
+    result.flat.reserve(std::min(metadata_->size(), size_t{pag.take_n}) * ncols);
 
     RowFields row;
 
@@ -816,22 +842,8 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_segments(const FindQu
             }
         }
 
-        ++result.total_hits;
-        if (result.total_hits > kMaxTotalHitsCount) {
-            result.total_hits_truncated = true;
-            return;
-        }
-        if (!has_explicit && result.total_hits > kSafetyHardLimit) {
-            result.safety_limit_hit = true;
-            return;
-        }
-        if (pag_skipped < skip_n) {
-            ++pag_skipped;
-            return;
-        }
-        if (result.row_count >= take_n) {
-            return;
-        }
+        const auto d = pag.advance(result);
+        if (d != detail::Paginator::Decision::Emit) { return; }
 
         const int32_t rc_out = ret_rc ? metadata_->read_count(id) : -1;
         const float dp_out = ret_dp ? metadata_->depth(id) : -1.f;
@@ -948,14 +960,11 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_edges(const FindQuery
                             orient_cond_count == q.where->conditions.size();
     }
 
-    const uint32_t take_n = q.limit.value_or(kSafetyHardLimit);
-    const bool has_explicit = q.limit.has_value();
-    const uint32_t skip_n = q.offset.value_or(0);
-    uint32_t pag_skipped = 0;
+    auto pag = detail::Paginator::from_query(q);
 
     QueryResult result;
     result.columns = std::move(cols);
-    result.flat.reserve(std::min(topology_->num_edges(), size_t{take_n}) * ncols);
+    result.flat.reserve(std::min(topology_->num_edges(), size_t{pag.take_n}) * ncols);
 
     RowFields row;
 
@@ -980,24 +989,10 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_edges(const FindQuery
                 }
             }
 
-            ++result.total_hits;
-            if (result.total_hits > kMaxTotalHitsCount) {
-                result.total_hits_truncated = true;
-                stop = true;
-                break;
-            }
-            if (!has_explicit && result.total_hits > kSafetyHardLimit) {
-                result.safety_limit_hit = true;
-                stop = true;
-                break;
-            }
-            if (pag_skipped < skip_n) {
-                ++pag_skipped;
-                continue;
-            }
-            if (result.row_count >= take_n) {
-                continue;
-            }
+            const auto d = pag.advance(result);
+            if (d == detail::Paginator::Decision::Stop) { stop = true; break; }
+            if (d == detail::Paginator::Decision::Skip) { continue; }
+
             for (const auto e : emitters) {
                 switch (e) {
                     case detail::EdgeCol::FromId:   result.flat.emplace_back(int64_t(from)); break;
@@ -1026,20 +1021,22 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_paths(const FindQuery
         return std::unexpected{"FIND PATH: nenhum path indexado — o GFA não contém linhas W ou P"};
     }
 
+    const bool use_stats = topology_->has_path_stats();
+    if (!use_stats && !metadata_) {
+        return std::unexpected{
+            "FIND PATH: requer path_stats no cache ou GfaMetadataStore para "
+            "computar length (cache antigo sem path_stats — re-execute o ingest)"};
+    }
+
     auto cols = detail::resolve_return_fields(q.return_fields, detail::kPathColumns);
     const size_t ncols = cols.size();
     const auto emitters = detail::map_path_cols(cols);
-
-    const uint32_t take_n = q.limit.value_or(kSafetyHardLimit);
-    const bool has_explicit = q.limit.has_value();
-    const uint32_t skip_n = q.offset.value_or(0);
-    uint32_t pag_skipped = 0;
+    auto pag = detail::Paginator::from_query(q);
 
     QueryResult result;
     result.columns = std::move(cols);
-    result.flat.reserve(std::min(count, size_t{take_n}) * ncols);
+    result.flat.reserve(std::min(count, size_t{pag.take_n}) * ncols);
 
-    const bool use_stats = topology_->has_path_stats();
     RowFields row;
 
     for (size_t pid = 0; pid < count; ++pid) {
@@ -1050,12 +1047,11 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_paths(const FindQuery
             nc = static_cast<int64_t>(topology_->path_node_count(pid));
             total_length = topology_->path_bp_length(pid);
         } else {
+            // Pré-condição: metadata_ != nullptr (validado acima).
             const auto nodes = topology_->path_nodes(pid);
             nc = static_cast<int64_t>(nodes.size());
-            if (metadata_) {
-                for (const uint64_t nid : nodes) {
-                    total_length += static_cast<int64_t>(metadata_->length(nid));
-                }
+            for (const uint64_t nid : nodes) {
+                total_length += static_cast<int64_t>(metadata_->length(nid));
             }
         }
 
@@ -1072,22 +1068,10 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_paths(const FindQuery
             }
         }
 
-        ++result.total_hits;
-        if (result.total_hits > kMaxTotalHitsCount) {
-            result.total_hits_truncated = true;
-            break;
-        }
-        if (!has_explicit && result.total_hits > kSafetyHardLimit) {
-            result.safety_limit_hit = true;
-            break;
-        }
-        if (pag_skipped < skip_n) {
-            ++pag_skipped;
-            continue;
-        }
-        if (result.row_count >= take_n) {
-            continue;
-        }
+        const auto d = pag.advance(result);
+        if (d == detail::Paginator::Decision::Stop) { break; }
+        if (d == detail::Paginator::Decision::Skip) { continue; }
+
         for (const auto e : emitters) {
             switch (e) {
                 case detail::PathCol::Id:        result.flat.emplace_back(int64_t(pid)); break;
