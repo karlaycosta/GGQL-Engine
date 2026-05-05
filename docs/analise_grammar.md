@@ -250,6 +250,60 @@ indefinido. Adicionados `<limits>` e `<utility>` aos includes.
 
 17/17 testes passando. **Auditoria do `grammar.hpp` concluída.**
 
+---
+
+## Re-auditoria final pós-fixes (2026-05-05)
+
+Único achado residual encontrado:
+
+**S2** — Auto-formatter ainda quebrado em 3 lugares restantes:
+- `condition_expr` action (lambda interna `if constexpr/else`)
+- `logical_op` action (chain if/else if/else com `}` quebrado)
+- `parse_ggql` (corpo do try/catch)
+
+Padronizado o estilo:
+```cpp
+// antes (logical_op):
+if (sv == "AND") {      s.where_connectors.push_back(LogicalOp::AND);
+} else if (sv == "OR") {  s.where_connectors.push_back(LogicalOp::OR);
+} else {                  std::unreachable();
+}
+
+// depois:
+if (sv == "AND") {
+    s.where_connectors.push_back(LogicalOp::AND);
+} else if (sv == "OR") {
+    s.where_connectors.push_back(LogicalOp::OR);
+} else {
+    std::unreachable(); // PEGTL `logical_op` rule garante AND/OR
+}
+```
+
+### Demais aspectos confirmados em estado bom
+
+- **`[[nodiscard]]`** — `parse_entity`, `parse_op`, `parse_ggql`,
+  `find` (em RowFields no header relacionado).
+- **`constexpr`** — `parse_entity`, `parse_op`.
+- **`noexcept`** — `parse_entity`, `parse_op`. Actions não podem
+  (chamam `vector::push_back`); `parse_ggql` tem try/catch.
+- **`const`** — actions são `static`; `parse_ggql` recebe `string_view`
+  por valor.
+- **C++23 features em uso:**
+  - `std::expected` / `std::unexpected`
+  - `std::variant` + `std::visit` + `if constexpr`
+  - `std::unreachable()` (3 sites: 2 em `detail::` + 1 em action)
+  - `using enum EntityType` (C++20)
+  - `std::from_chars` com `errc::result_out_of_range` check
+  - `std::numeric_limits<T>::max()` para clamp
+  - `std::string_view` zero-copy em `tmp_value`
+  - Lambdas com explicit template parameter `[]<typename T>(...)` (C++20)
+  - `[[nodiscard]] inline` em `parse_ggql`
+
+**Auditoria do `grammar.hpp` 100% concluída.** Não há mais bugs
+latentes, código morto ou pontos de melhoria significativos.
+
+17/17 testes passando.
+
 **Itens 1-2** podem ser combinados em um único pass de cleanup. O fix
 muda o **comportamento em caso de input inválido**: antes retornava
 último enum ("REPEAT"/"EQ") silenciosamente; depois invoca UB declarado

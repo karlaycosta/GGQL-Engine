@@ -285,7 +285,7 @@ template <> struct action<condition_expr> {
                     return Value{std::string{v}};
                 } else {
                     return Value{v};
-}
+                }
             },
             s.tmp_value);
         s.where_conditions.push_back(
@@ -328,10 +328,13 @@ template <> struct action<fn_contains> {
 template <> struct action<logical_op> {
     template <typename In> static void apply(const In& in, ParseState& s) {
         const auto sv = in.string_view();
-        if (sv == "AND") {      s.where_connectors.push_back(LogicalOp::AND);
-        } else if (sv == "OR") {  s.where_connectors.push_back(LogicalOp::OR);
-        } else {                  std::unreachable();
-}
+        if (sv == "AND") {
+            s.where_connectors.push_back(LogicalOp::AND);
+        } else if (sv == "OR") {
+            s.where_connectors.push_back(LogicalOp::OR);
+        } else {
+            std::unreachable(); // PEGTL `logical_op` rule garante AND/OR
+        }
     }
 };
 
@@ -423,7 +426,7 @@ template <> struct action<search_stmt> {
     try {
         if (!peg::parse<query, action>(in, state)) {
             return std::unexpected{"Erro de sintaxe na query GGQL"};
-}
+        }
     } catch (const peg::parse_error& e) {
         return std::unexpected{std::string{e.what()}};
     }
