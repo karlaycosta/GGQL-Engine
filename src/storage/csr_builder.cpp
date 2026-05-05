@@ -84,12 +84,17 @@ size_t GfaCsrTopology::memory_bytes() const noexcept {
 // radix_sort_by_from — LSD radix sort paralelo, O(n/p) por passo.
 //
 // Otimizações:
-//   1. Passes fixos via num_nodes: elimina varredura serial para max_val.
-//   2. alignas(64) em lhist: elimina false sharing entre threads.
-//   3. Paridade de passes: força n_passes_total par → resultado sempre em
-//      links.data() → elimina std::copy de até 1.89 GB ao final.
-//   4. Prefetch no scatter (lookahead=16): amortiza latência de L3-miss.
-//   5. Loop de prefix-sum fusionado: elimina total[] e global_pfx[] (3→1 passes).
+//   1. Passes fixos via num_nodes (n_passes_real) — sem varredura serial
+//      para encontrar max_val.
+//   2. alignas(64) em Hist: sizeof(Hist) múltiplo de 64 → cada lhist[t]
+//      ocupa cache lines distintas → sem false sharing entre threads.
+//   3. Paridade de passes: pad para n_passes_total par força
+//      `src == links.data()` ao retornar — evita std::copy final de até
+//      ~2,8 GB no HPRC. Pass extra (~120 ms) < copy alternativo (~280 ms).
+//   4. Prefetch no scatter (lookahead=16): amortiza latência L3-miss em
+//      `dst[offsets[pfdigit]]`.
+//   5. Prefix-sum global fusionado num único loop digit-major (256×nt
+//      writes em starts[]) — elimina total[] e global_pfx[] intermediários.
 // ════════════════════════════════════════════════════════════════════════════
 void GfaCsrTopology::radix_sort_by_from(std::vector<LinkRecord>& links, uint64_t num_nodes,
                                         int num_threads) {
@@ -111,9 +116,7 @@ void GfaCsrTopology::radix_sort_by_from(std::vector<LinkRecord>& links, uint64_t
         n_passes_real = 1;
     }
 
-    // Paridade de passes — garante src == links.data() ao retornar (evita
-    // std::copy de até 2,8 GB no HPRC). Pass extra com shift=0 custa ~120 ms
-    // vs ~280 ms de copy alternativo → -160 ms net.
+    // Pad para par — ver comentário "Otimização 3" acima.
     const int n_passes_total = (n_passes_real % 2 == 0) ? n_passes_real : n_passes_real + 1;
 
     std::vector<LinkRecord> buf(n);
@@ -123,7 +126,7 @@ void GfaCsrTopology::radix_sort_by_from(std::vector<LinkRecord>& links, uint64_t
     const size_t chunk =
         (n + static_cast<size_t>(nt) - 1) / static_cast<size_t>(nt);
 
-    // OPT 2: alignas(64) elimina false sharing
+    // alignas(64) → sizeof(Hist) múltiplo de 64; elimina false sharing.
     struct alignas(64) Hist {
         std::array<uint32_t, 256> h;
     };
@@ -175,18 +178,20 @@ void GfaCsrTopology::radix_sort_by_from(std::vector<LinkRecord>& links, uint64_t
 
             constexpr size_t kPrefetchAhead = 16;
             for (size_t i = lo; i < hi; ++i) {
-                if (i + kPrefetchAhead < hi) {
-                    uint8_t pfdigit = (src[i + kPrefetchAhead].from_id() >> shift) & 0xFFu;
+                // [[likely]]: branch só falsa nas últimas 16 iterações de
+                // cada chunk (~16/chunk_size ≈ 1e-6 no HPRC).
+                if (i + kPrefetchAhead < hi) [[likely]] {
+                    const uint8_t pfdigit = (src[i + kPrefetchAhead].from_id() >> shift) & 0xFFu;
                     __builtin_prefetch(&dst[offsets[pfdigit]], 1, 0);
                 }
-                uint8_t digit = (src[i].from_id() >> shift) & 0xFFu;
+                const uint8_t digit = (src[i].from_id() >> shift) & 0xFFu;
                 dst[offsets[digit]++] = src[i];
             }
         }
 
         std::swap(src, dst);
     }
-    // OPT 3: n_passes_total é sempre par → src == links.data() garantido.
+    // n_passes_total par → src == links.data() ao retornar.
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -241,7 +246,9 @@ void GfaCsrTopology::build_csr(std::vector<LinkRecord>& links, std::vector<uint3
         size_t countdown = step;
         for (uint64_t i = 0; i <= num_nodes_; ++i) {
             builder.set(static_cast<uint64_t>(tmp_off[i]));
-            if (--countdown == 0) {
+            // [[unlikely]]: progress tick só dispara a cada `step` iter
+            // (~0,5% das chamadas).
+            if (--countdown == 0) [[unlikely]] {
                 tracker_ef.add_progress(step);
                 countdown = step;
             }
@@ -293,6 +300,5 @@ void GfaCsrTopology::rebuild_offsets_() {
             gbwt_offsets_[i] + (gbwts_[i] ? static_cast<size_t>(gbwts_[i]->sequences()) : 0);
     }
 }
-
 
 } // namespace ggql
