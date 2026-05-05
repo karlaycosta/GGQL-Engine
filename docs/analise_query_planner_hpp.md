@@ -226,8 +226,8 @@ zero-cost.
 | 2 | M2 — Atualizar backend PATH para path_stats | doc | mínimo | ✅ aplicado |
 | 3 | B1 — Bounds check em `RowFields::insert` | bug | mínimo | ✅ aplicado |
 | 4 | A2 — Adicionar move-ctor/assign explícitos | API | mínimo | ✅ aplicado |
-| 5 | P1 — Forward-decls dos 3 headers grandes | build | médio (semantic) | future work (ganho marginal) |
-| 6 | A1 — Manter `keys{}` / `vals{}` (cosmético) | n/a | n/a | n/a |
+| 5 | P1 — Forward-decls dos 3 headers grandes | build | médio (semantic) | ✅ aplicado |
+| 6 | A1 — Manter `keys{}` / `vals{}` (cosmético) | n/a | n/a | confirmado n/a |
 
 ### Itens 1-4 aplicados (2026-05-05)
 
@@ -249,6 +249,45 @@ explícitos. `QueryPlanner` agora pode ser usado em `std::vector`,
 não-proprietários, zero-cost).
 
 17/17 testes passando.
+
+### Item 5 aplicado (2026-05-05)
+
+**P1** — Forward-declarations substituem os 3 includes pesados:
+```cpp
+namespace ggql {
+class GfaCsrTopology;
+class GfaMetadataStore;
+class GfaSequenceIndex;
+}
+```
+
+Includes diretos adicionados nos `.cpp` que precisam dos tipos completos
+(usam `metadata_->...`, `seq_index_->...`, `topology->...`):
+- `src/query/query_planner.cpp`: + 3 includes
+- `src/query/query_evaluator.cpp`: + 2 (não usa topology diretamente)
+- `src/repl/ggql_repl.cpp`: + 2 (instancia metadata + fm_index)
+- `src/ffi/ffi.cpp`: já tinha
+- `tests/test_query_planner.cpp`: já incluía topology.hpp via outros paths
+
+**Impacto:** TUs que apenas passam ponteiros de QueryPlanner agora
+não recompilam quando `topology.hpp`, `metadata_store.hpp` ou
+`fm_index.hpp` mudam (a menos que toquem nos próprios usos
+diretos). Ganho real é incremental — depende de quão frequentes são
+mudanças nesses headers.
+
+17/17 testes passando após fix dos includes diretos.
+
+### Item 6 confirmado n/a
+
+`std::array` member-initializers `{}` em `RowFields::keys` e `vals`
+são redundantes mas auto-documentam intent. **Mantidos como-está.**
+
+---
+
+## Auditoria do header completa
+
+6/6 itens cobertos: itens 1-5 aplicados em 2 commits sequenciais
+(`bb8f464` para 1-4, próximo para 5); item 6 confirmado como n/a.
 
 **Itens 1-4** (cleanup baixo-risco, ~5 min) podem ser aplicados
 imediatamente. **Item 5** (forward-decls) tem ganho marginal e exige

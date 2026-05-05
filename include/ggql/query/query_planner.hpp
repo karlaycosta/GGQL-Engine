@@ -25,12 +25,16 @@
 #include <unordered_set>
 #include <vector>
 
-#include <ggql/ingest/metadata_store.hpp>
-#include <ggql/storage/fm_index.hpp>
-#include <ggql/storage/topology.hpp>
 #include "ast.hpp"
 
 namespace ggql {
+
+// Forward declarations — tipos completos necessários apenas em
+// query_planner.cpp e em callers que instanciem essas classes (esses
+// devem incluir os headers correspondentes diretamente).
+class GfaCsrTopology;
+class GfaMetadataStore;
+class GfaSequenceIndex;
 
 // ─── RowFields ────────────────────────────────────────────────────────────────
 //

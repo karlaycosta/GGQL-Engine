@@ -9,6 +9,10 @@
 
 #include "ggql/query/query_planner.hpp"
 
+#include "ggql/ingest/metadata_store.hpp"
+#include "ggql/storage/fm_index.hpp"
+#include "ggql/storage/topology.hpp"
+
 #include <algorithm>
 #include <array>
 #include <charconv>

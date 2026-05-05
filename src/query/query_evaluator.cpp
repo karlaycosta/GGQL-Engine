@@ -6,6 +6,9 @@
 
 #include "ggql/query/query_planner.hpp"
 
+#include "ggql/ingest/metadata_store.hpp"
+#include "ggql/storage/fm_index.hpp"
+
 #include <charconv>
 #include <optional>
 #include <utility> // std::unreachable
