@@ -18,7 +18,9 @@
 #include <cassert>
 #include <charconv>
 #include <expected>
+#include <limits>
 #include <string>
+#include <utility>
 
 #include "ast.hpp"
 
@@ -194,32 +196,24 @@ namespace detail {
 
 [[nodiscard]] constexpr EntityType parse_entity(std::string_view s) noexcept {
     using enum EntityType;
-    if (s == "SEGMENT") { return SEGMENT;
-}
-    if (s == "EDGE") {    return EDGE;
-}
-    if (s == "PATH") {    return PATH;
-}
-    if (s == "BUBBLE") {  return BUBBLE;
-}
-    if (s == "TIP") {     return TIP;
-}
-    /* REPEAT */        return REPEAT;
+    if (s == "SEGMENT") { return SEGMENT; }
+    if (s == "EDGE")    { return EDGE; }
+    if (s == "PATH")    { return PATH; }
+    if (s == "BUBBLE")  { return BUBBLE; }
+    if (s == "TIP")     { return TIP; }
+    if (s == "REPEAT")  { return REPEAT; }
+    std::unreachable(); // PEGTL `entity_type` rule garante input válido
 }
 
 [[nodiscard]] constexpr Operator parse_op(std::string_view s) noexcept {
     using enum Operator;
-    if (s == "!=") { return NEQ;
-}
-    if (s == ">=") { return GEQ;
-}
-    if (s == "<=") { return LEQ;
-}
-    if (s == ">") {  return GT;
-}
-    if (s == "<") {  return LT;
-}
-    /* = */        return EQ;
+    if (s == "!=") { return NEQ; }
+    if (s == ">=") { return GEQ; }
+    if (s == "<=") { return LEQ; }
+    if (s == ">")  { return GT; }
+    if (s == "<")  { return LT; }
+    if (s == "=")  { return EQ; }
+    std::unreachable(); // PEGTL `op_sym` rule garante input válido
 }
 
 } // namespace detail
@@ -253,7 +247,10 @@ template <> struct action<float_value> {
     template <typename In> static void apply(const In& in, ParseState& s) {
         const auto sv = in.string_view();
         double v = 0;
-        std::from_chars(sv.data(), sv.data() + sv.size(), v);
+        const auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), v);
+        if (ec == std::errc::result_out_of_range) {
+            v = std::numeric_limits<double>::max();
+        }
         s.tmp_value = v;
     }
 };
@@ -263,7 +260,10 @@ template <> struct action<int_value> {
     template <typename In> static void apply(const In& in, ParseState& s) {
         const auto sv = in.string_view();
         int64_t v = 0;
-        std::from_chars(sv.data(), sv.data() + sv.size(), v);
+        const auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), v);
+        if (ec == std::errc::result_out_of_range) {
+            v = std::numeric_limits<int64_t>::max();
+        }
         s.tmp_value = v;
     }
 };
@@ -354,7 +354,10 @@ template <> struct action<limit_val> {
     template <typename In> static void apply(const In& in, ParseState& s) {
         const auto sv = in.string_view();
         uint32_t v = 0;
-        std::from_chars(sv.data(), sv.data() + sv.size(), v);
+        const auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), v);
+        if (ec == std::errc::result_out_of_range) {
+            v = std::numeric_limits<uint32_t>::max();
+        }
         s.tmp_limit = v;
     }
 };
@@ -364,7 +367,10 @@ template <> struct action<offset_val> {
     template <typename In> static void apply(const In& in, ParseState& s) {
         const auto sv = in.string_view();
         uint32_t v = 0;
-        std::from_chars(sv.data(), sv.data() + sv.size(), v);
+        const auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), v);
+        if (ec == std::errc::result_out_of_range) {
+            v = std::numeric_limits<uint32_t>::max();
+        }
         s.tmp_offset = v;
     }
 };
