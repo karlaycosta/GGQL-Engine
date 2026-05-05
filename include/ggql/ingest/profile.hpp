@@ -6,12 +6,14 @@
 // comparativa) ao subconjunto de estruturas a construir em ingest().
 // Documentação completa: docs/ingest_profiles.md.
 
+#include <cstdint>
 #include <optional>
 #include <string_view>
+#include <utility> // std::unreachable
 
 namespace ggql {
 
-enum class IngestProfile {
+enum class IngestProfile : uint8_t {
     Pangenome,    // tudo: MetadataStore, FM-Index, Topology, gBWT, Snarls
     Metagenomics, // sem gBWT e sem snarls (sem haplótipos significativos)
     Assembly,     // sem gBWT, com snarls (QC de montagem)
@@ -19,14 +21,14 @@ enum class IngestProfile {
 };
 
 struct ProfileFlags {
-    bool save_metadata;
-    bool build_fm_index;
-    bool build_topology;
-    bool build_gbwt;
-    bool build_snarls;
+    bool save_metadata  = false;
+    bool build_fm_index = false;
+    bool build_topology = false;
+    bool build_gbwt     = false;
+    bool build_snarls   = false;
 };
 
-constexpr ProfileFlags flags_for(IngestProfile p) noexcept {
+[[nodiscard]] constexpr ProfileFlags flags_for(IngestProfile p) noexcept {
     switch (p) {
     case IngestProfile::Pangenome:
         return {true, true,  true, true,  true};
@@ -37,20 +39,21 @@ constexpr ProfileFlags flags_for(IngestProfile p) noexcept {
     case IngestProfile::Comparative:
         return {true, false, true, true,  false};
     }
-    return {true, true, true, true, true}; // unreachable, default = pangenome
+    std::unreachable(); // todos os enum values cobertos acima
 }
 
-constexpr std::string_view name_of(IngestProfile p) noexcept {
+[[nodiscard]] constexpr std::string_view name_of(IngestProfile p) noexcept {
     switch (p) {
     case IngestProfile::Pangenome:    return "pangenome";
     case IngestProfile::Metagenomics: return "metagenomics";
     case IngestProfile::Assembly:     return "assembly";
     case IngestProfile::Comparative:  return "comparative";
     }
-    return "pangenome";
+    std::unreachable(); // todos os enum values cobertos acima
 }
 
-inline std::optional<IngestProfile> parse_profile(std::string_view s) noexcept {
+[[nodiscard]] constexpr std::optional<IngestProfile>
+parse_profile(std::string_view s) noexcept {
     if (s == "pangenome"    || s == "pan")  { return IngestProfile::Pangenome; }
     if (s == "metagenomics" || s == "meta") { return IngestProfile::Metagenomics; }
     if (s == "assembly"     || s == "asm")  { return IngestProfile::Assembly; }
