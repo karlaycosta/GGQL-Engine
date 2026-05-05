@@ -302,8 +302,9 @@ bool GfaIngestorMmapParallel::parse_w_line(const char*& p, const char* end,
     if (ntok < 6 || tokens[0].empty() || tokens[5].empty()) {
         return false;
     }
-    path_name =
-        fmt::format("{}#{}#{}:{}-{}", tokens[0], tokens[1], tokens[2], tokens[3], tokens[4]);
+    path_name.clear();
+    fmt::format_to(std::back_inserter(path_name), "{}#{}#{}:{}-{}",
+                   tokens[0], tokens[1], tokens[2], tokens[3], tokens[4]);
     std::string_view walk = tokens[5];
     const char* wp = walk.data();
     const char* wend = wp + walk.size();
@@ -670,8 +671,9 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
         }
     }
 
-    // Merge serial dos acumuladores por thread para os vetores globais de bins em RAM.
+    // Merge paralelo dos acumuladores por thread (cada bin é independente).
     if (collect_paths) {
+#pragma omp parallel for schedule(static) num_threads(num_threads)
         for (size_t b = 0; b < num_bins; ++b) {
             for (int t = 0; t < num_threads; ++t) {
                 auto& src_seqs = thr_in_ram[static_cast<size_t>(t)][b];
