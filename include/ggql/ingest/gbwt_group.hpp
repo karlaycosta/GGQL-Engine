@@ -38,16 +38,27 @@ struct GbwtGroup {
 // gbwt::DynamicGBWT. NÃO aplicar a E_fwd/E_bwd/CSR (não têm conceito de
 // ENDMARKER e usam o encoding bruto).
 
-inline constexpr uint64_t gbwt_encode_node(uint64_t internal_id,
-                                           uint64_t orient_bit) noexcept {
+// Codifica node_id + orient_bit em um único uint64_t para gBWT.
+// Pré-condição: internal_id < UINT64_MAX/2 (overflow do shift wrap a
+// 0 = ENDMARKER). Garantido na prática: nenhum dataset realístico
+// (HPRC ~10⁹ nós) chega perto.
+[[nodiscard]] inline constexpr uint64_t gbwt_encode_node(uint64_t internal_id,
+                                                         uint64_t orient_bit) noexcept {
     return ((internal_id + 1ull) << 1) | (orient_bit & 1ull);
 }
 
-inline constexpr uint64_t gbwt_decode_node(uint64_t encoded) noexcept {
+// Decodifica node_id de um valor encoded.
+// Pré-condição: encoded > 0 (encoded != gbwt::ENDMARKER). Caller deve
+// filtrar ENDMARKER antes — decode(0) retorna UINT64_MAX (wrap), sem
+// significado semântico. Decisão deliberada: evita branch em hot path
+// chamado ~10⁹ vezes em HPRC.
+[[nodiscard]] inline constexpr uint64_t gbwt_decode_node(uint64_t encoded) noexcept {
     return (encoded >> 1) - 1ull;
 }
 
-inline constexpr uint64_t gbwt_decode_orient(uint64_t encoded) noexcept {
+// Extrai o bit de orientação (0 = forward, 1 = reverse). Sem pré-condição
+// — válido para qualquer encoded, incluindo ENDMARKER.
+[[nodiscard]] inline constexpr uint64_t gbwt_decode_orient(uint64_t encoded) noexcept {
     return encoded & 1ull;
 }
 
