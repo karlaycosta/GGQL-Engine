@@ -98,6 +98,8 @@ class QueryPlanner {
 
     [[nodiscard]] std::expected<QueryResult, std::string> plan_tips(const FindQuery& q) const;
     [[nodiscard]] std::expected<QueryResult, std::string> plan_repeats(const FindQuery& q) const;
+    [[nodiscard]] std::expected<QueryResult, std::string>
+        plan_node_query(const FindQuery& q, std::span<const uint64_t> node_ids) const;
     [[nodiscard]] std::expected<QueryResult, std::string> plan_bubbles(const FindQuery& q) const;
     [[nodiscard]] std::expected<QueryResult, std::string> plan_segments(const FindQuery& q) const;
     [[nodiscard]] std::expected<QueryResult, std::string> plan_edges(const FindQuery& q) const;
