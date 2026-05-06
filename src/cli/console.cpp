@@ -96,24 +96,34 @@ struct SpinnerCtx {
     int phase_number = -1;
     std::string title;
     std::mutex wake_mtx;
-    std::condition_variable_any wake_cv;
+    std::condition_variable wake_cv;
     std::thread thread;
 
     // Para e join imediato via CV — não bloqueia os 80 ms do sleep.
+    // Seta g_in_progress=false antes do notify_all para garantir que a
+    // thread do spinner saia do loop na próxima iteração (mesmo que perca
+    // o sinal CV em uma race com wait_for).
     void stop() {
         if (!thread.joinable()) {
             return;
         }
+        g_in_progress.store(false, std::memory_order_release);
         wake_cv.notify_all();
         thread.join();
     }
 
     // Garante join no exit — evita std::terminate() do ~thread() com thread joinable.
+    // try/catch porque join() pode lançar std::system_error em casos patológicos
+    // (deadlock detectado pelo OS), e exceção em destrutor → terminate.
     ~SpinnerCtx() {
         g_in_progress.store(false, std::memory_order_relaxed);
         if (thread.joinable()) {
-            wake_cv.notify_all();
-            thread.join();
+            try {
+                wake_cv.notify_all();
+                thread.join();
+            } catch (...) {
+                // Suprime — não pode lançar em destrutor de objeto static.
+            }
         }
     }
 } g_spin;
@@ -341,7 +351,7 @@ void write_end_step(std::string_view marker, fmt::text_style marker_style, std::
     fmt::print(stderr, styled(s_label()), "{}", text);
     emit_newline();
     stop_spinner();
-    g_is_phase = false;
+    g_is_phase.store(false, std::memory_order_release);
 }
 
 void write_end_step(std::string_view marker, fmt::text_style marker_style, std::string_view text,
@@ -352,7 +362,7 @@ void write_end_step(std::string_view marker, fmt::text_style marker_style, std::
     fmt::print(stderr, styled(s_rhs()), "  {}", rhs);
     emit_newline();
     stop_spinner();
-    g_is_phase = false;
+    g_is_phase.store(false, std::memory_order_release);
 }
 
 } // namespace
