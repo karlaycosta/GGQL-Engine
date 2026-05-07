@@ -134,6 +134,60 @@ write_path_stores_payload(std::ofstream&                                        
     }
 }
 
+// Magic bytes esperados de cada backend, usados para auto-detect no
+// dispatch shard-by-shard. Valores DEVEM bater com os escritos por
+// PathStorage::save() e GbwtBackend::save().
+inline constexpr std::array<char, 8> kMagicPathStorage =
+    {'G', 'G', 'Q', 'L', 'P', 'S', '\0', '\0'};
+inline constexpr std::array<char, 8> kMagicGbwtBackend =
+    {'G', 'G', 'Q', 'L', 'G', 'B', '\0', '\0'};
+
+// Le o magic do shard atual e dispatcha para a load() do backend correto.
+// Usa tellg/seekg para rebobinar o stream antes de chamar a factory de
+// cada backend (que espera ler o magic ela mesma como parte do envelope).
+inline std::unique_ptr<IPathBackend>
+load_one_shard(std::istream& in, uint64_t shard_idx) {
+    const auto pos = in.tellg();
+    if (pos == std::streampos(-1)) {
+        throw std::runtime_error(
+            "[topology] path_stores.bin: tellg() falhou no shard " +
+            std::to_string(shard_idx) + " (stream nao seekable)");
+    }
+
+    std::array<char, 8> magic{};
+    in.read(magic.data(), magic.size());
+    if (!in.good()) {
+        throw std::runtime_error(
+            "[topology] path_stores.bin: falha ao ler magic do shard " +
+            std::to_string(shard_idx));
+    }
+    in.seekg(pos);
+    if (!in.good()) {
+        throw std::runtime_error(
+            "[topology] path_stores.bin: seekg(rewind) falhou no shard " +
+            std::to_string(shard_idx));
+    }
+
+    if (magic == kMagicPathStorage) {
+        return std::make_unique<PathStorage>(PathStorage::load(in));
+    }
+    if (magic == kMagicGbwtBackend) {
+        return std::make_unique<GbwtBackend>(GbwtBackend::load(in));
+    }
+
+    // Magic desconhecido — provavelmente cache corrompido ou de versao
+    // futura. Inclui hex-dump do magic lido para facilitar diagnostico.
+    std::string magic_hex;
+    for (auto c : magic) {
+        magic_hex += fmt::format("{:02x} ", static_cast<unsigned char>(c));
+    }
+    throw std::runtime_error(
+        "[topology] path_stores.bin: magic bytes desconhecidos no shard " +
+        std::to_string(shard_idx) + ": " + magic_hex +
+        "(esperado GGQLPS\\0\\0 ou GGQLGB\\0\\0). Cache corrompido ou de "
+        "versao incompativel — regenere via `ggql ingest`.");
+}
+
 inline void
 read_path_stores_payload(std::istream&                                     in,
                          std::vector<std::unique_ptr<IPathBackend>>& out_stores) {
@@ -153,8 +207,7 @@ read_path_stores_payload(std::istream&                                     in,
                 std::to_string(i));
         }
         if (present) {
-            out_stores.push_back(
-                std::make_unique<PathStorage>(PathStorage::load(in)));
+            out_stores.push_back(load_one_shard(in, i));
         } else {
             out_stores.emplace_back();
         }
