@@ -264,17 +264,65 @@ GfaCsrTopology::build_path_storage_parallel(std::vector<GbwtGroup> groups,
     // (com batch=INSERT_BATCH_SIZE=100M, ~1.6 GB pico por thread no pior caso).
     // Caller deve dimensionar threads conforme RAM disponivel.
     if (backend == PathBackendKind::Gbwt) {
-        const size_t batch_syms =
+        const size_t kMaxBatch =
             static_cast<size_t>(::gbwt::DynamicGBWT::INSERT_BATCH_SIZE);
+        // Floor: o GBWTBuilder com batch < ~1024 vira ineficiente (overhead
+        // do double-buffer dominaria). 1024 cobre shards minusculos (28 nos
+        // do menor componente de chm13) sem custo real.
+        constexpr size_t kMinBatch = 1024;
+
+        // Pre-calcula tamanho de cada shard para batch_size adaptativo.
+        // Para in_ram_seqs: somatorio das sequencias.
+        // Para tmp_path:    bytes_on_disk * 8 / node_width.
+        namespace fs = std::filesystem;
+        const std::uint64_t bits_per_sym =
+            std::max<std::uint8_t>(node_width, 1);
+        std::vector<size_t> shard_size(N, 0);
+        for (size_t i = 0; i < N; ++i) {
+            const auto& g = groups[i];
+            if (!g.in_ram_seqs.empty()) {
+                for (const auto& seq : g.in_ram_seqs) {
+                    shard_size[i] += seq.size();
+                }
+            } else if (!g.tmp_path.empty()) {
+                try {
+                    const size_t bytes_on_disk =
+                        static_cast<size_t>(fs::file_size(g.tmp_path));
+                    shard_size[i] = static_cast<size_t>(
+                        (static_cast<std::uint64_t>(bytes_on_disk) * 8ull) /
+                        bits_per_sym);
+                } catch (...) {
+                    shard_size[i] = kMaxBatch;  // fallback conservador
+                }
+            }
+        }
+
         std::atomic<std::uint64_t> total_nodes_acc{0};
 
         const int omp_threads_gbwt = static_cast<int>(
             std::max<size_t>(1, std::min<size_t>(
                 static_cast<size_t>(requested_threads), N)));
 
+        // Estimativa de RAM total: sum(2 * batch_i * node_bytes) sobre
+        // os omp_threads maiores shards (worst case = N=8 threads, todos
+        // executando os 8 shards maiores ao mesmo tempo).
+        const size_t node_bytes = std::max<size_t>(1, (node_width + 7u) / 8u);
+        size_t est_pico_bytes = 0;
+        {
+            std::vector<size_t> sorted = shard_size;
+            std::sort(sorted.begin(), sorted.end(), std::greater<>());
+            const size_t k = std::min<size_t>(
+                static_cast<size_t>(omp_threads_gbwt), sorted.size());
+            for (size_t j = 0; j < k; ++j) {
+                const size_t b = std::clamp(sorted[j], kMinBatch, kMaxBatch);
+                est_pico_bytes += 2u * b * node_bytes;
+            }
+        }
+
         cli::step_info(fmt::format(
-            "GbwtBackend build (paralelo) · {} shards · {} threads · batch {} simbolos",
-            N, omp_threads_gbwt, batch_syms));
+            "GbwtBackend build (paralelo+adaptive) · {} shards · {} threads · "
+            "batch_max={} simbolos · pico estimado dos buffers ~{:.2f} MB",
+            N, omp_threads_gbwt, kMaxBatch, est_pico_bytes / 1.0e6));
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic) num_threads(omp_threads_gbwt)
@@ -286,8 +334,13 @@ GfaCsrTopology::build_path_storage_parallel(std::vector<GbwtGroup> groups,
                 continue;
             }
 
-            ::gbwt::GBWTBuilder builder(node_width,
-                                        static_cast<::gbwt::size_type>(batch_syms));
+            // Batch adaptativo: para shards muito menores que kMaxBatch,
+            // fixar batch=kMaxBatch desperdica ~2*kMaxBatch*node_bytes em
+            // buffers que nunca enchem (~1.6 GB com kMaxBatch=100M).
+            const size_t batch_adaptive = std::clamp(
+                shard_size[i], kMinBatch, kMaxBatch);
+            ::gbwt::GBWTBuilder builder(
+                node_width, static_cast<::gbwt::size_type>(batch_adaptive));
             std::uint64_t local_syms = 0;
 
             if (!g.in_ram_seqs.empty()) {

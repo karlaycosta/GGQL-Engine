@@ -200,6 +200,70 @@ A invariante "shards não compartilham nós" já era garantida upstream por
 PathStorage vs Gbwt) continua passando — confirma que a paralelização
 não introduz divergência em `extract_into`.
 
+### 02 — Batch adaptativo no GBWTBuilder (P3)
+
+Commit: (a preencher após git commit)
+Data: 2026-05-07
+
+**Mudança:** Em vez de fixar `batch_size = INSERT_BATCH_SIZE` (100M
+símbolos) para todos os shards, calcula o tamanho de cada shard
+upfront e passa `batch_adaptive = clamp(shard_size, 1024, 100M)` ao
+`GBWTBuilder`. Para shards menores que 100M, evita alocar
+`2 × 100M × node_bytes` em buffers que nunca enchem.
+
+Implementação em `src/storage/path_index.cpp` (branch
+`if (backend == PathBackendKind::Gbwt)`):
+
+1. Pré-passada paralela computa `shard_size[i]` por shard:
+   - `in_ram_seqs`: somatório de `seq.size()`
+   - `tmp_path`: `bytes_on_disk * 8 / node_width`
+2. Estima pico dos buffers ANTES do loop principal e exibe na CLI
+   para diagnóstico.
+3. Cada thread aloca `GBWTBuilder` com batch dimensionado ao próprio
+   shard.
+
+| Métrica | P1 | **P3 (P1+adaptive)** | Δ vs P1 |
+|---|---:|---:|---:|
+| **Pico RSS (build isolado)** | 4.20 GB | **2.14 GB** | **−49%** |
+| Tempo build (wall) | 6.11 s | **5.89 s** | −3.6% (marginal) |
+| Throughput | 2.62 M nós/s | **2.72 M nós/s** | +3.8% |
+| ΔRSS Processo (Total) | 1.15 GB | 1.12 GB | −2.6% |
+| Tamanho do Índice (RAM) | 60.63 MB | 60.63 MB | igual ✓ |
+| `path_stores.bin` (disco) | 62.571.808 B | 62.571.808 B | **bit-exato** ✓ |
+| bits/nó | 31.72 | 31.72 | igual ✓ |
+| **TOTAL Pipeline** | 20.01 s | **19.37 s** | −3.2% |
+
+### Comparativo cumulativo (Baseline → P1 → P3)
+
+| Métrica | Baseline serial | P1 (paralelo) | **P3 (+adaptive)** | Δ vs Baseline |
+|---|---:|---:|---:|---:|
+| **Tempo build** | 15.32 s | 6.11 s | **5.89 s** | **2.60× mais rápido** |
+| **Pico RSS** | 1.87 GB | 4.20 GB | **2.14 GB** | +14% (apenas) |
+| Throughput | 1.05 M/s | 2.62 M/s | **2.72 M/s** | 2.59× |
+| Disco | 62.5 MB | 62.5 MB | 62.5 MB | bit-exato |
+| bits/nó | 31.72 | 31.72 | 31.72 | igual |
+| **Total Pipeline** | 28.90 s | 20.01 s | **19.37 s** | **−33%** |
+
+**O que mudou e o que não mudou:**
+
+- ✅ **Pico de RAM cai pela metade** sem perder o speedup do P1 — recupera
+  quase todo o overhead de RAM introduzido pela paralelização
+- ✅ Output bit-exato preservado (parity test passa)
+- ✅ A msg de diagnóstico mostra "pico estimado dos buffers ~96.21 MB"
+  (era ~12.8 GB com batch fixo: 8 threads × 2 buffers × 100M × 8 B);
+  redução de ~133× no pico estimado dos buffers do builder. O pico real
+  do processo (2.14 GB) inclui o DynamicGBWT crescendo + estruturas
+  auxiliares — o limite teórico dos buffers virou ruído no total.
+- ⏸️ **Speedup do build praticamente inalterado** — confirma que o
+  bottleneck residual é o tempo de processamento do shard maior, não
+  alocação/buffer de batch.
+- ⏸️ Compressão (bits/nó) inalterada — batch_size não afeta estrutura
+  do BWT.
+
+**Limitação:** ainda longe da compressão esperada (1–2 bits/nó). O
+ataque seguinte deve focar em sigma reduction local por shard, ou em
+sub-shardar o componente maior.
+
 ### (template — preencher conforme avança)
 
 ```
