@@ -69,7 +69,7 @@ target_compile_options(ggql_core PRIVATE
 )
 target_link_libraries(ggql_core PUBLIC fmt::fmt)
 
-# ── Camada 1 — ggql_storage (CSR + FM-Index + PathStorage) ───────────────────
+# ── Camada 1 — ggql_storage (CSR + FM-Index + PathStorage + GbwtBackend) ─────
 add_library(ggql_storage STATIC
     src/storage/csr_builder.cpp
     src/storage/graph_algorithms.cpp
@@ -77,12 +77,13 @@ add_library(ggql_storage STATIC
     src/storage/fm_index.cpp
     src/storage/snarl_decomposition.cpp
     src/gbwt/path_storage.cpp
+    src/gbwt/gbwt_backend.cpp
 )
 target_compile_options(ggql_storage PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
     -funroll-loops -ftree-vectorize -fomit-frame-pointer
 )
-target_link_libraries(ggql_storage PUBLIC ggql_core sdsl libsais tbb gomp pthread)
+target_link_libraries(ggql_storage PUBLIC ggql_core sdsl gbwt libsais tbb gomp pthread)
 
 # ── Camada 2 — ggql_ingest (parser GFA; depende de Storage) ──────────────────
 add_library(ggql_ingest STATIC
