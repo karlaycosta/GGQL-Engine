@@ -20,8 +20,10 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -39,23 +41,43 @@ class MemoryMonitor {
             while (!st.stop_requested()) {
                 const size_t current = get_current_rss_kb();
                 size_t m = peak_.load(std::memory_order_relaxed);
-                while (current > m && !peak_.compare_exchange_strong(m, current)) {
+                while (current > m && !peak_.compare_exchange_strong(
+                                          m, current,
+                                          std::memory_order_release,
+                                          std::memory_order_relaxed)) {
                 }
-                std::this_thread::sleep_for(interval);
+                // Sleep interruptible: condition_variable_any::wait_for com
+                // stop_token (C++20) acorda imediatamente em request_stop().
+                // Sem isto, stop() bloquearia até interval (até 100 ms).
+                // Predicate sempre-false: sem condição custom de break early
+                // — apenas timeout, stop_token ou notify acordam o wait.
+                std::unique_lock lk{wake_mtx_};
+                wake_cv_.wait_for(lk, st, interval, [] { return false; });
             }
         });
     }
 
-    ~MemoryMonitor() { stop(); }
+    // Suprime exceções de join() patológico (deadlock OS-level) — destrutor
+    // não pode lançar. Match com pattern de ~SpinnerCtx em console.cpp.
+    ~MemoryMonitor() {
+        try {
+            stop();
+        } catch (...) {
+            // Suprime — não pode lançar em destrutor.
+        }
+    }
 
     void stop() {
         worker_.request_stop();
+        wake_cv_.notify_one(); // defensivo: 1 worker espera no CV
         if (worker_.joinable()) {
             worker_.join();
         }
     }
 
-    [[nodiscard]] size_t peak_kb() const noexcept { return peak_.load(); }
+    [[nodiscard]] size_t peak_kb() const noexcept {
+        return peak_.load(std::memory_order_acquire);
+    }
 
     MemoryMonitor(const MemoryMonitor&) = delete;
     MemoryMonitor& operator=(const MemoryMonitor&) = delete;
@@ -78,6 +100,8 @@ class MemoryMonitor {
     }
 
     std::atomic<size_t> peak_{0};
+    std::mutex wake_mtx_;
+    std::condition_variable_any wake_cv_;
     std::jthread worker_;
 };
 

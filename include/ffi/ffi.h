@@ -46,7 +46,7 @@ typedef struct {
 // precisar reter (ex.: Flutter converte via toDartString() imediatamente).
 
 typedef enum {
-    GGQL_EV_PHASE_START = 1, // text = título; phase_number >= 0
+    GGQL_EV_PHASE_START = 1, // text = título; phase_number >= 0 ou -1 quando ausente
     GGQL_EV_PHASE_END   = 2, // sem campos
     GGQL_EV_STEP_OK     = 3, // text = label; detail = rhs (pode ser NULL)
     GGQL_EV_STEP_FAIL   = 4, // text = label; detail = rhs (pode ser NULL)
@@ -59,7 +59,7 @@ typedef enum {
 
 typedef struct {
     int32_t kind;          // GgqlEventKind
-    int32_t phase_number;  // Só PhaseStart; 0 quando ausente.
+    int32_t phase_number;  // Só PhaseStart; -1 quando ausente, >= 0 caso contrário.
     const char* text;      // Label/título. NULL se não se aplica.
     const char* detail;    // rhs/unidade. NULL se não se aplica.
     double percent;        // Só Progress (0..100).

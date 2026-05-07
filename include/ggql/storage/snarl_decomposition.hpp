@@ -1,32 +1,23 @@
 #pragma once
 
-// snarl_decomposition.hpp — Decomposição de snarls (Paten et al. 2018).
+// snarl_decomposition.hpp — Detecção de snarls (port nativo do algoritmo Billi).
 //
-// Substitui find_snarls_streaming (cactus_finder.hpp) que era restrito a
-// snarls que envolvem bridges 3-aresta-conectados. A implementação aqui
-// segue o framework de Paten 2018 ("Superbubbles, Ultrabubbles, and
-// Cacti", J. Comp. Bio. 25(7)) generalizando o algoritmo Onodera 2013.
+// Implementação única: port literal de at-cg/billi (Bhat/Mahajan/Jain 2025),
+// adaptado da pipeline run_decompose() para operar diretamente sobre nossa
+// GfaCsrTopology (sem reler GFA). Resultado idêntico ao binário Billi
+// (paridade 21/21 nos testes oficiais).
 //
 // API:
 //   std::vector<SnarlRecord> find_all_snarls(
 //       const GfaCsrTopology& topo,
 //       int num_threads = 1);
 //
-// Diferença vs find_snarls_streaming (cactus):
-//   - Cactus puro: ~0% de cobertura em grafos densos (metaFlye Zymo: 0/44).
-//   - Paten 2018:  cobertura completa de boundary pairs (alvo: 44/44).
-//
-// Implementação em fases (pendência interna do projeto, não da API):
-//   Fase 1 (atual): Onodera 2013 estendido — detecta superbubbles canônicas
-//                   (DAG entre source e sink) com SnarlRecord populado.
-//                   Cobertura ~30% do vg em datasets densos.
-//   Fase 2:         + 2-edge-biconnected components no bidirected graph.
-//                   Detecta snarls não-DAG e aninhados. Cobertura ~70-90%.
-//   Fase 3:         + chains + snarl tree completa. Paridade com vg.
+// Pipeline interna: biedged graph → compaction → tip identification →
+// SESE (Single-Entry-Single-Exit) → hairpin detection → mark_nodes
+// validation → SnarlRecord output.
 
 #include "ggql/storage/topology_types.hpp"
 
-#include <cstdint>
 #include <vector>
 
 namespace ggql {
@@ -35,58 +26,29 @@ class GfaCsrTopology; // fwd decl
 
 namespace snarl_decomposition {
 
-// Retorna todos os snarls do grafo seguindo Paten 2018 (Onodera estendido
-// na Fase 1). Resultado equivalente a find_snarls_streaming + boundary
-// pairs adicionais detectados em sub-regiões 3-edge-connected.
+// PORT LITERAL do algoritmo Billi (at-cg/billi, Bhat/Mahajan/Jain 2025).
+// Resultado idêntico ao binário Billi (paridade 21/21 testes oficiais).
 //
 // Os SnarlRecord retornados têm:
-//   source              — ID do nó-source (in_dag > 0, out_dag >= 2 inter-SCC)
-//   sink                — ID do nó-sink (todos paths de source convergem aqui)
-//   branch_count        — out_degree(source) inter-SCC, capado em 255
-//   internal_node_count — # de nós no subgrafo entre source e sink
-//   has_cycles          — 1 se algum nó interno está em SCC não-trivial
+//   source              — ID do nó-boundary menor (panbubble ou hairpin)
+//   sink                — ID do nó-boundary maior
+//   branch_count        — sempre 2 (boundary pair)
+//   internal_node_count — sempre 0 (não populado neste port)
+//   has_cycles          — 1 para hairpins, 0 para panbubbles canônicas
 //
-// Single-threaded por ora (paralelização vem na Fase 2).
-std::vector<SnarlRecord> find_all_snarls(const GfaCsrTopology& topo,
-                                         int num_threads = 1);
-
-// Variante alinhada ao algoritmo vg `IntegratedSnarlFinder` (em construção).
-// Implementa cycles_in_cactus + bridge forest + decomposição recursiva.
-// Retorna SnarlRecord para compat de API.
-// Stub atual — preenchido em chunks incrementais.
-std::vector<SnarlRecord> find_all_snarls_vgstyle(const GfaCsrTopology& topo,
-                                                  int num_threads = 1);
-
-// Variante baseada em algoritmo SESE (Single-Entry-Single-Exit) do Billi
-// (at-cg/billi, Bhat/Mahajan/Jain 2025). Adaptação de Johnson 1994 para
-// bidirected graphs. Linear time O(N+E), 15× mais rápido que vg em
-// panbubble detection segundo paper.
+// Otimizações aplicadas sobre o port original:
+//   - DFS iterativo em todas as 7 funções (dfs_comp, dfs_depth,
+//     sese_minbracket, sese, hairp, dfs_nesting, mark_nodes) —
+//     sem stack overflow em grafos com cadeias > 100K nós
+//   - Pool allocators (std::deque) para Edge e BracketList —
+//     ponteiros estáveis, zero leaks, destruição O(1) em batch
+//   - vector<uint8_t> em vez de vector<bool> para mark/is_bridge
+//   - unordered_map com hash rápido para canonical_sese e bracket tracking
+//   - const auto& em todos os range-for sobre adjacências
+//   - Proteção contra loops infinitos em mark_nodes (visit_order guard)
 //
-// Versão minimal: sem hairpins, sem dual edges. Detecta SESE regions
-// via cycle equivalence (top_bracket, size). API compatível com SnarlRecord.
-std::vector<SnarlRecord> find_all_snarls_sese(const GfaCsrTopology& topo,
-                                               int num_threads = 1);
-
-// PORT LITERAL do algoritmo Billi (at-cg/billi, Bhat/Mahajan/Jain 2025).
-// Adaptação direta da pipeline run_decompose() do Billi para nossa stack:
-// build biedged → compact → tips → SESE → hairp → mark_nodes → output.
-// Resultado pretende ser idêntico ao binário Billi.
-std::vector<SnarlRecord> find_all_snarls_billi_port(const GfaCsrTopology& topo,
-                                                     int num_threads = 1);
-
-// Wrapper que invoca o binário Billi (at-cg/billi) como subprocess.
-// Garante por construção: resultado IDÊNTICO ao Billi de referência.
-//
-// Pré-requisito: binário Billi acessível via GGQL_BILLI_PATH (env var)
-// ou em /tmp/billi/billi como fallback. Compile o Billi com:
-//   cd /tmp && git clone https://github.com/at-cg/billi.git
-//   cd billi && sed -i 's|-I ~/include|-I src/include|' makefile && make
-//
-// Usage:
-//   auto snarls = find_all_snarls_billi(topology);
-//   // snarls = exatamente o que `billi decompose` reportaria.
-std::vector<SnarlRecord> find_all_snarls_billi(const GfaCsrTopology& topo,
-                                                int num_threads = 1);
+// Single-threaded por ora (num_threads reservado para uso futuro).
+std::vector<SnarlRecord> find_all_snarls(const GfaCsrTopology& topo, int num_threads = 1);
 
 } // namespace snarl_decomposition
 } // namespace ggql

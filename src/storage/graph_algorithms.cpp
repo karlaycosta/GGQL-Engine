@@ -4,7 +4,9 @@
 #include "ggql/storage/topology.hpp"
 
 #include "ggql/cli/console.hpp"
-#include "ggql/util/memory_monitor.hpp"
+#include "ggql/gbwt/node_buffer.hpp"
+#include "ggql/gbwt/path_storage.hpp"
+#include "ggql/gbwt/types.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -12,7 +14,6 @@
 #include <cstdint>
 #include <cstring> // strerror
 #include <fmt/core.h>
-#include <gbwt/dynamic_gbwt.h> // text_buffer_type, ENDMARKER
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -23,14 +24,6 @@
 #endif
 
 namespace ggql {
-
-namespace {
-// MemoryMonitor + available_ram_kb consolidados em
-// include/ggql/util/memory_monitor.hpp para evitar duplicação com
-// path_index.cpp.
-using ggql::util::MemoryMonitor;
-using ggql::util::available_ram_kb;
-} // namespace
 
 std::vector<Bubble> GfaCsrTopology::find_bubbles(int num_threads) const {
     if (num_nodes_ == 0) {
@@ -510,7 +503,7 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
 
     std::vector<bool>                                    output_is_disk(target_n, false);
     std::vector<std::string>                             comp_tmp(target_n);
-    std::vector<std::unique_ptr<gbwt::text_buffer_type>> comp_buf(target_n);
+    std::vector<std::unique_ptr<ggql::NodeBuffer>>       comp_buf(target_n);
 
     // B2: contador atômico estático garante unicidade entre chamadas
     // múltiplas na mesma instância (uintptr_t do `this` sozinho colidiria).
@@ -519,20 +512,20 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
     const uint64_t seq = call_seq.fetch_add(1, std::memory_order_relaxed);
 
     // Garante buffer de disco para o componente c; drena in_ram_seqs acumuladas.
-    const auto ensure_disk_buf = [&](size_t c) -> gbwt::text_buffer_type& {
+    const auto ensure_disk_buf = [&](size_t c) -> ggql::NodeBuffer& {
         if (!comp_buf[c]) {
             comp_tmp[c] = data_dir + "/gbwt_comp_" + std::to_string(c) + "_" +
                           std::to_string(reinterpret_cast<uintptr_t>(this)) + "_" +
                           std::to_string(seq) + ".tmp";
-            comp_buf[c] = std::make_unique<gbwt::text_buffer_type>(comp_tmp[c], std::ios::out,
-                                                                    64u << 20, node_width);
+            comp_buf[c] = std::make_unique<ggql::NodeBuffer>(comp_tmp[c], std::ios::out,
+                                                              64u << 20, node_width);
             output_is_disk[c] = true;
             // Drena sequências in-RAM já acumuladas para este componente
             for (const auto& seq : out[c].in_ram_seqs) {
                 for (auto v : seq) {
                     comp_buf[c]->push_back(v);
                 }
-                comp_buf[c]->push_back(gbwt::ENDMARKER);
+                comp_buf[c]->push_back(ggql::kEndmarker);
             }
             out[c].in_ram_seqs.clear();
             out[c].in_ram_seqs.shrink_to_fit();
@@ -541,9 +534,9 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
     };
 
     // Devolve comp_id do path a partir do primeiro nó válido
-    const auto path_comp = [&](const gbwt::vector_type& seq) -> size_t {
+    const auto path_comp = [&](const ggql::gbwt::vector_type& seq) -> size_t {
         for (auto enc : seq) {
-            if (enc != gbwt::ENDMARKER) {
+            if (enc != ggql::kEndmarker) {
                 const uint64_t nid = gbwt_decode_node(static_cast<uint64_t>(enc));
                 if (nid < node_component.size()) {
                     return std::min<size_t>(node_component[nid], target_n - 1);
@@ -562,7 +555,7 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
                     for (auto v : g.in_ram_seqs[si]) {
                         buf.push_back(v);
                     }
-                    buf.push_back(gbwt::ENDMARKER);
+                    buf.push_back(ggql::kEndmarker);
                 } else {
                     out[c].in_ram_seqs.push_back(std::move(g.in_ram_seqs[si]));
                 }
@@ -571,20 +564,20 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
                 }
             }
         } else if (!g.tmp_path.empty()) {
-            gbwt::text_buffer_type in_buf(g.tmp_path, std::ios::in, 64u << 20, node_width);
-            gbwt::vector_type cur;
+            ggql::NodeBuffer in_buf(g.tmp_path, std::ios::in, 64u << 20, node_width);
+            ggql::gbwt::vector_type cur;
             cur.reserve(1u << 16);
             size_t pidx = 0;
 
-            for (gbwt::size_type val : in_buf) {
-                if (val == gbwt::ENDMARKER) {
+            for (std::uint64_t val : in_buf) {
+                if (val == ggql::kEndmarker) {
                     if (!cur.empty()) {
                         const size_t c = path_comp(cur);
                         auto& buf = ensure_disk_buf(c);
                         for (auto v : cur) {
                             buf.push_back(v);
                         }
-                        buf.push_back(gbwt::ENDMARKER);
+                        buf.push_back(ggql::kEndmarker);
                         if (pidx < g.path_names.size()) {
                             out[c].path_names.push_back(std::move(g.path_names[pidx]));
                         }
@@ -602,7 +595,7 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
                 for (auto v : cur) {
                     buf.push_back(v);
                 }
-                buf.push_back(gbwt::ENDMARKER);
+                buf.push_back(ggql::kEndmarker);
                 if (pidx < g.path_names.size()) {
                     out[c].path_names.push_back(std::move(g.path_names[pidx]));
                 }
@@ -633,20 +626,18 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
 
 // ── path_nodes ────────────────────────────────────────────────────────────────
 //
-// Extrai a sequência de IDs internos de nós de um path via gBWT.
-// O gBWT armazena cada nó com encoding gbwt_encode_node (shift +1 para
-// reservar valor 0 a ENDMARKER). Decodificamos com gbwt_decode_node.
-//
-// B7: gbwts_ e gbwt_offsets_ devem ter tamanhos consistentes
-// (gbwts_.size() == gbwt_offsets_.size() em uso normal).
-// O cache load valida; mismatch só ocorre se alguém mexer manualmente.
+// Extrai a sequência de IDs internos de nós (sem bit de orientação) na ordem
+// do path. Dispatch direto para PathStorage::extract_into — memcpy do range
+// [offsets[i], offsets[i+1]) do shard correspondente. O encoding +1/orient
+// é desfeito no momento do build (build_path_storage_parallel decodifica
+// antes de armazenar), então o caller recebe IDs internos prontos.
 
 // P2: overload com out-param para reusar buffer entre chamadas.
 // Evita malloc por chamada — relevante em build_path_stats (loop de N paths).
 void GfaCsrTopology::path_nodes(size_t global_path_id,
                                  std::vector<uint64_t>& out) const {
     out.clear();
-    if (gbwts_.empty() || gbwt_offsets_.empty() ||
+    if (path_stores_.empty() || gbwt_offsets_.empty() ||
         global_path_id >= path_names_.size()) {
         return;
     }
@@ -660,16 +651,10 @@ void GfaCsrTopology::path_nodes(size_t global_path_id,
     const size_t shard    = static_cast<size_t>(std::distance(gbwt_offsets_.begin(), it));
     const size_t local_id = global_path_id - *it;
 
-    if (shard >= gbwts_.size() || !gbwts_[shard]) { return; }
-    if (local_id >= static_cast<size_t>(gbwts_[shard]->sequences())) { return; }
+    if (shard >= path_stores_.size() || !path_stores_[shard]) { return; }
+    if (local_id >= path_stores_[shard]->num_paths()) { return; }
 
-    const auto seq = gbwts_[shard]->extract(static_cast<gbwt::size_type>(local_id));
-
-    out.reserve(seq.size());
-    for (const auto enc : seq) {
-        if (enc == gbwt::ENDMARKER) { continue; }
-        out.push_back(gbwt_decode_node(static_cast<uint64_t>(enc)));
-    }
+    path_stores_[shard]->extract_into(local_id, out);
 }
 
 // Wrapper conveniente que aloca o vetor por chamada — preservado para callers

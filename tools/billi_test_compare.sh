@@ -10,16 +10,18 @@ BILLI="${1:-/tmp/billi/billi}"
 TESTDIR="${2:-/tmp/billi/test_files}"
 GGQL="$(dirname "$0")/.."
 BENCH="$GGQL/build/bench_gbwt"
-BVS="$GGQL/build/bubble_vs_snarl"
+BENCH_PORT="$GGQL/build/bench_snarl"
 
 if [[ ! -x "$BILLI" ]]; then
     echo "Billi não encontrado em $BILLI" >&2
     exit 1
 fi
 
-printf "%-40s %-13s %-7s %-7s %-9s %-9s %s\n" "test" "billi(BB+HP)" "paten" "sese" "vgstyle" "wrapper" "port"
-printf "%-40s %-13s %-7s %-7s %-9s %-9s %s\n" "----" "-------------" "-----" "----" "-------" "-------" "-----"
+printf "%-40s %-13s %s\n" "test" "billi(BB+HP)" "port"
+printf "%-40s %-13s %s\n" "----" "-------------" "-----"
 
+pass=0
+fail=0
 for gfa in $(find "$TESTDIR" -name "*.gfa" | sort); do
     name="$(basename "$gfa" .gfa)"
     cat="$(basename "$(dirname "$gfa")")"
@@ -32,22 +34,25 @@ for gfa in $(find "$TESTDIR" -name "*.gfa" | sort); do
     billi_total=$((bb + hp))
 
     # Ingest com GGQL (perfil assembly = topology + snarls; sem gBWT/FM-Index)
-    idx="/tmp/billi_ggql/${name}.idx"
-    rm -rf "$idx"
+    rm -rf "${gfa}.idx"
     "$BENCH" "$gfa" 1 0 -q --profile assembly --threads 1 >/dev/null 2>&1
     real_idx="${gfa}.idx"
     if [[ ! -d "$real_idx" ]]; then
         printf "%-40s %-12s [ingest fail]\n" "$label" "${billi_total}(${bb}/${hp})"
+        ((fail++))
         continue
     fi
 
-    # Roda nossas 5 implementações via bubble_vs_snarl
-    bvs_out=$(GGQL_BILLI_PATH="$BILLI" "$BVS" "$real_idx" 2>&1)
-    paten=$(echo "$bvs_out" | grep -oP "F1\+F2\): +\K\d+")
-    sese=$(echo "$bvs_out" | grep -oP "Billi/SESE\): +\K\d+")
-    vgstyle=$(echo "$bvs_out" | grep -oP "vgstyle, refactor\): +\K\d+")
-    wrapper=$(echo "$bvs_out" | grep -oP "billi, wrapper\): +\K\d+")
-    port=$(echo "$bvs_out" | grep -oP "billi_port, native\): +\K\d+")
+    bench_out=$("$BENCH_PORT" "$real_idx" 1 2>&1)
+    port=$(echo "$bench_out" | grep -oP "snarls=\K\d+" | head -1)
+    port=${port:-0}
 
-    printf "%-40s %-13s %-7s %-7s %-9s %-9s %s\n" "$label" "${billi_total}(${bb}/${hp})" "${paten:-0}" "${sese:-0}" "${vgstyle:-0}" "${wrapper:-0}" "${port:-0}"
+    if [[ "$billi_total" == "$port" ]]; then
+        ((pass++))
+    else
+        ((fail++))
+    fi
+    printf "%-40s %-13s %s\n" "$label" "${billi_total}(${bb}/${hp})" "$port"
 done
+echo ""
+echo "paridade: $pass/$((pass+fail))"

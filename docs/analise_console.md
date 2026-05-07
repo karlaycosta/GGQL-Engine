@@ -15,7 +15,7 @@ Arquivo: `src/cli/console.cpp` (665 linhas)
 
 | Categoria | Encontrados | Críticos |
 |---|---:|---:|
-| Bugs / fragilidades | 3 | 1 (B1) |
+| Bugs / fragilidades | 3 | 1 (B1) — todos resolvidos |
 | Pontos de melhoria de performance | 1 | 0 |
 | Código morto | 0 | 0 |
 | Atributos C++23 / qualifiers | 1 | 0 |
@@ -260,9 +260,9 @@ Manter como referência para futuras adições.
 | 2 | B2 — Try/catch em `~SpinnerCtx()` ao redor de `join()` | bug | mínimo | ✅ aplicado |
 | 3 | A1 — Padronizar `g_is_phase.store(false, release)` | consistência | mínimo | ✅ aplicado |
 | 4 | P1 — `condition_variable_any` → `condition_variable` | cleanup | mínimo | ✅ aplicado |
-| 5 | B3 — Combinar cb+user_data em struct atomic | API | médio | future work |
+| 5 | B3 — Combinar cb+user_data em struct atomic | API | médio | ✅ aplicado |
 
-### Itens 1-4 aplicados (2026-05-05)
+### Itens 1-5 aplicados (2026-05-05)
 
 **B1** — `SpinnerCtx::stop()` agora seta `g_in_progress=false` antes
 de `notify_all + join`. Garante que a thread sai do loop na próxima
@@ -283,9 +283,62 @@ A versão `_any` aceita qualquer Lockable; como `wake_mtx` é
 `std::mutex` e `wait_for` usa `unique_lock`, a versão simples basta
 e é mais leve (sem virtual call).
 
+**B3** — TOCTOU entre `cb` e `user_data` eliminada via **sequence
+lock (seqlock)**: contador `g_event_seq` (par = estável, ímpar =
+writer ativo) cerca os dois `std::atomic<>` de 8 bytes. `dispatch`
+lê seq → loads relaxed de cb/user → fence acquire → relê seq;
+retry se mudou ou era ímpar. Writers (`set`/`clear`) incrementam
+seq antes e depois dos stores.
+
+Tentativa anterior usando `std::atomic<CallbackEntry>` (struct de
+16 bytes com `alignas(16)`) foi descartada: requer `libatomic`
+(`__atomic_load_16`) cuja implementação usa hash de mutexes globais
+— "atomic" só no nome, mais lento que a versão original. Seqlock
+mantém todos os atomics em 8 bytes (lock-free nativo no x86_64),
+sem dependências externas.
+
+Custo: dispatch passa de 2 para 3 atomic loads + 1 fence no caminho
+feliz; sem retry quando não há writer concorrente (caso da operação
+normal — callback FFI setado uma vez no startup).
+
 17/17 testes passando.
 
-**Auditoria do `console.cpp` 100% concluída.**
+---
+
+## Reanálise pós-aplicação (2026-05-06)
+
+Segunda rodada de auditoria após B1–B3 + P1 + A1 aplicados encontrou
+itens residuais — todos triviais, predominantemente cleanup.
+
+### Itens 6-11 aplicados
+
+| # | Item | Tipo | Status |
+|---|---|---|---|
+| 6 | M1 — Remover `g_stop_spin` (atomic morto) | dead code | ✅ |
+| 7 | M2 — Remover `GLYPH_PHASE` (apenas `GLYPH_PHASE_DONE` é usado) | dead code | ✅ |
+| 8 | B4 — Refatorar loop `dispatch`: eliminar UB de leitura de `s2` não-inicializado quando `seq` é ímpar (`do-while` → `while(true)+break`) + `std::this_thread::yield()` no caminho do writer ativo | bug | ✅ |
+| 9 | C1 — `g_in_progress.store(true, release)` em `step_progress` (era `relaxed`, inconsistente com demais stores do arquivo) | consistência | ✅ |
+| 10 | I1 — Adicionar `#include <array>` explícito | estilo | ✅ |
+| 11 | P2 — `format_count` em uma alocação (era 3: `fmt::format` + `out.reserve` + reverso) | performance | ✅ |
+
+### Confirmados em estado bom (nada a mexer)
+
+- **`[[nodiscard]]`** — todos os getters cobertos.
+- **`noexcept`** — aplicado consistentemente onde lança não é possível
+  ou indesejado. Funções com `fmt::print` cuja saída pode falhar
+  ficam não-noexcept conscientemente.
+- **`const`** — parâmetros e locais qualificados onde aplicável.
+- **C++23 features avaliadas e descartadas em segunda rodada:**
+  - `[[assume]]` em `make_bar` para guarantee de range — overkill UI.
+  - `std::ranges` em loops curtos — sem ganho.
+  - Deducing `this` — sem método de classe que se beneficie.
+  - `std::print`/`std::println` — fmt já é dep consolidada.
+  - `std::stop_token` + `std::jthread` — API atual `start_spinner`/
+    `stop_spinner` é coesa; refator perde mais que ganha.
+
+17/17 testes passando após reanálise.
+
+**Auditoria do `console.cpp` 100% concluída — 11 itens aplicados.**
 
 ---
 

@@ -5,6 +5,7 @@
 #include "ggql/utils.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -28,7 +29,6 @@ std::atomic<bool> g_quiet{false};
 std::atomic<bool> g_in_progress{false};
 std::atomic<bool> g_is_phase{false};
 std::atomic<bool> g_is_step{false};
-std::atomic<bool> g_stop_spin{false};
 
 // Serializa escritas concorrentes de step_progress (threads OpenMP).
 // try_lock descarta updates extras — a display converge no próximo update.
@@ -52,7 +52,6 @@ std::mutex g_progress_mutex;
 
 // ─── Glifos ──────────────────────────────────────────────────────────────────
 
-constexpr std::string_view GLYPH_PHASE = "○";
 constexpr std::string_view GLYPH_PHASE_DONE = "●";
 constexpr std::string_view GLYPH_BAR = "│";
 constexpr std::string_view GLYPH_END = "└─";
@@ -279,12 +278,35 @@ constexpr int BAR_WIDTH = 18;
 
 // ─── Event dispatcher ────────────────────────────────────────────────────────
 
+// Sequence lock (seqlock) sobre (cb, user_data) — elimina TOCTOU entre os
+// dois ponteiros sem exigir atomic de 16 bytes (libatomic). g_event_seq
+// é par quando o par está estável e ímpar enquanto um writer modifica.
+// Leitor confere seq antes/depois dos loads e refaz se mudou ou era ímpar.
+std::atomic<unsigned> g_event_seq{0};
 std::atomic<EventCallback> g_event_cb{nullptr};
 std::atomic<void*> g_event_user{nullptr};
 
-void dispatch(const Event& ev) {
-    if (auto* cb = g_event_cb.load(std::memory_order_acquire); cb != nullptr) {
-        cb(ev, g_event_user.load(std::memory_order_acquire));
+// noexcept: todas as operações (atomic loads/fence, this_thread::yield, e
+// o callback via typedef noexcept após B2) são noexcept. Documenta o
+// contrato e permite chamada de contextos noexcept.
+void dispatch(const Event& ev) noexcept {
+    EventCallback cb = nullptr;
+    void* user = nullptr;
+    while (true) {
+        const unsigned s1 = g_event_seq.load(std::memory_order_acquire);
+        if ((s1 & 1u) != 0u) {
+            std::this_thread::yield(); // writer ativo — cede tempo de CPU
+            continue;
+        }
+        cb = g_event_cb.load(std::memory_order_relaxed);
+        user = g_event_user.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (s1 == g_event_seq.load(std::memory_order_relaxed)) {
+            break;
+        }
+    }
+    if (cb != nullptr) {
+        cb(ev, user);
     }
 }
 
@@ -412,7 +434,7 @@ void phase(int number, std::string_view title) {
 }
 
 void phase(std::string_view title) {
-    if (is_quiet()) { dispatch(ev_phase(0, title)); return; }
+    if (is_quiet()) { dispatch(ev_phase(-1, title)); return; }
     stop_spinner();
     maybe_end_progress();
 
@@ -423,7 +445,7 @@ void phase(std::string_view title) {
     } else {
         fmt::print(stderr, "● {}...\n", title);
     }
-    dispatch(ev_phase(0, title));
+    dispatch(ev_phase(-1, title));
 }
 
 void phase_end() {
@@ -574,7 +596,7 @@ void step_progress(std::string_view phase, double percent, double eta_s, double 
             }
             fmt::print(stderr, "\033[K");
             std::fflush(stderr);
-            g_in_progress.store(true, std::memory_order_relaxed);
+            g_in_progress.store(true, std::memory_order_release);
         }
     }
     dispatch(ev_progress(phase, percent, eta_s, rate_mbs, rate_unit));
@@ -646,30 +668,34 @@ void kv_number(std::string_view label, double value, std::string_view unit) {
 // ─── Event callback register ─────────────────────────────────────────────────
 
 void set_event_callback(EventCallback cb, void* user_data) noexcept {
-    g_event_user.store(user_data, std::memory_order_release);
-    g_event_cb.store(cb, std::memory_order_release);
+    g_event_seq.fetch_add(1, std::memory_order_relaxed); // par→ímpar (writer ativo)
+    std::atomic_thread_fence(std::memory_order_release);
+    g_event_cb.store(cb, std::memory_order_relaxed);
+    g_event_user.store(user_data, std::memory_order_relaxed);
+    g_event_seq.fetch_add(1, std::memory_order_release); // ímpar→par
 }
 
 void clear_event_callback() noexcept {
-    g_event_cb.store(nullptr, std::memory_order_release);
-    g_event_user.store(nullptr, std::memory_order_release);
+    g_event_seq.fetch_add(1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    g_event_cb.store(nullptr, std::memory_order_relaxed);
+    g_event_user.store(nullptr, std::memory_order_relaxed);
+    g_event_seq.fetch_add(1, std::memory_order_release);
 }
 
 // ─── Formatadores ────────────────────────────────────────────────────────────
 
 std::string format_count(std::size_t n) {
-    auto raw = fmt::format("{}", n);
+    const auto raw = fmt::format("{}", n);
+    const std::size_t first = ((raw.size() - 1) % 3) + 1;
     std::string out;
-    out.reserve(raw.size() + raw.size() / 3);
-    int from_right = 0;
-    for (auto it = raw.rbegin(); it != raw.rend(); ++it) {
-        if (from_right != 0 && from_right % 3 == 0) {
-            out.push_back('.');
-        }
-        out.push_back(*it);
-        ++from_right;
+    out.reserve(raw.size() + (raw.size() - 1) / 3);
+    out.append(raw, 0, first);
+    for (std::size_t i = first; i < raw.size(); i += 3) {
+        out.push_back('.');
+        out.append(raw, i, 3);
     }
-    return std::string{out.rbegin(), out.rend()};
+    return out;
 }
 
 } // namespace ggql::cli

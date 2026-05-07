@@ -25,22 +25,24 @@
 //   offsets_cache ≈ 680 MB  LAZY — alocado só na 1ª chamada a find_bubbles
 //
 // ═══════════════════════════════════════════════════════════════════════════
-// CAMADA 2 — gBWT  ("o mapa dos haplótipos")
+// CAMADA 2 — PathStorage  ("o mapa dos haplótipos")
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Indexa paths/haplótipos com o GBWT (r-index, Sirén 2020).
-// Construção incremental path-a-path; espaço O(r) onde r = runs BWT.
+// Indexa paths/haplótipos com PathStorage (CSR-like custom; Fase 6).
+// Construção sequencial path-a-path por shard; layout `int_vector<W>` +
+// `sd_vector` para offsets. Substitui o gBWT comprimido — extração
+// é memcpy direto, sem LF-mapping.
 //
 // API de paths:
 //   path_count()                         — número de paths indexados
 //   path_name(path_id)                   — nome do path
-//   build_path_index_parallel(groups,w,t)— construção paralela do índice
+//   build_path_storage_parallel(g,w,t)   — construção paralela do índice
 //
 // ═══════════════════════════════════════════════════════════════════════════
 // NOTA DE COMPILAÇÃO
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// As implementações pesadas (find_bubbles, build_path_index_parallel,
+// As implementações pesadas (find_bubbles, build_path_storage_parallel,
 // repartition_groups_topological, make_component_remap, remap_node_ids,
 // radix_sort_by_from, build_csr, ensure_offsets_cache)
 // estão em src/storage/gfa_topology.cpp e são compiladas UMA ÚNICA VEZ
@@ -49,6 +51,7 @@
 //   • Métodos inline triviais (< 5 LOC, hot paths de benchmark)
 //   • find_tips e find_repeats (inline por performance — hot paths medidos)
 
+#include "ggql/gbwt/path_storage.hpp"
 #include "ggql/ingest/gbwt_group.hpp"
 #include "ggql/storage/topology_types.hpp"
 
@@ -69,11 +72,10 @@
 #include <sdsl/int_vector_buffer.hpp>
 #include <sdsl/sd_vector.hpp>
 
-// libgbwt — gbwt::GBWT precisa de tipo completo para unique_ptr destrutor.
-// gbwt/utils.h é leve (sem algoritmos): fornece gbwt::vector_type, node_type e ENDMARKER.
-// Os headers pesados (algorithms.h, dynamic_gbwt.h) são incluídos APENAS no .cpp.
-#include <gbwt/gbwt.h>
-#include <gbwt/utils.h>
+// Tipos do subsistema interno de paths (vector_type / node_type / ENDMARKER).
+// Usados em GbwtGroups e em repartition_groups_topological. Substitui a
+// dependência de <gbwt/utils.h> (Fase 6 — onda 3).
+#include "ggql/gbwt/types.hpp"
 
 // ── Garante C++23 em tempo de compilação ────────────────────────────────────
 static_assert(__cplusplus >= 202302L, "topology.hpp requer C++23 — compile com -std=c++23.");
@@ -84,8 +86,8 @@ class GfaCsrTopology {
   public:
     GfaCsrTopology() = default;
 
-    // Destrutor declarado aqui; definido no .cpp onde gbwt::GBWT é completo.
-    // (O compilador precisa do destrutor de gbwt::GBWT para destruir unique_ptr<GBWT>.)
+    // Destrutor declarado aqui; definido no .cpp onde PathStorage é completo
+    // (necessário para destruir unique_ptr<PathStorage>).
     ~GfaCsrTopology();
 
     // Sem cópia — contém unique_ptr e recursos grandes
@@ -358,12 +360,16 @@ class GfaCsrTopology {
     // Implementação em graph_algorithms.cpp.
     [[nodiscard]] std::vector<Bubble> find_bubbles(int num_threads = 1) const;
 
-    // ── Camada 2 — Construção do índice gBWT ─────────────────────────────────
+    // ── Camada 2 — Construção do índice de paths ─────────────────────────────
 
-    // Constrói em paralelo a partir de N GbwtGroups.
-    [[nodiscard]] GbwtTimings build_path_index_parallel(std::vector<GbwtGroup> groups,
-                                                        uint8_t node_width,
-                                                        int num_threads = 1);
+    // Constrói path_stores_ em paralelo a partir de N GbwtGroups.
+    // Os valores nos GbwtGroups vêm no encoding gbwt-bound (shift+1 + bit de
+    // orientação) — o builder decodifica via `gbwt_decode_node` antes de
+    // armazenar. Resultado: cada shard é um PathStorage auto-contido, sem
+    // BWT intermediário ou LF-mapping.
+    [[nodiscard]] GbwtTimings build_path_storage_parallel(std::vector<GbwtGroup> groups,
+                                                           uint8_t node_width,
+                                                           int     num_threads = 1);
 
     // ── Consultas ao índice de paths (inline triviais) ────────────────────────
     [[nodiscard]] size_t path_count() const noexcept { return path_names_.size(); }
@@ -377,12 +383,16 @@ class GfaCsrTopology {
     }
 
     // Retorna IDs internos de nós (sem bit de orientação) na ordem do path.
-    // Retorna vetor vazio se path_id está fora do intervalo ou gBWT não disponível.
-    // Complexidade: O(L) onde L = número de nós no path.
+    // Retorna vetor vazio se path_id está fora do intervalo ou índice não
+    // disponível. Complexidade: O(L) onde L = número de nós no path.
     [[nodiscard]] std::vector<uint64_t> path_nodes(size_t path_id) const;
     // Overload com out-param: reusa buffer entre chamadas. Preferir em hot
     // loops (build_path_stats, etc.) para evitar malloc por chamada.
     void path_nodes(size_t path_id, std::vector<uint64_t>& out) const;
+
+    [[nodiscard]] bool has_path_storage_backend() const noexcept {
+        return !path_stores_.empty();
+    }
 
     // ── Cache de estatísticas de path (node_count + bp_length) ───────────────
     //
@@ -394,9 +404,9 @@ class GfaCsrTopology {
     // set_path_stats() com stats pré-computados das sequências em RAM.
     void build_path_stats(std::span<const uint32_t> lengths);
 
-    // Atribui stats pré-computados diretamente, sem traversal GBWT.
+    // Atribui stats pré-computados diretamente, sem traversal do índice.
     // Chamado pelo ingestor quando as sequências ainda estão em RAM
-    // (antes de build_path_index_parallel consumir os GbwtGroups).
+    // (antes de build_path_storage_parallel consumir os GbwtGroups).
     void set_path_stats(std::vector<uint32_t> nc, std::vector<int64_t> bp) noexcept {
         path_node_counts_ = std::move(nc);
         path_bp_lengths_  = std::move(bp);
@@ -431,14 +441,21 @@ class GfaCsrTopology {
     // Persiste apenas snarls.bin no diretório (sem reescrever os outros
     // arquivos de cache). Usado pelo upgrade incremental: quando o usuário
     // sobe de um perfil sem snarls (metagenomics/comparative) para um com
-    // snarls (assembly/pangenome), evita reescrever CSR/EF/gBWT já em disco.
+    // snarls (assembly/pangenome), evita reescrever CSR/EF/path_stores já em disco.
     void save_snarls_only(const std::string& dir) const;
 
-    // Persiste apenas gbwts.bin + path_stats.bin + offsets relacionados.
-    // Usado pelo upgrade incremental Fase 2 (metagenomics/assembly →
-    // comparative/pangenome): após reconstruir gBWT a partir de Pass2
-    // paths-only, grava só os arquivos do gBWT sem reescrever CSR/metadata.
-    void save_gbwt_only(const std::string& dir) const;
+    // Persiste apenas path_stores.bin + path_stats.bin + topology.bin
+    // (offsets/path_names atualizados). Usado pelo upgrade incremental
+    // Fase 2 (metagenomics/assembly → comparative/pangenome): após
+    // reconstruir o índice de paths a partir de Pass2 paths-only, grava
+    // só os arquivos relacionados sem reescrever CSR/metadata.
+    void save_path_index_only(const std::string& dir) const;
+
+    // Persiste apenas path_stores.bin no diretório, sem reescrever os outros
+    // arquivos do cache. Usado para upgrade incremental de caches antigos
+    // (gerados antes da migração PathStorage): após `load()` migrar gbwts.bin
+    // on-the-fly para `path_stores_`, este helper persiste o resultado.
+    void save_path_stores_only(const std::string& dir) const;
 
   private:
     // ── Threshold de paralelismo ─────────────────────────────────────────────
@@ -462,10 +479,12 @@ class GfaCsrTopology {
     mutable std::vector<uint32_t> offsets_cache_fwd_;
     mutable std::vector<uint32_t> offsets_cache_bwd_;
 
-    // ── Camada 2: gBWT ───────────────────────────────────────────────────────
-    std::vector<std::unique_ptr<gbwt::GBWT>> gbwts_;
-    std::vector<size_t> gbwt_offsets_;
-    std::vector<std::string> path_names_;
+    // ── Camada 2: PathStorage (1 shard por componente) ──────────────────────
+    // path_stores_[i] indexa paths localmente; gbwt_offsets_ mapeia
+    // global_path_id → (shard, local_id) via upper_bound.
+    std::vector<std::unique_ptr<PathStorage>> path_stores_;
+    std::vector<size_t>                       gbwt_offsets_;
+    std::vector<std::string>                  path_names_;
 
     // Cache de estatísticas de path (persistido em path_stats.bin)
     std::vector<uint32_t> path_node_counts_;
@@ -513,7 +532,7 @@ class GfaCsrTopology {
         return {ef_bwd_sel_(node + 1), ef_bwd_sel_(node + 2)};
     }
 
-    // Reconstrói gbwt_offsets_ após modificações em gbwts_.
+    // Reconstrói gbwt_offsets_ a partir de path_stores_.
     // Não noexcept: vector::resize pode lançar bad_alloc.
     void rebuild_offsets_();
 

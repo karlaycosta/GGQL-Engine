@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -87,7 +88,8 @@ void note(std::string_view text);
 
 // ─── Formatadores auxiliares ──────────────────────────────────────────────────
 // "4.294.760" — separador de milhar (estilo pt-BR: ponto).
-[[nodiscard]] std::string format_count(std::size_t n);
+[[nodiscard("string formatada deve ser usada (aloca)")]]
+std::string format_count(std::size_t n);
 
 // ─── Progresso dentro da fase atual ──────────────────────────────────────────
 // "│  … {phase}  {percent:5.1f}%  ETA {eta}s  {rate}"
@@ -106,8 +108,11 @@ void step_progress_finish() noexcept; // imprime \n no TTY (não emite evento)
 // concorrentemente. O consumidor é responsável por serializar se precisar.
 // As string_views do evento SÓ são válidas durante a chamada; copie se precisa
 // reter.
+//
+// O callback NÃO pode lançar exceções C++ — atravessar boundary FFI com
+// exceção é UB. O typedef abaixo enforça isso em compile-time via noexcept.
 
-enum class EventKind {
+enum class EventKind : std::int32_t {
     PhaseStart = 1,
     PhaseEnd   = 2,
     StepOk     = 3,
@@ -120,8 +125,10 @@ enum class EventKind {
 };
 
 struct Event {
-    EventKind kind;
-    int phase_number = 0;            // Só PhaseStart; 0 quando ausente.
+    // Sentinel defensivo: Event{} default-construído é tratado como Note vazio
+    // por consumers — evita UB de leitura de enum indeterminado.
+    EventKind kind = EventKind::Note;
+    std::int32_t phase_number = -1;  // Só PhaseStart; -1 quando ausente.
     std::string_view text;           // Label/título. Vazio se não se aplica.
     std::string_view detail;         // rhs/contexto. Vazio se não se aplica.
     double percent = 0.0;            // Só Progress.
@@ -129,7 +136,7 @@ struct Event {
     double rate_mbs = 0.0;           // Só Progress (valor bruto; rate_unit é em detail).
 };
 
-using EventCallback = void (*)(const Event& ev, void* user_data);
+using EventCallback = void (*)(const Event& ev, void* user_data) noexcept;
 
 void set_event_callback(EventCallback cb, void* user_data) noexcept;
 void clear_event_callback() noexcept;

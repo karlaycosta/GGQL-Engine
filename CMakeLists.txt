@@ -28,16 +28,14 @@ target_include_directories(pegtl INTERFACE
     ${CMAKE_SOURCE_DIR}/third_party/pegtl/include
 )
 
-# vgteam/sdsl-lite (fork com simple_sds.hpp — exigido pelo libgbwt)
-# Substitui o sdsl do sistema para todos os targets do projeto.
+# vgteam/sdsl-lite (fork com simple_sds.hpp — usado por PathStorage / int_vector
+# e int_vector_buffer). Substitui o sdsl do sistema para todos os targets.
 # Clone com: git submodule update --init third_party/sdsl-lite
 add_subdirectory(third_party/sdsl-cmake)
 
-# libgbwt (r-index / GBWT incremental — git submodule em third_party/gbwt)
-# Substitui sdsl::csa_wt + construct_im na Camada 2 da GfaCsrTopology.
-# Clone com: git submodule update --init third_party/gbwt
-add_subdirectory(third_party/gbwt)
-target_link_libraries(gbwt PRIVATE fmt::fmt)
+# libgbwt removida na Fase 6 onda 3 — substituída por PathStorage interno
+# (include/ggql/gbwt/, src/gbwt/path_storage.cpp). Caches gerados antes da
+# migração precisam ser regerados via `ggql ingest`.
 
 # libsais (criação ultra-rápida de Suffix Arrays paralela)
 set(LIBSAIS_USE_OPENMP ON CACHE BOOL "Use OpenMP for parallelization" FORCE)
@@ -68,22 +66,20 @@ target_compile_options(ggql_core PRIVATE
 )
 target_link_libraries(ggql_core PUBLIC fmt::fmt)
 
-# ── Camada 1 — ggql_storage (CSR + FM-Index + gBWT) ──────────────────────────
+# ── Camada 1 — ggql_storage (CSR + FM-Index + PathStorage) ───────────────────
 add_library(ggql_storage STATIC
     src/storage/csr_builder.cpp
     src/storage/graph_algorithms.cpp
     src/storage/path_index.cpp
     src/storage/fm_index.cpp
     src/storage/snarl_decomposition.cpp
-    src/storage/snarl_decomposition_vgstyle.cpp
-    src/storage/snarl_decomposition_sese.cpp
-    src/storage/snarl_decomposition_billi.cpp
-    src/storage/snarl_decomposition_billi_port.cpp
+    src/gbwt/path_storage.cpp
 )
 target_compile_options(ggql_storage PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
+    -funroll-loops -ftree-vectorize -fomit-frame-pointer
 )
-target_link_libraries(ggql_storage PUBLIC ggql_core sdsl gbwt libsais tbb gomp pthread)
+target_link_libraries(ggql_storage PUBLIC ggql_core sdsl libsais tbb gomp pthread)
 
 # ── Camada 2 — ggql_ingest (parser GFA; depende de Storage) ──────────────────
 add_library(ggql_ingest STATIC
@@ -126,6 +122,15 @@ target_compile_options(bench_gbwt PRIVATE
 target_link_options(bench_gbwt PRIVATE -flto=auto)
 target_link_libraries(bench_gbwt PRIVATE ggql_ingest)
 
+# bench_snarl — microbenchmark isolado do snarl_decomposition::find_all_snarls.
+add_executable(bench_snarl tools/bench_snarl.cpp)
+target_compile_options(bench_snarl PRIVATE
+    -O3 -march=native -fopenmp -fno-strict-aliasing
+    -funroll-loops -ftree-vectorize
+)
+target_link_options(bench_snarl PRIVATE -flto=auto)
+target_link_libraries(bench_snarl PRIVATE ggql_storage)
+
 # bench_metadata — isola tempo de load() e queries de GfaMetadataStore.
 add_executable(bench_metadata tools/bench_metadata.cpp)
 target_compile_options(bench_metadata PRIVATE
@@ -141,6 +146,14 @@ target_compile_options(bench_topology PRIVATE
 )
 target_link_options(bench_topology PRIVATE -flto=auto)
 target_link_libraries(bench_topology PRIVATE ggql_storage)
+
+# bench_path_storage — mede dispatch via topology vs PathStorage direto.
+add_executable(bench_path_storage tools/bench_path_storage.cpp)
+target_compile_options(bench_path_storage PRIVATE
+    -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
+)
+target_link_options(bench_path_storage PRIVATE -flto=auto)
+target_link_libraries(bench_path_storage PRIVATE ggql_storage)
 
 # bench_graph_algorithms — mede build_path_stats, path_nodes,
 # make_component_remap e find_bubbles em isolamento.
@@ -159,16 +172,6 @@ target_compile_options(bench_fm_index PRIVATE
 )
 target_link_options(bench_fm_index PRIVATE -flto=auto)
 target_link_libraries(bench_fm_index PRIVATE ggql_storage)
-
-# ── bubble_vs_snarl (diagnóstico) ─────────────────────────
-# Tool de diagnóstico que compara find_snarls_streaming (cactus) com
-# find_bubbles (Onodera 2013) no mesmo .idx. Usado para validar
-# discrepâncias contra ferramentas externas (vg snarls, BubbleGun).
-add_executable(bubble_vs_snarl tools/bubble_vs_snarl.cpp)
-target_compile_options(bubble_vs_snarl PRIVATE
-    -O3 -march=native -fopenmp -fno-strict-aliasing
-)
-target_link_libraries(bubble_vs_snarl PRIVATE ggql_storage)
 
 
 

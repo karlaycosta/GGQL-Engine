@@ -53,7 +53,10 @@ struct EventBridge {
     std::string detail_buf;
 };
 
-void dispatch_bridge(const cli::Event& ev, void* user) {
+// noexcept enforça que o boundary FFI nunca propague exceção C++ para o
+// callback C/Dart. Em caso patológico (bad_alloc nos buffers), terminate
+// é preferível a UB silencioso atravessando boundary.
+void dispatch_bridge(const cli::Event& ev, void* user) noexcept {
     auto* b = static_cast<EventBridge*>(user);
     GgqlEvent out;
     std::memset(&out, 0, sizeof(out));

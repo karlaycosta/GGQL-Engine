@@ -10,7 +10,6 @@ set(INGEST_TEST_SRCS
     test_ingestor_manifest.cpp
     test_ingestor_parse.cpp
     test_ingestor_profiles.cpp
-    test_snarl_decomposition.cpp
 )
 
 foreach(src ${INGEST_TEST_SRCS})
@@ -29,6 +28,8 @@ endforeach()
 set(STORAGE_TEST_SRCS
     test_storage_csr.cpp
     test_storage_fm_index.cpp
+    test_path_storage.cpp
+    test_topology_pstore_build.cpp
 )
 
 foreach(src ${STORAGE_TEST_SRCS})

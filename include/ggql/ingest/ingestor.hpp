@@ -449,8 +449,9 @@ class GfaIngestorMmapParallel {
                                CachedFlags flags);
 
     // Apaga arquivos órfãos do cache quando o usuário fez downgrade do
-    // perfil (ex: gBWT estava true, agora é false → remove gbwts.bin).
-    // Retorna true se algo foi removido (caller deve regravar o manifest).
+    // perfil (ex: gBWT estava true, agora é false → remove path_stores.bin
+    // e o legacy gbwts.bin se existir). Retorna true se algo foi removido
+    // (caller deve regravar o manifest).
     [[nodiscard]] bool prune_cache_for_downgrade(const std::string& dir,
                                                  CachedFlags old_flags,
                                                  CachedFlags new_flags, bool verbose) const;
@@ -503,9 +504,10 @@ class GfaIngestorMmapParallel {
     // Define out_complete_snarls_only=true quando o cache cobre tudo exceto
     // snarls; nesse caso retorna *res (não nullopt) e o caller deve completar
     // com snarl_decomposition::find_all_snarls antes de retornar (cache em RAM permanece).
-    // Define out_complete_gbwt_only=true quando falta apenas gbwts.bin (e
-    // possivelmente snarls.bin); nesse caso retorna nullopt para o caller
-    // abrir mmap e fazer Pass2 paths-only.
+    // Define out_complete_gbwt_only=true quando falta apenas o índice de
+    // paths (path_stores.bin / gbwts.bin) — e possivelmente snarls.bin;
+    // nesse caso retorna nullopt para o caller abrir mmap e fazer Pass2
+    // paths-only.
     [[nodiscard]] std::optional<IngestStatsParallel>
     try_cache_hash(const std::string& cache_dir,
                    bool save_metadata, bool build_gbwt, bool build_snarls,
@@ -525,9 +527,10 @@ class GfaIngestorMmapParallel {
         std::chrono::high_resolution_clock::time_point t_start);
 
     // FASE 2 do upgrade incremental: cache tem MPHF + topology + metadata
-    // mas falta gbwts.bin. Reabre o GFA e faz Pass2 paths-only (sem coletar
-    // segmentos/links — esses já estão em disco), constrói gBWT e grava
-    // gbwts.bin + topology.bin atualizado. Não toca em E_*/ef_*/metadata.bin.
+    // mas falta o índice de paths (path_stores.bin). Reabre o GFA e faz
+    // Pass2 paths-only (sem coletar segmentos/links — esses já estão em
+    // disco), constrói path_stores_ e grava path_stores.bin + topology.bin
+    // atualizado. Não toca em E_*/ef_*/metadata.bin.
     // Pré-condição: res_.mphf, res_.topology e remap_ já estão carregados.
     // Se build_snarls=true e snarls.bin falta, completa snarls após gBWT.
     [[nodiscard]] std::expected<IngestStatsParallel, std::string> complete_with_gbwt(

@@ -58,6 +58,7 @@ int main(int argc, char** argv) {
     const size_t sz_e_bwd = file_size_or_zero(dir + "/E_bwd.bin");
     const size_t sz_ef_fwd = file_size_or_zero(dir + "/ef_fwd.sdsl");
     const size_t sz_ef_bwd = file_size_or_zero(dir + "/ef_bwd.sdsl");
+    const size_t sz_path_stores = file_size_or_zero(dir + "/path_stores.bin");
     const size_t sz_gbwts = file_size_or_zero(dir + "/gbwts.bin");
     const size_t sz_topology = file_size_or_zero(dir + "/topology.bin");
     const size_t sz_path_stats = file_size_or_zero(dir + "/path_stats.bin");
@@ -67,6 +68,7 @@ int main(int argc, char** argv) {
     std::printf("size_E_bwd_bin=%zu\n", sz_e_bwd);
     std::printf("size_ef_fwd_sdsl=%zu\n", sz_ef_fwd);
     std::printf("size_ef_bwd_sdsl=%zu\n", sz_ef_bwd);
+    std::printf("size_path_stores_bin=%zu\n", sz_path_stores);
     std::printf("size_gbwts_bin=%zu\n", sz_gbwts);
     std::printf("size_topology_bin=%zu\n", sz_topology);
     std::printf("size_path_stats_bin=%zu\n", sz_path_stats);

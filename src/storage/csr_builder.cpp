@@ -3,6 +3,7 @@
 #include "ggql/storage/topology.hpp"
 
 #include "ggql/cli/progress_tracker.hpp"
+#include "ggql/gbwt/path_storage.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -16,8 +17,8 @@
 namespace ggql {
 
 // ════════════════════════════════════════════════════════════════════════════
-// Destrutor — definido aqui onde gbwt::GBWT é tipo completo.
-// unique_ptr<gbwt::GBWT> requer destrutor completo no ponto de instanciação.
+// Destrutor — definido aqui onde PathStorage é tipo completo
+// (necessário para destruir unique_ptr<PathStorage>).
 // ════════════════════════════════════════════════════════════════════════════
 GfaCsrTopology::~GfaCsrTopology() = default;
 
@@ -30,8 +31,10 @@ GfaCsrTopology::GfaCsrTopology(GfaCsrTopology&& other) noexcept
       ef_fwd_sel_(std::move(other.ef_fwd_sel_)), ef_bwd_(std::move(other.ef_bwd_)),
       ef_bwd_sel_(std::move(other.ef_bwd_sel_)),
       offsets_cache_fwd_(std::move(other.offsets_cache_fwd_)),
-      offsets_cache_bwd_(std::move(other.offsets_cache_bwd_)), gbwts_(std::move(other.gbwts_)),
-      gbwt_offsets_(std::move(other.gbwt_offsets_)), path_names_(std::move(other.path_names_)) {
+      offsets_cache_bwd_(std::move(other.offsets_cache_bwd_)),
+      path_stores_(std::move(other.path_stores_)),
+      gbwt_offsets_(std::move(other.gbwt_offsets_)),
+      path_names_(std::move(other.path_names_)) {
     // Re-vincula os suportes SDSL ao novo endereço dos vetores movimentados
     ef_fwd_sel_.set_vector(&ef_fwd_);
     ef_bwd_sel_.set_vector(&ef_bwd_);
@@ -48,7 +51,7 @@ GfaCsrTopology& GfaCsrTopology::operator=(GfaCsrTopology&& other) noexcept {
         ef_bwd_sel_ = std::move(other.ef_bwd_sel_);
         offsets_cache_fwd_ = std::move(other.offsets_cache_fwd_);
         offsets_cache_bwd_ = std::move(other.offsets_cache_bwd_);
-        gbwts_ = std::move(other.gbwts_);
+        path_stores_ = std::move(other.path_stores_);
         gbwt_offsets_ = std::move(other.gbwt_offsets_);
         path_names_ = std::move(other.path_names_);
 
@@ -67,17 +70,16 @@ size_t GfaCsrTopology::memory_bytes() const noexcept {
                   offsets_cache_fwd_.size() * sizeof(uint32_t) +
                   offsets_cache_bwd_.size() * sizeof(uint32_t);
 
-    // sdsl::size_in_bytes serializa para null-stream (sem alocação de buffer).
-    size_t gbwt_sz = 0;
-    for (const auto& g : gbwts_) {
-        if (g) {
-            gbwt_sz += sdsl::size_in_bytes(*g);
+    size_t paths_sz = 0;
+    for (const auto& ps : path_stores_) {
+        if (ps) {
+            paths_sz += ps->memory_bytes();
         }
     }
     for (const auto& s : path_names_) {
-        gbwt_sz += s.size();
+        paths_sz += s.size();
     }
-    return topo + gbwt_sz;
+    return topo + paths_sz;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -289,15 +291,15 @@ void GfaCsrTopology::ensure_offsets_cache(int num_threads) const {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// rebuild_offsets_ — recalcula gbwt_offsets_ a partir de gbwts_.
-// Chamado após mudanças em gbwts_ (build_path_index_parallel, load).
+// rebuild_offsets_ — recalcula gbwt_offsets_ a partir de path_stores_.
+// gbwt_offsets_ mapeia global_path_id → (shard, local_id) via upper_bound.
 // ════════════════════════════════════════════════════════════════════════════
 void GfaCsrTopology::rebuild_offsets_() {
-    gbwt_offsets_.resize(gbwts_.size() + 1);
+    gbwt_offsets_.resize(path_stores_.size() + 1);
     gbwt_offsets_[0] = 0;
-    for (size_t i = 0; i < gbwts_.size(); ++i) {
-        gbwt_offsets_[i + 1] =
-            gbwt_offsets_[i] + (gbwts_[i] ? static_cast<size_t>(gbwts_[i]->sequences()) : 0);
+    for (size_t i = 0; i < path_stores_.size(); ++i) {
+        gbwt_offsets_[i + 1] = gbwt_offsets_[i] +
+                                (path_stores_[i] ? path_stores_[i]->num_paths() : 0);
     }
 }
 

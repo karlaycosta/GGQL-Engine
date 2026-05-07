@@ -86,7 +86,7 @@ static void test_profile_metagenomics() {
     assert(res->path_count == 0);
     assert(res->gbwt_index_size_b == 0);
     // Sem snarls: arquivo não deve existir no cache.
-    assert(!fs::exists(idx + "/gbwts.bin"));
+    assert(!fs::exists(idx + "/path_stores.bin"));
     assert(!fs::exists(idx + "/snarls.bin"));
     // Topology sim, foi construída.
     assert(fs::exists(idx + "/E_fwd.bin"));
@@ -111,18 +111,18 @@ static void test_profile_pangenome() {
     assert(res.has_value());
     assert(res->path_count == 1);
     assert(res->gbwt_index_size_b > 0);
-    assert(fs::exists(idx + "/gbwts.bin"));
+    assert(fs::exists(idx + "/path_stores.bin"));
     // snarls.bin só é gravado se snarls foram detectadas; em GFA linear
     // (sem bolhas) o arquivo pode não existir mesmo com build_snarls=true.
-    // O importante: gbwts.bin existe.
+    // O importante: path_stores.bin existe.
 
     cleanup(gfa, idx);
 }
 
 // ── 4. Cache regenera ao elevar build_gbwt entre execuções ────────────────────
-// 1ª execução: build_gbwt=false → não grava gbwts.bin.
+// 1ª execução: build_gbwt=false → não grava path_stores.bin.
 // 2ª execução: build_gbwt=true → cache hit não pode ser silencioso; tem que
-// regenerar para popular o gBWT.
+// regenerar para popular o índice de paths.
 static void test_cache_invalidates_on_gbwt_upgrade() {
     auto gfa = write_gfa("cache_up");
     const std::string idx = "/tmp/ggql_profiles_cache_up_idx/";
@@ -135,7 +135,7 @@ static void test_cache_invalidates_on_gbwt_upgrade() {
                               /*build_gbwt=*/false,
                               /*build_snarls=*/false);
         assert(res.has_value());
-        assert(!fs::exists(idx + "/gbwts.bin"));
+        assert(!fs::exists(idx + "/path_stores.bin"));
     }
 
     // 2ª: pede gBWT — deve regenerar (não cache hit silencioso)
@@ -146,7 +146,7 @@ static void test_cache_invalidates_on_gbwt_upgrade() {
                               /*build_gbwt=*/true,
                               /*build_snarls=*/false);
         assert(res.has_value());
-        assert(fs::exists(idx + "/gbwts.bin"));
+        assert(fs::exists(idx + "/path_stores.bin"));
         assert(res->path_count == 1);
     }
 
@@ -238,7 +238,7 @@ static void test_incremental_snarls_upgrade() {
                               pf.save_metadata, pf.build_topology, pf.build_fm_index,
                               1000, false, idx, pf.build_gbwt, pf.build_snarls);
         assert(res.has_value());
-        assert(fs::exists(idx + "/gbwts.bin"));
+        assert(fs::exists(idx + "/path_stores.bin"));
         assert(!fs::exists(idx + "/snarls.bin"));
     }
 
@@ -278,7 +278,7 @@ static void test_incremental_gbwt_upgrade() {
                               pf.save_metadata, pf.build_topology, pf.build_fm_index,
                               0, false, idx, pf.build_gbwt, pf.build_snarls);
         assert(res.has_value());
-        assert(!fs::exists(idx + "/gbwts.bin"));
+        assert(!fs::exists(idx + "/path_stores.bin"));
     }
 
     // 2ª: comparative (gBWT sim, snarls não) — Fase 2.
@@ -289,7 +289,7 @@ static void test_incremental_gbwt_upgrade() {
                               pf.save_metadata, pf.build_topology, pf.build_fm_index,
                               1000, false, idx, pf.build_gbwt, pf.build_snarls);
         assert(res.has_value());
-        assert(fs::exists(idx + "/gbwts.bin"));
+        assert(fs::exists(idx + "/path_stores.bin"));
         assert(res->path_count == 1);
         // Pass1 NÃO rodou — elapsed_io1_s e elapsed_topology_s zerados.
         assert(res->elapsed_io1_s == 0.0
@@ -330,7 +330,7 @@ static void test_incremental_meta_to_pangenome() {
                               pf.save_metadata, pf.build_topology, pf.build_fm_index,
                               1000, false, idx, pf.build_gbwt, pf.build_snarls);
         assert(res.has_value());
-        assert(fs::exists(idx + "/gbwts.bin"));
+        assert(fs::exists(idx + "/path_stores.bin"));
         assert(fs::exists(idx + "/snarls.bin"));
         assert(res->elapsed_io1_s == 0.0);
         assert(res->elapsed_topology_s == 0.0);
@@ -339,7 +339,7 @@ static void test_incremental_meta_to_pangenome() {
     cleanup(gfa, idx);
 }
 
-// ── 10. Downgrade pangenome → metagenomics apaga gbwts.bin/snarls.bin ──────
+// ── 10. Downgrade pangenome → metagenomics apaga path_stores.bin/snarls.bin
 // Manifest deve refletir o novo perfil e os arquivos órfãos devem ser
 // removidos do disco (não basta ignorá-los — o load() carregaria do disco).
 static void test_downgrade_pangenome_to_metagenomics() {
@@ -347,7 +347,7 @@ static void test_downgrade_pangenome_to_metagenomics() {
     const std::string idx = "/tmp/ggql_profiles_downgrade_idx/";
     fs::remove_all(idx);
 
-    // 1ª: pangenome — cria gbwts.bin + snarls.bin
+    // 1ª: pangenome — cria path_stores.bin + snarls.bin
     {
         const auto pf = ggql::flags_for(ggql::IngestProfile::Pangenome);
         ggql::GfaIngestorMmapParallel ing;
@@ -355,11 +355,11 @@ static void test_downgrade_pangenome_to_metagenomics() {
                               pf.save_metadata, pf.build_topology, pf.build_fm_index,
                               1000, false, idx, pf.build_gbwt, pf.build_snarls);
         assert(res.has_value());
-        assert(fs::exists(idx + "/gbwts.bin"));
+        assert(fs::exists(idx + "/path_stores.bin"));
         assert(fs::exists(idx + "/snarls.bin"));
     }
 
-    // 2ª: metagenomics no MESMO dir — deve apagar gbwts.bin + snarls.bin
+    // 2ª: metagenomics no MESMO dir — deve apagar path_stores.bin + snarls.bin
     {
         const auto pf = ggql::flags_for(ggql::IngestProfile::Metagenomics);
         ggql::GfaIngestorMmapParallel ing;
@@ -367,8 +367,10 @@ static void test_downgrade_pangenome_to_metagenomics() {
                               pf.save_metadata, pf.build_topology, pf.build_fm_index,
                               0, false, idx, pf.build_gbwt, pf.build_snarls);
         assert(res.has_value());
+        assert(!fs::exists(idx + "/path_stores.bin")
+               && "downgrade deve remover path_stores.bin");
         assert(!fs::exists(idx + "/gbwts.bin")
-               && "downgrade deve remover gbwts.bin");
+               && "downgrade deve remover gbwts.bin legacy");
         assert(!fs::exists(idx + "/snarls.bin")
                && "downgrade deve remover snarls.bin");
         // FM-Index continua (metagenomics inclui FM-Index)
