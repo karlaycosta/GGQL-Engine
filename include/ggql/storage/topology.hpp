@@ -53,6 +53,7 @@
 
 #include "ggql/gbwt/path_backend.hpp"
 #include "ggql/gbwt/path_storage.hpp"
+#include "ggql/ingest/profile.hpp"  // PathBackendKind
 #include "ggql/ingest/gbwt_group.hpp"
 #include "ggql/storage/topology_types.hpp"
 
@@ -363,14 +364,23 @@ class GfaCsrTopology {
 
     // ── Camada 2 — Construção do índice de paths ─────────────────────────────
 
-    // Constrói path_stores_ em paralelo a partir de N GbwtGroups.
-    // Os valores nos GbwtGroups vêm no encoding gbwt-bound (shift+1 + bit de
-    // orientação) — o builder decodifica via `gbwt_decode_node` antes de
-    // armazenar. Resultado: cada shard é um PathStorage auto-contido, sem
-    // BWT intermediário ou LF-mapping.
-    [[nodiscard]] GbwtTimings build_path_storage_parallel(std::vector<GbwtGroup> groups,
-                                                           uint8_t node_width,
-                                                           int     num_threads = 1);
+    // Constroi path_stores_ em paralelo a partir de N GbwtGroups.
+    // Os valores nos GbwtGroups vem no encoding gbwt-bound (shift+1 + bit de
+    // orientacao) — o builder decodifica via `gbwt_decode_node` antes de
+    // armazenar.
+    //
+    // backend escolhe o tipo concreto de cada shard:
+    //   - PathStorage: array uint32 cru, ratio 4 B/no, extract O(L) memcpy.
+    //     Caminho paralelo (1 builder por shard, OMP).
+    //   - Gbwt: gbwt::GBWT comprimido, ratio ~1-2 bits/no, extract via LF.
+    //     Por enquanto SERIAL (modo paralelo do gBWT requer particionamento
+    //     topologico — vira em refinamento futuro).
+    //   - Auto: equivale a PathStorage por enquanto (heuristica vem em #6).
+    [[nodiscard]] GbwtTimings build_path_storage_parallel(
+        std::vector<GbwtGroup> groups,
+        uint8_t                node_width,
+        int                    num_threads = 1,
+        PathBackendKind        backend     = PathBackendKind::PathStorage);
 
     // ── Consultas ao índice de paths (inline triviais) ────────────────────────
     [[nodiscard]] size_t path_count() const noexcept { return path_names_.size(); }

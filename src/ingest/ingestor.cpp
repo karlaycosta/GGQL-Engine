@@ -1246,7 +1246,8 @@ IngestStatsParallel GfaIngestorMmapParallel::complete_with_snarls(
 std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::complete_with_gbwt(
     const std::string& /*filepath*/, const std::string& cache_dir, int num_threads,
     size_t max_gbwt_paths, bool build_snarls, bool verbose, IngestStatsParallel stats,
-    std::chrono::high_resolution_clock::time_point t_start) {
+    std::chrono::high_resolution_clock::time_point t_start,
+    PathBackendKind path_backend) {
     using clock = std::chrono::high_resolution_clock;
     using sec = std::chrono::duration<double>;
 
@@ -1300,7 +1301,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::complet
     const auto t_gb0 = clock::now();
     auto gbwt_t = res_.topology->build_path_storage_parallel(std::move(pass2.gbwt_groups),
                                                               node_width,
-                                                              /*num_threads=*/1);
+                                                              /*num_threads=*/1,
+                                                              path_backend);
     const auto t_gb1 = clock::now();
     stats.elapsed_gbwt_s = gbwt_t.wall_s;
     stats.gbwt_cpu_avg_s = gbwt_t.cpu_avg_s;
@@ -1448,7 +1450,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
     int num_threads, double gamma, bool verbose, bool save_metadata, bool build_topology,
     bool build_fm_index, size_t max_gbwt_paths, bool keep_gbwt_tmp, const std::string& cache_dir,
     bool build_gbwt, bool build_snarls, uint64_t file_sz, int64_t file_mtime_ns, uint64_t gfa_hash,
-    bool skip_pass1, std::chrono::high_resolution_clock::time_point t_start) {
+    bool skip_pass1, std::chrono::high_resolution_clock::time_point t_start,
+    PathBackendKind path_backend) {
     using clock = std::chrono::high_resolution_clock;
     using sec = std::chrono::duration<double>;
 
@@ -1798,7 +1801,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
 
             auto t_gbwt0 = clock::now();
             auto gbwt_t = res_.topology->build_path_storage_parallel(std::move(topo_groups),
-                                                                      node_width, num_threads);
+                                                                      node_width, num_threads,
+                                                                      path_backend);
             auto t_gbwt1 = clock::now();
 
             stats.elapsed_gbwt_s = gbwt_t.wall_s;

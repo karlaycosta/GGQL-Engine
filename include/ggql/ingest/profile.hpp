@@ -20,24 +20,59 @@ enum class IngestProfile : uint8_t {
     Comparative,  // com gBWT, sem snarls (paths = espécies/strains)
 };
 
+// PathBackendKind — escolha de backend para path_stores_ (Camada 2 da
+// GfaCsrTopology). Coexistencia controlada pelo IngestProfile/flags.
+//
+//   PathStorage  — uint32 cru concatenado; ratio 4 B/no; extract O(L) memcpy
+//   Gbwt         — gbwt::GBWT comprimido; ratio ~1-2 bits/no; extract via LF
+//   Auto         — heuristica futura (Task #6); por enquanto = PathStorage
+//
+// Ortogonal a build_gbwt: a flag aqui escolhe COMO os paths sao armazenados
+// quando a Camada 2 e construida. build_gbwt apenas decide SE construi-la.
+enum class PathBackendKind : uint8_t {
+    PathStorage = 0,
+    Gbwt        = 1,
+    Auto        = 2,
+};
+
+[[nodiscard]] constexpr std::string_view name_of(PathBackendKind k) noexcept {
+    switch (k) {
+    case PathBackendKind::PathStorage: return "pathstorage";
+    case PathBackendKind::Gbwt:        return "gbwt";
+    case PathBackendKind::Auto:        return "auto";
+    }
+    std::unreachable();
+}
+
+[[nodiscard]] constexpr std::optional<PathBackendKind>
+parse_path_backend(std::string_view s) noexcept {
+    if (s == "pathstorage" || s == "ps") { return PathBackendKind::PathStorage; }
+    if (s == "gbwt"        || s == "gb") { return PathBackendKind::Gbwt; }
+    if (s == "auto")                     { return PathBackendKind::Auto; }
+    return std::nullopt;
+}
+
 struct ProfileFlags {
-    bool save_metadata  = false;
-    bool build_fm_index = false;
-    bool build_topology = false;
-    bool build_gbwt     = false;
-    bool build_snarls   = false;
+    bool             save_metadata  = false;
+    bool             build_fm_index = false;
+    bool             build_topology = false;
+    bool             build_gbwt     = false;
+    bool             build_snarls   = false;
+    PathBackendKind  path_backend   = PathBackendKind::PathStorage;
 };
 
 [[nodiscard]] constexpr ProfileFlags flags_for(IngestProfile p) noexcept {
     switch (p) {
     case IngestProfile::Pangenome:
-        return {true, true,  true, true,  true};
+        // Default: PathStorage (preserva comportamento atual). Pangenoma
+        // grande pode trocar para Gbwt via flag custom para reduzir RAM 16x.
+        return {true, true,  true, true,  true,  PathBackendKind::PathStorage};
     case IngestProfile::Metagenomics:
-        return {true, true,  true, false, false};
+        return {true, true,  true, false, false, PathBackendKind::PathStorage};
     case IngestProfile::Assembly:
-        return {true, false, true, false, true};
+        return {true, false, true, false, true,  PathBackendKind::PathStorage};
     case IngestProfile::Comparative:
-        return {true, false, true, true,  false};
+        return {true, false, true, true,  false, PathBackendKind::PathStorage};
     }
     std::unreachable(); // todos os enum values cobertos acima
 }

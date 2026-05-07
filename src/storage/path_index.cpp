@@ -8,9 +8,12 @@
 #include "ggql/util/memory_monitor.hpp"
 
 // Headers pesados — incluídos só aqui, não no .hpp público.
+#include "ggql/gbwt/gbwt_backend.hpp"
 #include "ggql/gbwt/node_buffer.hpp"
 #include "ggql/gbwt/path_storage.hpp"
 #include "ggql/storage/checksum_builder.hpp"
+
+#include <gbwt/dynamic_gbwt.h>  // GBWTBuilder, DynamicGBWT, vector_type
 
 #include <algorithm>
 #include <atomic>
@@ -168,7 +171,8 @@ read_path_stores_payload(std::istream&                                     in,
 GfaCsrTopology::GbwtTimings
 GfaCsrTopology::build_path_storage_parallel(std::vector<GbwtGroup> groups,
                                              uint8_t                node_width,
-                                             int                    num_threads) {
+                                             int                    num_threads,
+                                             PathBackendKind        backend) {
     using clk = std::chrono::high_resolution_clock;
     using sec = std::chrono::duration<double>;
 
@@ -188,6 +192,96 @@ GfaCsrTopology::build_path_storage_parallel(std::vector<GbwtGroup> groups,
     for (const auto& g : groups) { est_total_paths += g.path_names.size(); }
     path_names_.reserve(est_total_paths);
 
+    // ── Caminho Gbwt: serial, 1 GBWTBuilder por shard ────────────────────────
+    //
+    // Iteracao inicial — modo serial garante correcao independente de
+    // particionamento topologico. Otimizacao paralela (1 builder por shard
+    // simultaneo) requer garantir invariante "shards nao compartilham nos",
+    // ja garantida em groups vindos de repartition_groups_topological mas
+    // mantida verificada em refinamento futuro.
+    if (backend == PathBackendKind::Gbwt) {
+        const size_t batch_syms =
+            static_cast<size_t>(::gbwt::DynamicGBWT::INSERT_BATCH_SIZE);
+        std::uint64_t total_nodes_serial = 0;
+
+        cli::step_info(fmt::format(
+            "GbwtBackend build (serial) · {} shards · batch {} simbolos",
+            N, batch_syms));
+
+        for (size_t i = 0; i < N; ++i) {
+            auto& g = groups[i];
+            if (g.in_ram_seqs.empty() && g.tmp_path.empty()) {
+                path_stores_[i] = std::make_unique<GbwtBackend>();
+                continue;
+            }
+
+            ::gbwt::GBWTBuilder builder(node_width,
+                                        static_cast<::gbwt::size_type>(batch_syms));
+            std::uint64_t local_syms = 0;
+
+            if (!g.in_ram_seqs.empty()) {
+                for (const auto& seq : g.in_ram_seqs) {
+                    if (seq.empty()) { continue; }
+                    builder.insert(seq, /*both_orientations=*/false);
+                    local_syms += seq.size();
+                }
+            } else {
+                ggql::NodeBuffer buf(g.tmp_path, std::ios::in, 64u << 20, node_width);
+                ::gbwt::vector_type seq;
+                seq.reserve(1u << 20);
+                for (std::uint64_t val : buf) {
+                    if (val == ggql::kEndmarker) {
+                        if (!seq.empty()) {
+                            builder.insert(seq, /*both_orientations=*/false);
+                            local_syms += seq.size();
+                            seq.clear();
+                        }
+                    } else {
+                        seq.push_back(val);
+                    }
+                }
+                if (!seq.empty()) {
+                    builder.insert(seq, /*both_orientations=*/false);
+                    local_syms += seq.size();
+                }
+                (void)::unlink(g.tmp_path.c_str());
+            }
+
+            builder.finish();
+            // Move o DynamicGBWT do builder para um GBWT estatico (compresso).
+            // Construtor GBWT(DynamicGBWT) faz a transformacao.
+            auto gbwt_static = std::make_unique<::gbwt::GBWT>(builder.index);
+            // Libera RAM do DynamicGBWT antes de prosseguir para o proximo shard.
+            builder.index = ::gbwt::DynamicGBWT();
+            path_stores_[i] = std::make_unique<GbwtBackend>(std::move(gbwt_static));
+            total_nodes_serial += local_syms;
+        }
+
+        // path_names em ordem de shard
+        for (size_t i = 0; i < N; ++i) {
+            for (auto& name : groups[i].path_names) {
+                path_names_.push_back(std::move(name));
+            }
+        }
+
+        rebuild_offsets_();
+
+        t.wall_s      = sec(clk::now() - wall_start).count();
+        t.total_nodes = total_nodes_serial;
+        t.cpu_avg_s   = t.wall_s;
+        t.cpu_max_s   = t.wall_s;
+        monitor.stop();
+        t.peak_rss_kb = monitor.peak_kb();
+
+        std::size_t total_bytes = 0;
+        for (const auto& ps : path_stores_) {
+            if (ps) { total_bytes += ps->memory_bytes(); }
+        }
+        t.index_size_b = total_bytes;
+        return t;
+    }
+
+    // ── Caminho PathStorage (paralelo, default) ──────────────────────────────
     std::atomic<uint64_t> total_nodes_acc{0};
 
     const int requested_threads = (num_threads > 0) ? num_threads : 1;

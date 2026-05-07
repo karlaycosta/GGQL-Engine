@@ -537,7 +537,8 @@ class GfaIngestorMmapParallel {
         const std::string& filepath, const std::string& cache_dir,
         int num_threads, size_t max_gbwt_paths, bool build_snarls,
         bool verbose, IngestStatsParallel stats,
-        std::chrono::high_resolution_clock::time_point t_start);
+        std::chrono::high_resolution_clock::time_point t_start,
+        PathBackendKind path_backend = PathBackendKind::PathStorage);
 
     [[nodiscard]] std::expected<IngestStatsParallel, std::string>
     run_full_ingest(int num_threads, double gamma, bool verbose,
@@ -547,7 +548,8 @@ class GfaIngestorMmapParallel {
                     bool build_gbwt, bool build_snarls,
                     uint64_t file_sz, int64_t file_mtime_ns,
                     uint64_t gfa_hash, bool skip_pass1,
-                    std::chrono::high_resolution_clock::time_point t_start);
+                    std::chrono::high_resolution_clock::time_point t_start,
+                    PathBackendKind path_backend = PathBackendKind::PathStorage);
 };
 
 } // namespace ggql
