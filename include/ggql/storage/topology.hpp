@@ -51,6 +51,7 @@
 //   • Métodos inline triviais (< 5 LOC, hot paths de benchmark)
 //   • find_tips e find_repeats (inline por performance — hot paths medidos)
 
+#include "ggql/gbwt/path_backend.hpp"
 #include "ggql/gbwt/path_storage.hpp"
 #include "ggql/ingest/gbwt_group.hpp"
 #include "ggql/storage/topology_types.hpp"
@@ -86,8 +87,8 @@ class GfaCsrTopology {
   public:
     GfaCsrTopology() = default;
 
-    // Destrutor declarado aqui; definido no .cpp onde PathStorage é completo
-    // (necessário para destruir unique_ptr<PathStorage>).
+    // Destrutor virtual da interface IPathBackend ja resolve a destruicao
+    // dos shards. Mantido fora-de-linha para reduzir code bloat em headers.
     ~GfaCsrTopology();
 
     // Sem cópia — contém unique_ptr e recursos grandes
@@ -479,10 +480,15 @@ class GfaCsrTopology {
     mutable std::vector<uint32_t> offsets_cache_fwd_;
     mutable std::vector<uint32_t> offsets_cache_bwd_;
 
-    // ── Camada 2: PathStorage (1 shard por componente) ──────────────────────
+    // ── Camada 2: backend de paths (1 shard por componente) ─────────────────
     // path_stores_[i] indexa paths localmente; gbwt_offsets_ mapeia
     // global_path_id → (shard, local_id) via upper_bound.
-    std::vector<std::unique_ptr<PathStorage>> path_stores_;
+    //
+    // O tipo concreto de cada shard pode ser PathStorage ou GbwtBackend
+    // (selecionavel por flag no IngestProfile). Acesso polimorfico via
+    // IPathBackend; ops especificas (nodes_view, gbwt::raw) requerem
+    // dynamic_cast.
+    std::vector<std::unique_ptr<IPathBackend>> path_stores_;
     std::vector<size_t>                       gbwt_offsets_;
     std::vector<std::string>                  path_names_;
 

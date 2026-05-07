@@ -120,8 +120,8 @@ inline void write_path_stats_payload(std::ofstream& out,
 //     Se present: PathStorage::save() inline (header próprio + checksum)
 // Sem header global — cada shard é validado individualmente pelo seu checksum.
 inline void
-write_path_stores_payload(std::ofstream&                                       out,
-                          const std::vector<std::unique_ptr<PathStorage>>& path_stores) {
+write_path_stores_payload(std::ofstream&                                          out,
+                          const std::vector<std::unique_ptr<IPathBackend>>& path_stores) {
     const uint64_t n_shards = static_cast<uint64_t>(path_stores.size());
     out.write(reinterpret_cast<const char*>(&n_shards), sizeof(n_shards));
     for (const auto& ps : path_stores) {
@@ -132,8 +132,8 @@ write_path_stores_payload(std::ofstream&                                       o
 }
 
 inline void
-read_path_stores_payload(std::istream&                                  in,
-                         std::vector<std::unique_ptr<PathStorage>>& out_stores) {
+read_path_stores_payload(std::istream&                                     in,
+                         std::vector<std::unique_ptr<IPathBackend>>& out_stores) {
     uint64_t n_shards = 0;
     in.read(reinterpret_cast<char*>(&n_shards), sizeof(n_shards));
     if (!in.good()) {
