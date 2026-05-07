@@ -391,6 +391,73 @@ gigante). É possível que a compressão "natural" do gBWT só apareça em
 densidade de haplótipos muito maior — chm13_subset_100w tem só 100
 paths, talvez sub-amostragem demais para o BWT explorar redundância.
 
+### 03 — sample_interval=∞ no GBWTBuilder (P4)
+
+Commit: (a preencher)
+Data: 2026-05-07
+
+**Mudança:** Passa `sample_interval = numeric_limits<size_type>::max()`
+ao construtor do `GBWTBuilder`. Default `SAMPLE_INTERVAL=1024` gera SA
+samples para `locate()`/`tryLocate()` — operações que o GGQL **não usa**
+hoje (só `extract()`, e `extract()` usa apenas LF-stepping, conforme
+`gbwt/algorithms.h:243-256`).
+
+**Análise do código upstream:**
+
+```cpp
+// gbwt/algorithms.h:243-255 — extract NÃO toca samples
+extract(const GBWTType& index, edge_type position) {
+    while (position.first != ENDMARKER) {
+        result.push_back(position.first);
+        position = index.LF(position);  // só LF()
+    }
+}
+
+// gbwt/dynamic_gbwt.cpp:1560-1568 — tryLocate USA samples
+DynamicGBWT::tryLocate(node_type node, size_type i) const {
+    const DynamicRecord& record = this->record(node);
+    for (sample_type sample : record.ids) {  // ← record.ids é o sample
+        if (sample.first == i) return sample.second;
+    }
+}
+```
+
+`extract` percorre LF-mapping até encontrar ENDMARKER, sem consultar
+`record.ids`. Logo, eliminar samples não afeta `extract` (e por
+consequência `path_nodes()` da topology, que é o único caller real).
+
+| Métrica | P3 | **P4** | Δ |
+|---|---:|---:|---:|
+| Wall build | 5.89 s | **5.59 s** | −5.1% |
+| Throughput | 2.72 M/s | **2.87 M/s** | +5.5% |
+| Pico RSS | 2.14 GB | 2.15 GB | +0.5% (ruído) |
+| **`path_stores.bin`** | 62.571.808 B | **62.548.320 B** | −23.488 B (−0.04%) |
+| bits/nó | 31.72 | 31.71 | −0.03% |
+
+**Por que o ganho é marginal em chm13?** Em datasets pequenos os
+samples ocupam pouco espaço absoluto (~24 KB no path_stores aqui).
+Mas em datasets onde `total_nodes` é grande, samples crescem
+linearmente — esperado escalar bem em HPRC v1 (4.47B símbolos →
+samples ocupariam ~70 MB no formato default; eliminados = win
+substancial).
+
+**Cumulativo Baseline → P1 → P3 → P4:**
+
+| | Baseline | P1 | P3 | **P4** | Δ vs Baseline |
+|---|---:|---:|---:|---:|---:|
+| Wall | 15.32 s | 6.11 s | 5.89 s | **5.59 s** | **2.74×** mais rápido |
+| RSS | 1.87 GB | 4.20 GB | 2.14 GB | **2.15 GB** | +15% |
+| bits/nó | 31.72 | 31.72 | 31.72 | 31.71 | igual |
+
+**Validação:** parity test (`test_path_backend_coexistence`) continua
+passando em 0.01s — eliminar samples não muda o output de `extract`,
+confirmando empíricamente que samples são ortogonais ao caminho que
+usamos.
+
+**Trade-off:** se um dia o engine implementar `crosses()` (que precisa
+de `paths_through_region` → usa SA samples), reverter este commit ou
+adicionar flag para regenerar samples sob demanda.
+
 ### (template — preencher conforme avança)
 
 ```

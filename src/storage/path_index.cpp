@@ -339,8 +339,22 @@ GfaCsrTopology::build_path_storage_parallel(std::vector<GbwtGroup> groups,
             // buffers que nunca enchem (~1.6 GB com kMaxBatch=100M).
             const size_t batch_adaptive = std::clamp(
                 shard_size[i], kMinBatch, kMaxBatch);
+
+            // sample_interval = max → desativa SA samples. extract() (unico
+            // uso de gBWT no engine, ver gbwt_backend.cpp:55) usa apenas
+            // LF-stepping (gbwt/algorithms.h:243-256), nao toca samples.
+            // Default SAMPLE_INTERVAL=1024 serve a locate()/tryLocate() —
+            // operacoes nao usadas pelo GGQL hoje.
+            //
+            // Beneficios sem impacto em extract:
+            //   - menos tempo no insertBatch (sem calculo de DA samples)
+            //   - menos RAM peak no DynamicGBWT (sem record.ids cresc.)
+            //   - menos disco no path_stores.bin (samples nao serializados)
+            constexpr ::gbwt::size_type kNoSamples =
+                std::numeric_limits<::gbwt::size_type>::max();
             ::gbwt::GBWTBuilder builder(
-                node_width, static_cast<::gbwt::size_type>(batch_adaptive));
+                node_width, static_cast<::gbwt::size_type>(batch_adaptive),
+                kNoSamples);
             std::uint64_t local_syms = 0;
 
             if (!g.in_ram_seqs.empty()) {
