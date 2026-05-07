@@ -537,6 +537,103 @@ do GBWTBuilder bit-exato e atacar apenas wrapper. Mexer no input
 exige refactor profundo (idealmente: 1 GBWT global em vez de N
 shards), o que conflita com a arquitetura de coexistência atual.
 
+### 04 — compress_sem: cap em compressões simultâneas (P5)
+
+Commit: (a preencher)
+Data: 2026-05-07
+
+**Mudança:** Adiciona `std::counting_semaphore<>` ao redor do
+`make_unique<GBWT>(builder.index)` no caminho Gbwt, limitando
+compressões `DynamicGBWT → GBWT` a 2 simultâneas. Pista identificada
+analisando `docs/gfa_csr_gbw_refactoring_and_perf.md` (P1 antiga, pré-
+migração) que documentou exatamente esse problema:
+
+> "O semáforo `compress_sem` limitava compressões a `ceil(N/2)`. A 8
+> threads, isso permitia 4 compressões simultâneas × ~300 MB cada = 1,2 GB
+> de estruturas FM-index em paralelo, saturando a banda de DRAM e
+> revertendo o speedup."
+
+**Por que isso atinge o pico de RAM:** o `GBWT(DynamicGBWT&)` constructor
+inicializa `bwt(source.bwt)` e `da_samples(source.bwt)` (`gbwt.cpp:30`)
+— ambas operações de compressão SDSL que alocam buffers temporários
+proporcionais ao tamanho do shard. Com 8 builders terminando quase
+juntos, 8 dessas compressões em paralelo saturam DRAM.
+
+**Implementação em `src/storage/path_index.cpp`:**
+
+```cpp
+constexpr std::ptrdiff_t kMaxConcurrentCompress = 2;
+std::counting_semaphore<> compress_sem(kMaxConcurrentCompress);
+
+#pragma omp parallel for ...
+for (size_t i = 0; i < N_eff; ++i) {
+    // ... insert paths into builder ...
+    builder.finish();
+    {
+        compress_sem.acquire();
+        gbwt_static = std::make_unique<::gbwt::GBWT>(builder.index);
+        builder.index = ::gbwt::DynamicGBWT();  // libera ANTES do release
+        compress_sem.release();
+    }
+    // ...
+}
+```
+
+| Métrica | P4 | **P5** | Δ |
+|---|---:|---:|---:|
+| Wall build | 5.59 s | **5.54 s** | −0.9% (essencialmente ruído) |
+| **Pico RSS** | 2.15 GB | **2.11 GB** | **−40 MB** |
+| Throughput | 2.87 M/s | 2.89 M/s | +0.7% |
+| Disco | 62.548.320 B | 62.548.320 B | bit-exato ✓ |
+| bits/nó | 31.71 | 31.71 | igual |
+
+**Em chm13 o ganho é modesto** porque shards são pequenos (60 MB
+total, ~7-30 MB cada). **Em HPRC v1 chm13 o impacto será substancial**
+— shards podem chegar a 200+ MB cada; sem o cap, 8 compressões
+simultâneas = ~1.6 GB de pico extra que P5 evita.
+
+### Cumulativo Baseline → P1 → P3 → P4 → P5
+
+| | Baseline | P1 | P3 | P4 | **P5** | Δ vs Baseline |
+|---|---:|---:|---:|---:|---:|---:|
+| Wall | 15.32 s | 6.11 s | 5.89 s | 5.59 s | **5.54 s** | **2.77×** |
+| Pico RSS | 1.87 GB | 4.20 GB | 2.14 GB | 2.15 GB | **2.11 GB** | +13% |
+| Throughput | 1.05 M/s | 2.62 | 2.72 | 2.87 | **2.89 M/s** | 2.75× |
+| bits/nó | 31.72 | 31.72 | 31.72 | 31.71 | 31.71 | igual |
+
+### Análise dos docs anteriores (gbwt_*.md, gfa_csr_gbw_*.md)
+
+Análise sistemática de 6 documentos de implementações anteriores
+(gbwt_usage_summary, gbwt_parallel_construction, gbwt_cpp23_modernization,
+gbwt_haplotype_analysis, gfa_csr_gbw_fixes_and_benchmarks,
+gfa_csr_gbw_refactoring_and_perf) revelou:
+
+**Convergências confirmadas com nossa P1+P3+P4+P5:**
+
+| Otimização | Antes (Run 7 / pré-migração) | Nossa | Status |
+|---|---|---|---|
+| Paralelismo por shard | std::thread × N | OMP por shard | ✅ Equivalente |
+| Streaming via int_vector_buffer | tmp_path → text_buffer_type | tmp_path → NodeBuffer | ✅ Equivalente (NodeBuffer = sdsl::int_vector_buffer<0>) |
+| sample_interval ∞ para extract-only | (não tinha) | **P4** | ✅ Avanço sobre o antigo |
+| Batch adaptativo | 10M fixo | clamp(shard, 1024, 100M) | ✅ Avanço sobre o antigo |
+| compress_sem cap | 2 (P1 antigo) | **P5** | ✅ Re-implementado |
+| Vetor de GBWTs por shard + offsets | igual | igual | ✅ Mantido |
+
+**Convergências de descartes:**
+
+- Sub-shard por balanceamento — não existia no antigo (split_gbwt_group
+  só disparava quando `groups.size() < num_threads`); nossa 02b
+  descartou pela razão certa (destrói compressão gBWT).
+- Sigma reduction — não existia no antigo; nossa 02c descartou pela
+  razão certa (overhead de mapa supera ganho).
+
+**Único item potencialmente perdido (a investigar futuro):**
+
+`std::execution::par_unseq` em `split()` e otimizações em `locate()`
+do `gbwt.cpp` upstream (gbwt_cpp23_modernization.md) — modificações
+no third_party/gbwt em si, não no GGQL. Esses são para queries (não
+build), então não impactam a Fase 5.
+
 ### (template — preencher conforme avança)
 
 ```

@@ -23,6 +23,7 @@
 #include <fmt/core.h>
 #include <fstream>
 #include <future>
+#include <semaphore>  // std::counting_semaphore (C++20)
 #include <string>
 #include <unistd.h> // ::unlink
 
@@ -319,10 +320,20 @@ GfaCsrTopology::build_path_storage_parallel(std::vector<GbwtGroup> groups,
             }
         }
 
+        // Cap em compressoes simultaneas (GBWT(DynamicGBWT&) constructor).
+        // Cada compressao aloca FM-index + da_samples comprimidos; com 8
+        // threads terminando juntas, pode chegar a 8 × ~200 MB = 1.6 GB
+        // de pressao DRAM em datasets grandes (HPRC).
+        // Valor 2 herdado de gfa_csr_gbw_refactoring_and_perf.md (P1 antiga,
+        // -150 MB DeltaRSS em 8t).
+        constexpr std::ptrdiff_t kMaxConcurrentCompress = 2;
+        std::counting_semaphore<> compress_sem(kMaxConcurrentCompress);
+
         cli::step_info(fmt::format(
-            "GbwtBackend build (paralelo+adaptive) · {} shards · {} threads · "
-            "batch_max={} simbolos · pico estimado dos buffers ~{:.2f} MB",
-            N, omp_threads_gbwt, kMaxBatch, est_pico_bytes / 1.0e6));
+            "GbwtBackend build (paralelo+adaptive+compress_sem={}) · {} shards · "
+            "{} threads · batch_max={} simbolos · pico estimado dos buffers ~{:.2f} MB",
+            kMaxConcurrentCompress, N, omp_threads_gbwt, kMaxBatch,
+            est_pico_bytes / 1.0e6));
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic) num_threads(omp_threads_gbwt)
@@ -386,12 +397,23 @@ GfaCsrTopology::build_path_storage_parallel(std::vector<GbwtGroup> groups,
             }
 
             builder.finish();
-            // Move o DynamicGBWT do builder para um GBWT estatico (compresso).
-            // Construtor GBWT(DynamicGBWT) faz a transformacao.
-            auto gbwt_static = std::make_unique<::gbwt::GBWT>(builder.index);
-            // Libera RAM do DynamicGBWT antes do destrutor (paralelo: outras
-            // threads podem estar ainda rodando — liberar cedo reduz pico).
-            builder.index = ::gbwt::DynamicGBWT();
+
+            // Compressao DynamicGBWT -> GBWT estatico. Aloca FM-index +
+            // da_samples comprimidos. Cap via compress_sem evita 8 threads
+            // disputando DRAM ao mesmo tempo.
+            std::unique_ptr<::gbwt::GBWT> gbwt_static;
+            {
+                compress_sem.acquire();
+                gbwt_static = std::make_unique<::gbwt::GBWT>(builder.index);
+                // Libera RAM do DynamicGBWT antes do destrutor (paralelo:
+                // outras threads podem estar ainda rodando — liberar cedo
+                // reduz pico). Tambem libera ANTES do release do semaforo
+                // pra que a memoria ja esteja disponivel quando outro
+                // shard pegar a vaga.
+                builder.index = ::gbwt::DynamicGBWT();
+                compress_sem.release();
+            }
+
             path_stores_[i] = std::make_unique<GbwtBackend>(std::move(gbwt_static));
             total_nodes_acc.fetch_add(local_syms, std::memory_order_relaxed);
         }
