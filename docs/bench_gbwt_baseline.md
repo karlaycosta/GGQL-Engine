@@ -458,6 +458,85 @@ usamos.
 de `paths_through_region` → usa SA samples), reverter este commit ou
 adicionar flag para regenerar samples sob demanda.
 
+### Análise profunda da libgbwt — outras avenidas exploradas
+
+Documentação das hipóteses investigadas mas não implementadas (com
+razão), para evitar repetir a investigação no futuro.
+
+#### Obs N — Thread oversubscription (não otimização, observação)
+
+`GBWTBuilder::flush()` lança internamente um `std::thread` (ver
+`gbwt/src/dynamic_gbwt.cpp:1742-1744`). Com OMP por shard, cada
+thread OMP cria 1 builder = 1 thread interna. Logo, 8 OMP threads =
+até 16 threads ativos.
+
+**Medição empírica em chm13_subset_100w (CPU i7-9750H, 12 cores físicos):**
+
+| Threads | Wall Fase 5 | Pico RSS | TOTAL Pipeline |
+|---:|---:|---:|---:|
+| 4 | **5.48 s** | **2.01 GB** | 20.36 s |
+| 6 | ~5.5 s | ~2.0 GB | 19.11 s |
+| 8 (default) | 5.59 s | 2.15 GB | 19.20 s |
+| 12 | ~5.5 s | ? | **27.43 s** (FM-Index colapsa para 17.44 s vs 8.66 s normal) |
+
+**Conclusão:** 4–6 threads é sweet spot para gBWT build. 12 threads
+quebra FM-Index drasticamente (oversubscription violenta). 8 threads
+é compromisso seguro entre gBWT e FM-Index. **Não mudei default** —
+depende de hardware do usuário e dataset.
+
+**Nota arquitetural:** o bottleneck dominante é o shard maior (8.97M
+símbolos) que não paraleliza intra-shard. Reduzir threads OMP só
+ajuda secundariamente (RAM peak, contention) — não acelera o caminho
+crítico.
+
+#### Não-otimizações documentadas (rejeitadas após análise)
+
+**`DynamicGBWT::insert()` direto (sem GBWTBuilder).** GBWTBuilder
+double-buffer existe para sobrepor feed (memcpy no input_buffer) com
+insertBatch (work real na thread interna). Para nossos paths grandes,
+feed é trivial — overhead do buffer manager poderia ser eliminado
+chamando DynamicGBWT diretamente. **Rejeitado**: cada chamada
+DynamicGBWT::insert faz alocações em record arrays (sem batching).
+Para 100 paths em 8 shards, sem batching seria mais lento.
+
+**`insert(text_buffer_type& text)` com tmp_path direto.** O overload
+de GBWTBuilder aceita `sdsl::int_vector_buffer<>` file-mapped que
+poderia consumir tmp_path sem materializar em RAM. **Rejeitado**:
+nosso `NodeBuffer` é incompatível com `int_vector_buffer<>` (formato
+diferente). Adaptar exigiria conversão prévia, que é a coisa que
+queremos evitar.
+
+**Reduzir `node_width` por shard.** Atualmente passamos node_width
+global (~24 bits para chm13). O input_buffer/construction_buffer do
+GBWTBuilder dimensiona-se por node_width — passar bit_width(max_node_no_shard)
+reduziria buffers. **Rejeitado**: economia marginal (5-10% nos
+buffers, que já são pequenos com batch adaptativo de P3); risco de
+overflow se algum nó global vazar entre shards (nunca deveria, mas
+defesa em profundidade).
+
+**Multi-builder por shard com `GBWT(vector<GBWT>)` merge.** Idea
+seria sub-dividir o shard maior em K pedaços, processar em paralelo
+intra-shard, depois merge. **Rejeitado**: a invariante "sources não
+compartilham nós" é VIOLADA (sub-shards do mesmo componente
+compartilham todos os nós do componente). Sem alfabeto disjunto, o
+merge falha com "Sources X and Y both have node Z".
+
+#### Síntese de tudo
+
+Otimizações que funcionaram (P1, P3, P4): atacam **infraestrutura**
+do build (paralelismo OMP por shard, alocação dos buffers, samples
+desnecessários). Não tocam o que o GBWTBuilder vê.
+
+Otimizações que falharam (02b sub-shard, 02c sigma reduction): tentam
+**pré-processar input** para o GBWTBuilder. Competem com a estrutura
+interna do gBWT que já é otimizada — ou destroem a redundância (sub-
+shard) ou adicionam overhead de mapas (sigma reduction).
+
+**Padrão geral:** otimizações no nível do GGQL devem manter o input
+do GBWTBuilder bit-exato e atacar apenas wrapper. Mexer no input
+exige refactor profundo (idealmente: 1 GBWT global em vez de N
+shards), o que conflita com a arquitetura de coexistência atual.
+
 ### (template — preencher conforme avança)
 
 ```
