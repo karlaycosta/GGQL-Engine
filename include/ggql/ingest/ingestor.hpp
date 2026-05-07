@@ -246,7 +246,8 @@ class GfaIngestorMmapParallel {
            bool verbose = true, bool save_metadata = true, bool build_topology = false,
            bool build_fm_index = false, size_t max_gbwt_paths = 0, bool keep_gbwt_tmp = false,
            const std::string& cache_dir = ".idx/",
-           bool build_gbwt = true, bool build_snarls = true);
+           bool build_gbwt = true, bool build_snarls = true,
+           PathBackendKind path_backend = PathBackendKind::PathStorage);
 
     // Retorna ponteiro para a topologia CSR construída (nullptr se build_topology=false)
     [[nodiscard]] GfaCsrTopology* topology() noexcept { return res_.topology.get(); }

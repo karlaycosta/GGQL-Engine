@@ -1914,7 +1914,8 @@ std::expected<IngestStatsParallel, std::string>
 GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, double gamma,
                                 bool verbose, bool save_metadata, bool build_topology,
                                 bool build_fm_index, size_t max_gbwt_paths, bool keep_gbwt_tmp,
-                                const std::string& cache_dir, bool build_gbwt, bool build_snarls) {
+                                const std::string& cache_dir, bool build_gbwt, bool build_snarls,
+                                PathBackendKind path_backend) {
     using clock = std::chrono::high_resolution_clock;
 
     if (num_threads <= 0) {
@@ -1992,7 +1993,7 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
     // try_cache_hash adiante seria redundante (mtime+size já casou).
     if (complete_gbwt_only) {
         return complete_with_gbwt(filepath, cache_dir, num_threads, max_gbwt_paths, build_snarls,
-                                  verbose, IngestStatsParallel{}, t_start);
+                                  verbose, IngestStatsParallel{}, t_start, path_backend);
     }
 
     // ── verificação por hash XXH64 (só se mtime não casou) ───────────────────
@@ -2017,7 +2018,8 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
                 res_.mmap = std::make_unique<MmapFileParallel>(std::move(*mmap_res2));
             }
             return complete_with_gbwt(filepath, cache_dir, num_threads, max_gbwt_paths,
-                                      build_snarls, verbose, IngestStatsParallel{}, t_start);
+                                      build_snarls, verbose, IngestStatsParallel{}, t_start,
+                                      path_backend);
         }
         // try_cache_hash fechou mmap_data_; reabrir para pass1
         auto mmap_res2 = MmapFileParallel::open(filepath);
@@ -2030,7 +2032,8 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
     // ── ingestão completa (pass1 + MPHF + pass2 + topologia + save) ──────────
     return run_full_ingest(num_threads, gamma, verbose, save_metadata, build_topology,
                            build_fm_index, max_gbwt_paths, keep_gbwt_tmp, cache_dir, build_gbwt,
-                           build_snarls, file_sz, file_mtime_ns, gfa_hash, skip_pass1, t_start);
+                           build_snarls, file_sz, file_mtime_ns, gfa_hash, skip_pass1, t_start,
+                           path_backend);
 }
 
 } // namespace ggql
