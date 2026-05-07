@@ -245,22 +245,40 @@ GfaCsrTopology::build_path_storage_parallel(std::vector<GbwtGroup> groups,
     for (const auto& g : groups) { est_total_paths += g.path_names.size(); }
     path_names_.reserve(est_total_paths);
 
-    // ── Caminho Gbwt: serial, 1 GBWTBuilder por shard ────────────────────────
+    // Numero de threads desejado (compartilhado entre os caminhos PathStorage
+    // e Gbwt — definido aqui no topo para que o branch Gbwt abaixo possa
+    // referencia-lo antes do bloco PathStorage adiante).
+    const int requested_threads = (num_threads > 0) ? num_threads : 1;
+
+    // ── Caminho Gbwt: paralelo via OMP, 1 GBWTBuilder por shard ──────────────
     //
-    // Iteracao inicial — modo serial garante correcao independente de
-    // particionamento topologico. Otimizacao paralela (1 builder por shard
-    // simultaneo) requer garantir invariante "shards nao compartilham nos",
-    // ja garantida em groups vindos de repartition_groups_topological mas
-    // mantida verificada em refinamento futuro.
+    // Cada shard e auto-contido (cada path_stores_[i] e um GbwtBackend
+    // independente, sem merge cross-shard). A invariante "shards nao
+    // compartilham nos" e garantida upstream por repartition_groups_topological
+    // — entao podemos rodar N builders em paralelo com escrita em indices
+    // unicos de path_stores_[i] (sem race).
+    //
+    // O numero de threads e clamped por min(requested_threads, N) — nao
+    // vale a pena mais threads que shards. Sem modelo de custo elaborado
+    // por enquanto; cada DynamicGBWT em flight ocupa ate ~2*batch*node_bytes
+    // (com batch=INSERT_BATCH_SIZE=100M, ~1.6 GB pico por thread no pior caso).
+    // Caller deve dimensionar threads conforme RAM disponivel.
     if (backend == PathBackendKind::Gbwt) {
         const size_t batch_syms =
             static_cast<size_t>(::gbwt::DynamicGBWT::INSERT_BATCH_SIZE);
-        std::uint64_t total_nodes_serial = 0;
+        std::atomic<std::uint64_t> total_nodes_acc{0};
+
+        const int omp_threads_gbwt = static_cast<int>(
+            std::max<size_t>(1, std::min<size_t>(
+                static_cast<size_t>(requested_threads), N)));
 
         cli::step_info(fmt::format(
-            "GbwtBackend build (serial) · {} shards · batch {} simbolos",
-            N, batch_syms));
+            "GbwtBackend build (paralelo) · {} shards · {} threads · batch {} simbolos",
+            N, omp_threads_gbwt, batch_syms));
 
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic) num_threads(omp_threads_gbwt)
+#endif
         for (size_t i = 0; i < N; ++i) {
             auto& g = groups[i];
             if (g.in_ram_seqs.empty() && g.tmp_path.empty()) {
@@ -304,13 +322,14 @@ GfaCsrTopology::build_path_storage_parallel(std::vector<GbwtGroup> groups,
             // Move o DynamicGBWT do builder para um GBWT estatico (compresso).
             // Construtor GBWT(DynamicGBWT) faz a transformacao.
             auto gbwt_static = std::make_unique<::gbwt::GBWT>(builder.index);
-            // Libera RAM do DynamicGBWT antes de prosseguir para o proximo shard.
+            // Libera RAM do DynamicGBWT antes do destrutor (paralelo: outras
+            // threads podem estar ainda rodando — liberar cedo reduz pico).
             builder.index = ::gbwt::DynamicGBWT();
             path_stores_[i] = std::make_unique<GbwtBackend>(std::move(gbwt_static));
-            total_nodes_serial += local_syms;
+            total_nodes_acc.fetch_add(local_syms, std::memory_order_relaxed);
         }
 
-        // path_names em ordem de shard
+        // path_names em ordem de shard (serial — preserva ordem global).
         for (size_t i = 0; i < N; ++i) {
             for (auto& name : groups[i].path_names) {
                 path_names_.push_back(std::move(name));
@@ -320,7 +339,7 @@ GfaCsrTopology::build_path_storage_parallel(std::vector<GbwtGroup> groups,
         rebuild_offsets_();
 
         t.wall_s      = sec(clk::now() - wall_start).count();
-        t.total_nodes = total_nodes_serial;
+        t.total_nodes = total_nodes_acc.load();
         t.cpu_avg_s   = t.wall_s;
         t.cpu_max_s   = t.wall_s;
         monitor.stop();
@@ -336,8 +355,6 @@ GfaCsrTopology::build_path_storage_parallel(std::vector<GbwtGroup> groups,
 
     // ── Caminho PathStorage (paralelo, default) ──────────────────────────────
     std::atomic<uint64_t> total_nodes_acc{0};
-
-    const int requested_threads = (num_threads > 0) ? num_threads : 1;
 
     // ── Budget-based parallelism ──────────────────────────────────────────
     // PathStorageBuilder acumula `vector<node_type> nodes_` sem compressão

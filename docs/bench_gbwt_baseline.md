@@ -150,8 +150,55 @@ HPRC v1 chm13 para confirmar:
 
 ## Mudanças aplicadas
 
-_(adicionar uma seção por otimização aplicada, com data, commit e
-delta numérico)_
+### 01 — Paralelização do build Gbwt via OMP por shard (P1)
+
+Commit: (a preencher após git commit)
+Data: 2026-05-07
+
+**Mudança:** Substituído o loop serial em `build_path_storage_parallel`
+(branch `if (backend == PathBackendKind::Gbwt)`) por
+`#pragma omp parallel for schedule(dynamic) num_threads(omp_threads_gbwt)`.
+Cada thread processa um shard independente. `total_nodes_serial` (uint64)
+virou `std::atomic<uint64_t> total_nodes_acc` para acumulação thread-safe.
+A invariante "shards não compartilham nós" já era garantida upstream por
+`repartition_groups_topological`, então não precisa merge cross-shard.
+
+| Métrica | Baseline | **P1** | Δ |
+|---|---:|---:|---:|
+| **Tempo build (wall)** | 15.32 s | **6.11 s** | **2.51× mais rápido** |
+| Throughput | 1.05 M nós/s | **2.62 M nós/s** | 2.50× |
+| **Pico RSS (build isolado)** | 1.87 GB | **4.20 GB** | **2.25× MAIS RAM** |
+| ΔRSS Processo (Total) | 941.83 MB | 1.15 GB | 1.25× |
+| Tamanho do Índice (RAM) | 60.63 MB | 60.63 MB | igual ✓ |
+| `path_stores.bin` (disco) | 62.571.808 B | 62.571.808 B | **bit-exato** ✓ |
+| bits/nó | 31.72 | 31.72 | igual ✓ |
+| **TOTAL Pipeline** | 28.90 s | **20.01 s** | **1.44×** mais rápido |
+
+**O que mudou e o que não mudou:**
+
+- ✅ Tempo cai pela metade (2.5×)
+- ✅ Output bit-a-bit idêntico — `path_stores.bin` tem o MESMO tamanho e
+  conteúdo (parity test continua passando: `test_path_backend_coexistence`
+  em 0.53s)
+- ⚠️ Pico de RAM mais que dobrou — era esperado: agora 8 `DynamicGBWT` em
+  flight simultaneamente. Cada um pode crescer até `2 × INSERT_BATCH_SIZE
+  × node_bytes` (~1.6 GB por thread no pior caso com batch=100M).
+- ⚠️ Speedup abaixo do esperado (2.5× vs 4–8× ideal): bottleneck é o shard
+  maior (2.267.658 nós). Os outros 7 shards completam rápido mas a thread
+  do maior segura o wall-clock. Schedule `dynamic` minimiza a folga, mas
+  não pode acelerar o caminho crítico.
+- ✅ Compressão (bits/nó) inalterada — paralelismo não muda a estrutura
+  do BWT por shard.
+
+**Próximo gargalo identificado:** shard imbalance. Possíveis ataques:
+- Sub-shardar o maior componente em 2-4 fatias (mais paralelismo dentro
+  do componente, mas precisa garantir invariante de não-compartilhamento)
+- Batch adaptativo (P3): reduz batch_size por shard pequeno, libera RAM
+  para builders maiores
+
+**Validação de correção:** `test_path_backend_coexistence` (parity
+PathStorage vs Gbwt) continua passando — confirma que a paralelização
+não introduz divergência em `extract_into`.
 
 ### (template — preencher conforme avança)
 
