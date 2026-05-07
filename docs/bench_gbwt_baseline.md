@@ -264,6 +264,64 @@ Implementação em `src/storage/path_index.cpp` (branch
 ataque seguinte deve focar em sigma reduction local por shard, ou em
 sub-shardar o componente maior.
 
+### 02b — Sub-sharding adaptativo (DESCARTADO)
+
+Tentativa: 2026-05-07 (após P3, antes de sigma reduction)
+Decisão: descartar. Sub-sharding não é compatível com pangenoma denso.
+
+**Motivação inicial:** o speedup de P1 ficou em 2.5× (em vez dos 4–8×
+esperados) porque os shards são desbalanceados — o maior tem 8.97M
+símbolos, o menor 28. Com `schedule(dynamic)`, a thread do shard
+maior ainda trava o wall-clock. Hipótese: dividir o shard maior em
+K sub-fatias de paths consecutivos aumentaria paralelismo real.
+
+**Implementação:** dentro do branch `if (backend == PathBackendKind::Gbwt)`,
+adicionada pré-passada que:
+1. Calcula `target_per_shard = total_syms / (2 × omp_threads)`
+2. Para cada shard com `size > target` e `paths > 1`:
+   - Materializa tmp_path em `in_ram_seqs` se necessário (~72 MB extra
+     para o maior shard)
+   - Divide em K sub-shards contíguos (preserva ordem dos paths)
+3. Loop OMP processa o vetor expandido (8 → 22 sub-shards no caso)
+
+**Resultado em chm13_subset_100w:**
+
+| Métrica | P3 (sem sub-shard) | **02b (com sub-shard)** | Δ |
+|---|---:|---:|---:|
+| Wall build | 5.89 s | **4.69 s** | -20% (1.25×) ✓ |
+| **Pico RSS** | 2.14 GB | **5.09 GB** | **+138%** ❌ |
+| **Tamanho índice (RAM)** | 60.63 MB | **190.04 MB** | **+213%** ❌ |
+| **`path_stores.bin`** | 62.6 MB | **192.5 MB** | **+208%** ❌ |
+| **bits/nó** | 31.72 | **99.43** | **piorou 3×** ❌ |
+
+**Por que descartar:** o ganho de tempo (1.25×) é minúsculo comparado à
+degradação em todas as outras dimensões (3× pior em RAM, índice e
+compressão). O log mostra "8 shards → 22 sub-shards", ou seja, os 2
+maiores foram divididos em ~7 sub-fatias cada — cada sub-fatia ficou com
+1–2 paths apenas.
+
+**Lição arquitetural:** o gBWT comprime explorando **redundância entre
+paths similares dentro do mesmo índice**. Quando você divide os paths
+em sub-shards independentes, cada sub-GBWT vê apenas seus 1–2 paths
+isolados — não há redundância para o BWT explorar e cada sub-índice
+acaba pagando overhead estrutural fixo (header, samples, alfabeto
+local). Isso é o oposto do que se deveria fazer com gBWT.
+
+A intuição de paralelismo "divide-and-conquer" do PathStorage (que
+arrays disjuntos comprimem trivialmente independente do agrupamento)
+**não transfere** para gBWT.
+
+**Onde sub-sharding faria sentido:** apenas para PathStorage, onde a
+divisão não afeta compressão. Para Gbwt, o ataque correto à
+compressão/wall é via sigma reduction (não divide paths, só renumera
+nós dentro do shard) ou validação em pangenoma denso (HPRC v1, onde a
+compressão deve naturalmente cair para 1–2 bits/nó sem precisar tocar
+no número de shards).
+
+**Reversão:** `git checkout HEAD -- src/storage/path_index.cpp`
+descarta a tentativa preservando P1 + P3 intactos. Esta seção fica
+documentada para evitar que o problema seja tentado novamente.
+
 ### (template — preencher conforme avança)
 
 ```
