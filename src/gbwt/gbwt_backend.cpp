@@ -2,7 +2,10 @@
 
 #include "ggql/gbwt/gbwt_backend.hpp"
 
+#include "ggql/ingest/gbwt_group.hpp"  // gbwt_decode_node, kEndmarker
+
 #include <gbwt/gbwt.h>
+#include <gbwt/utils.h>  // gbwt::ENDMARKER
 #include <sdsl/io.hpp>
 
 #include <array>
@@ -32,22 +35,29 @@ GbwtBackend::~GbwtBackend() = default;
 GbwtBackend::GbwtBackend(GbwtBackend&&) noexcept            = default;
 GbwtBackend& GbwtBackend::operator=(GbwtBackend&&) noexcept = default;
 
-GbwtBackend::GbwtBackend(std::unique_ptr<gbwt::GBWT> gbwt) noexcept
+GbwtBackend::GbwtBackend(std::unique_ptr<::gbwt::GBWT> gbwt) noexcept
     : gbwt_(std::move(gbwt)) {}
 
 // ── IPathBackend ───────────────────────────────────────────────────────────
 
 void GbwtBackend::extract_into(std::size_t                 path_id,
                                std::vector<std::uint64_t>& out) const {
-    if (!gbwt_) {
-        out.clear();
-        return;
+    out.clear();
+    if (!gbwt_) { return; }
+
+    // ::gbwt::GBWT::extract retorna sequencia ENCODED (gbwt-bound: shift+1 +
+    // bit de orientacao). Para paridade com PathStorage (que ja armazena
+    // valores decodificados), aplicamos gbwt_decode_node aqui — espelha
+    // exatamente o comportamento de cb905db:src/storage/graph_algorithms.cpp.
+    //
+    // ENDMARKER (=0) e filtrado: nao representa um no real, e gbwt_decode_node
+    // sobre 0 e UB (wrap para UINT64_MAX).
+    const auto seq = gbwt_->extract(static_cast<::gbwt::size_type>(path_id));
+    out.reserve(seq.size());
+    for (const auto enc : seq) {
+        if (enc == ::gbwt::ENDMARKER) { continue; }
+        out.push_back(ggql::gbwt_decode_node(static_cast<std::uint64_t>(enc)));
     }
-    // gbwt::GBWT::extract retorna vector_type (== vector<gbwt::node_type>,
-    // que e uint64). Aqui copiamos para o buffer do caller substituindo o
-    // conteudo — segue o contrato de extract_into em PathStorage.
-    auto seq = gbwt_->extract(static_cast<gbwt::size_type>(path_id));
-    out.assign(seq.begin(), seq.end());
 }
 
 std::size_t GbwtBackend::num_paths() const noexcept {
@@ -67,7 +77,7 @@ std::size_t GbwtBackend::memory_bytes() const noexcept {
 // Layout on-disk:
 //   [0..7]   magic    "GGQLGB\0\0"  (8 B)
 //   [8..11]  version  u32           (4 B)
-//   [12..]   gbwt::GBWT::simple_sds_serialize payload (cabecalho proprio)
+//   [12..]   ::gbwt::GBWT::simple_sds_serialize payload (cabecalho proprio)
 //
 // O payload de simple_sds inclui sua propria estrutura/checksum gerenciados
 // pela libgbwt — nao replicamos aqui. O envelope GGQL serve apenas para
@@ -80,7 +90,7 @@ void GbwtBackend::save(std::ostream& out) const {
     if (!gbwt_) {
         // Shard vazio: escreve um header-only sem payload. O load detecta
         // ausencia de payload via num_paths/size = 0 do gbwt default-constr.
-        gbwt::GBWT empty;
+        ::gbwt::GBWT empty;
         empty.simple_sds_serialize(out);
     } else {
         gbwt_->simple_sds_serialize(out);
@@ -113,7 +123,7 @@ GbwtBackend GbwtBackend::load(std::istream& in) {
             "). Cache antigo — regenere via `ggql ingest`.");
     }
 
-    auto gbwt = std::make_unique<gbwt::GBWT>();
+    auto gbwt = std::make_unique<::gbwt::GBWT>();
     gbwt->simple_sds_load(in);
 
     if (!in.good()) {
