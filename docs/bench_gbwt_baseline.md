@@ -322,6 +322,75 @@ no número de shards).
 descarta a tentativa preservando P1 + P3 intactos. Esta seção fica
 documentada para evitar que o problema seja tentado novamente.
 
+### 02c — Sigma reduction local por shard (DESCARTADO)
+
+Tentativa: 2026-05-07 (após sub-shard 02b descartado)
+Decisão: descartar. Sigma reduction local não é eficaz com a arquitetura
+de shards atual (1 shard ≈ 1 componente conexo).
+
+**Motivação inicial:** os 31.72 bits/nó observados em P3 estão muito
+acima do esperado para pangenoma humano (1–2 bits/nó). Hipótese: o
+alfabeto que o GBWTBuilder vê é dimensionado pelo `node_width` global
+(~22 bits para chm13) em vez do alfabeto local pequeno (~20 bits para
+o maior shard). Renumerar os IDs dentro do shard 1..σ_local poderia
+permitir que a BWT acumule runs longos com menos símbolos distintos.
+
+**Implementação:** GbwtBackend ganhou `local_to_global_` (vector<u64>),
+serializado no envelope GGQL com kVersion bumped para v2. Build no
+`path_index.cpp` adicionou três passadas extras por shard:
+1. Coleta de IDs distintos (unordered_set<u64>)
+2. Sort + cria `local_to_global` + `global_to_local` (hashmap)
+3. Renumera in-place: encoded_global → encoded_local
+Depois insere no GBWTBuilder com IDs locais. extract_into aplica
+`local_to_global_[local]` antes de retornar.
+
+**Resultado em chm13_subset_100w:**
+
+| Métrica | P3 (sem sigma) | **02c (com sigma)** | Δ |
+|---|---:|---:|---:|
+| Wall build | 5.89 s | **7.73 s** | **+31%** ❌ |
+| Pico RSS | 2.14 GB | 2.50 GB | +17% |
+| Throughput | 2.72 M/s | 2.07 M/s | −24% |
+| **bits/nó** | 31.72 | **47.70** | **+50%** ❌ |
+| **`path_stores.bin`** | 62.6 MB | **94.6 MB** | **+51%** ❌ |
+| Tamanho índice (RAM) | 60.6 MB | 91.2 MB | +50% |
+
+**Por que descartar:** o mapa `local_to_global_` por shard adiciona ~32
+MB ao total (4.3M IDs distintos × 8 bytes). O ganho em compressão da
+BWT é nulo: como `repartition_groups_topological` produz 1 shard ≈ 1
+componente conexo, σ_local ≈ σ_componente — não há "alfabeto local
+pequeno" para explorar. Resultado: pagamos overhead do mapa (~50%
+extra) por zero ganho na BWT.
+
+Custo extra de wall: três passadas adicionais (coleta + renumeração)
+sobre os símbolos materializados em RAM, mais lookups de hashmap por
+símbolo. Soma ~30% no tempo total de build.
+
+**Lição arquitetural:** sigma reduction local **só vale a pena quando
+σ_local << σ_componente** — ou seja, quando múltiplos shards
+compartilham o mesmo componente (caso que `repartition_groups_topological`
+explicitamente evita por causa da invariante de não-merge cross-shard).
+A intuição "alfabeto pequeno → BWT comprime melhor" requer um pipeline
+onde shards são *sub-divisões* dum componente — exatamente o cenário
+que 02b já descartou.
+
+**Onde sigma reduction faria sentido:** num pipeline com **1 GBWT
+global** (sem shards), ou em pangenomas densos onde σ_componente >>
+σ_global de uma fração interessante (ex: HPRC v1 com componente
+gigante de 85M nós, mas onde paths típicos só visitam ~5-10M nós
+distintos cada). Não é o caso de chm13_subset_100w.
+
+**Reversão:** `git checkout HEAD -- src/storage/path_index.cpp
+src/gbwt/gbwt_backend.cpp include/ggql/gbwt/gbwt_backend.hpp`
+descarta a tentativa preservando P1 + P3. Esta seção fica documentada
+para referência futura.
+
+**Pendência:** o problema dos 31.72 bits/nó continua aberto. Próximo
+candidato: validar em HPRC v1 chm13 (com 28k paths e 1 componente
+gigante). É possível que a compressão "natural" do gBWT só apareça em
+densidade de haplótipos muito maior — chm13_subset_100w tem só 100
+paths, talvez sub-amostragem demais para o BWT explorar redundância.
+
 ### (template — preencher conforme avança)
 
 ```
