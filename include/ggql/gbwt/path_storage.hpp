@@ -1,25 +1,32 @@
 #pragma once
 
+#include "path_backend.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <istream>
 #include <ostream>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace ggql {
 
-// PathStorage — substituto interno de gbwt::GBWT otimizado para extração
-// massiva sequencial. Nós concatenados em vector<node_type>; cada path é
-// localizado por offsets[path_id]..offsets[path_id+1]. Imutável após build.
+// PathStorage — backend de paths sem compressao otimizado para extracao
+// massiva sequencial. Nos concatenados em vector<node_type>; cada path e
+// localizado por offsets[path_id]..offsets[path_id+1]. Imutavel apos build.
 //
 // `node_type = uint32_t` (Fase 6 onda 4 — Opção B-lite). Limita o grafo a
 // 2³² - 1 ≈ 4.3 bilhões de nós internos distintos. Cobre HPRC v1/v2 com
 // margem >7×. Para grafos com mais nós, voltar para uint64_t (passo único:
 // alterar o typedef abaixo + bump kVersion no save/load).
-class PathStorage {
+//
+// Implementa IPathBackend para coexistir com GbwtBackend (libgbwt). APIs
+// especificas (nodes_view zero-copy, extract_into uint32, path_size) ficam
+// fora da interface — uso direto via PathStorage* quando necessario.
+class PathStorage : public IPathBackend {
   public:
-    using node_type = std::uint32_t;
+    using node_type = IPathBackend::node_type;
 
     PathStorage() = default;
 
@@ -30,33 +37,45 @@ class PathStorage {
     PathStorage& operator=(const PathStorage&)     = default;
     PathStorage(PathStorage&&) noexcept            = default;
     PathStorage& operator=(PathStorage&&) noexcept = default;
-    ~PathStorage()                                  = default;
+    ~PathStorage() override                         = default;
 
     [[nodiscard]] static PathStorage
     from_paths(std::vector<std::vector<node_type>>&& paths);
 
-    // Cópia para buffer pré-alocado (substitui out por completo).
+    // ── Implementacao de IPathBackend ────────────────────────────────────────
+    void extract_into(std::size_t path_id,
+                      std::vector<std::uint64_t>& out) const override;
+
+    [[nodiscard]] std::size_t num_paths() const noexcept override {
+        return offsets_.size() - 1;  // invariante: offsets[0]=0 sentinel
+    }
+    [[nodiscard]] std::size_t total_nodes() const noexcept override {
+        return nodes_.size();
+    }
+    [[nodiscard]] std::size_t memory_bytes() const noexcept override;
+
+    void save(std::ostream& out) const override;
+
+    [[nodiscard]] std::string_view backend_name() const noexcept override {
+        return "PathStorage";
+    }
+
+    // ── APIs especificas (fora da interface IPathBackend) ────────────────────
+
+    // Copia para buffer uint32_t pre-alocado (substitui out por completo).
+    // Caminho rapido — memcpy direto sem promocao.
     void extract_into(std::size_t path_id, std::vector<node_type>& out) const;
 
-    // Overload de conveniência para callers que mantêm buffer em uint64_t
-    // (API pública `GfaCsrTopology::path_nodes(size_t, vector<uint64_t>&)`).
-    // Faz cópia com promoção uint32 → uint64 elemento-a-elemento.
-    void extract_into(std::size_t path_id, std::vector<std::uint64_t>& out) const;
-
-    // Span zero-copy sobre o storage interno; válido enquanto *this viver.
-    // Retorna `span<const uint32_t>` — em hot paths que iteram somando ou
-    // comparando IDs, prefira este sobre extract_into.
+    // Span zero-copy sobre o storage interno; valido enquanto *this viver.
+    // Hot paths que iteram somando ou comparando IDs devem preferir este
+    // sobre extract_into.
     [[nodiscard]] std::span<const node_type>
     nodes_view(std::size_t path_id) const noexcept;
 
     [[nodiscard]] std::size_t path_size(std::size_t path_id) const noexcept;
 
-    // Invariante: offsets_.size() == num_paths() + 1 (sentinel inicial 0 sempre presente).
-    [[nodiscard]] std::size_t num_paths() const noexcept { return offsets_.size() - 1; }
-    [[nodiscard]] std::size_t total_nodes() const noexcept { return nodes_.size(); }
-    [[nodiscard]] std::size_t memory_bytes() const noexcept;
-
-    void save(std::ostream& out) const;
+    // Factory estatica — load() nao pode ser virtual. O dispatch entre
+    // backends acontece em read_path_stores_payload() via magic bytes.
     [[nodiscard]] static PathStorage load(std::istream& in);
 
   private:
