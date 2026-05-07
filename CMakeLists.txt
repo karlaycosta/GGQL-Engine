@@ -33,9 +33,12 @@ target_include_directories(pegtl INTERFACE
 # Clone com: git submodule update --init third_party/sdsl-lite
 add_subdirectory(third_party/sdsl-cmake)
 
-# libgbwt removida na Fase 6 onda 3 — substituída por PathStorage interno
-# (include/ggql/gbwt/, src/gbwt/path_storage.cpp). Caches gerados antes da
-# migração precisam ser regerados via `ggql ingest`.
+# libgbwt — wrapper local em third_party/gbwt-cmake/ (padrão idêntico ao
+# sdsl-cmake). Compila os fontes do submódulo jltsiren/gbwt como biblioteca
+# estática `gbwt`. Coexiste com PathStorage (include/ggql/gbwt/) — backend
+# selecionável por flag em runtime/build (feat/path-backend-coexistence).
+# Clone com: git submodule update --init third_party/gbwt
+add_subdirectory(third_party/gbwt-cmake)
 
 # libsais (criação ultra-rápida de Suffix Arrays paralela)
 set(LIBSAIS_USE_OPENMP ON CACHE BOOL "Use OpenMP for parallelization" FORCE)

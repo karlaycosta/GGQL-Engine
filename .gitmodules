@@ -1,6 +1,9 @@
 [submodule "third_party/pegtl"]
 	path = third_party/pegtl
 	url = https://github.com/taocpp/PEGTL.git
+[submodule "third_party/gbwt"]
+	path = third_party/gbwt
+	url = https://github.com/jltsiren/gbwt.git
 [submodule "third_party/sdsl-lite"]
 	path = third_party/sdsl-lite
 	url = https://github.com/vgteam/sdsl-lite.git
