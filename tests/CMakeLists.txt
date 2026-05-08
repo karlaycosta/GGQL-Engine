@@ -28,9 +28,6 @@ endforeach()
 set(STORAGE_TEST_SRCS
     test_storage_csr.cpp
     test_storage_fm_index.cpp
-    test_path_storage.cpp
-    test_topology_pstore_build.cpp
-    test_path_backend_coexistence.cpp
 )
 
 foreach(src ${STORAGE_TEST_SRCS})

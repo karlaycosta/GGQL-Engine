@@ -15,7 +15,7 @@ dados do motor. A escolha correta reduz RAM, tempo de ingestão e tamanho do
 | C3 | **FM-Index** — BWT + tabela Occ + SA sampling | `build_fm_index` | ~1 GB |
 | C4 | **CSR Topology** — grafo fwd+bwd (Elias-Fano) | `build_topology` | ~1 GB |
 | C5 | **Snarls** — algoritmo Billi (SESE bidirected) | `build_snarls` (requer C4) | dominado por biedged graph (2× num_nodes adj.); 24 B por snarl em disco |
-| C6 | **Path index** — paths/haplótipos por shard (PathStorage **ou** Gbwt) | `build_gbwt` (requer C4) + `path_backend` | depende do backend (ver §"Backend de paths") |
+| C6 | **Path index** — paths/haplótipos via libgbwt (GbwtBackend) | `build_gbwt` (requer C4) | ~1–2 bits/nó em pangenoma denso (HPRC) |
 | C7 | **Path stats** — node_count + bp_length por path | `build_gbwt` | ~12 B × n_paths |
 
 > Os flags `build_gbwt` e `build_snarls` são independentes e validados
@@ -44,38 +44,27 @@ dados do motor. A escolha correta reduz RAM, tempo de ingestão e tamanho do
 
 ---
 
-## Backend de paths (C6) — PathStorage vs Gbwt
+## Backend de paths (C6) — GbwtBackend (libgbwt)
 
-A camada C6 tem dois backends intercambiáveis selecionáveis por flag. Ambos
-implementam a mesma interface `IPathBackend` (`extract_into`, `num_paths`,
-`save`/`load`, etc.), portanto a escolha é transparente para os callers.
+A camada C6 usa exclusivamente o **GbwtBackend** — wrapper sobre
+`gbwt::GBWT` da libgbwt (`third_party/gbwt`). gBWT é a BWT generalizada
+para coleções de paths em grafos, com compressão tipica de 1-2 bits/nó
+em pangenoma denso.
 
-| | **PathStorage** (default) | **Gbwt** |
-|---|---|---|
-| Estrutura | `vector<uint32_t>` concatenado, offsets por path | gBWT (BWT generalizado run-length comprimido) |
-| Lib | implementação interna (`include/ggql/gbwt/path_storage.hpp`) | `third_party/gbwt` (jltsiren/gbwt @ MIT) |
-| Disco/RAM | **4 B/nó** (uint32 cru) | **~1–2 bits/nó** em pangenoma humano |
-| `extract_into` | O(L) memcpy direto | O(L) com LF-stepping (decode + filter ENDMARKER) |
-| `nodes_view` zero-copy | sim (`span<const uint32_t>`) | não (precisaria descomprimir para buffer) |
-| Build | paralelo (1 PathStorageBuilder por shard via OMP) | serial inicial (1 GBWTBuilder por shard sequencial) — paralelo é refinamento futuro |
-| Magic em disco | `GGQLPS\0\0` | `GGQLGB\0\0` |
-| Suporta queries posicionais (locate/find) | não | sim (via `gbwt::GBWT::locate` etc., expostas por `GbwtBackend::raw()`) |
+| Característica | Valor |
+|---|---|
+| Estrutura | gBWT (BWT generalizado run-length comprimido) |
+| Lib | `third_party/gbwt` (jltsiren/gbwt @ MIT) |
+| Disco/RAM | ~1–2 bits/nó em pangenoma humano |
+| `extract_into` | O(L) com LF-stepping (decode + filter ENDMARKER) |
+| Build | paralelo (1 GBWTBuilder por shard via OMP) — ver `bench_gbwt_baseline.md` |
+| Magic em disco | `GGQLGB\0\0` |
+| Suporta queries posicionais (locate/find) | sim (via `gbwt::GBWT::locate` etc., expostas por `GbwtBackend::raw()`) |
 
-**Regra geral:**
-
-- **PathStorage** quando o uso real é só `extract_into` em loop (build_path_stats,
-  fallback de `FIND PATH`). Mais rápido para extração, mais simples, sem dependência
-  externa em hot path.
-- **Gbwt** quando RAM/disco é gargalo (HPRC com muitos haplótipos similares: 16,64
-  GiB → ~1 GiB), ou quando o roadmap inclui `crosses()` com latência viável.
-
-**Auto-detect na carga:** o reader de `path_stores.bin` lê 8 bytes de magic por
-shard e despacha para `PathStorage::load` ou `GbwtBackend::load` automaticamente.
-Mistura de backends no mesmo arquivo é suportada.
-
-**Comportamento default preservado:** PathStorage é o backend padrão em todos
-os perfis. A coexistência foi adicionada sem mudar comportamento existente —
-cache antigos continuam carregando normalmente.
+**Histórico:** durante o desenvolvimento existiu um segundo backend
+(`PathStorage`, array uint32 cru) selecionável por flag. Foi removido
+em 2026-05-08 — ver `docs/bench_gbwt_baseline.md` para a jornada de
+otimização P1–P6 que tornou o GbwtBackend viável como solução única.
 
 ---
 
@@ -222,7 +211,6 @@ divergentes entre espécies.
 | `build_topology` | `false` | Constrói CSR + Elias-Fano (C4) |
 | `build_snarls` | `true` | Detecta snarls via algoritmo Billi/SESE (C5) — requer C4 |
 | `build_gbwt` | `true` | Constrói índice de paths C6+C7 — requer C4 |
-| `path_backend` | `PathStorage` | Backend de C6: `PathStorage` (default), `Gbwt`, `Auto` (= PathStorage hoje) |
 
 > `build_gbwt` e `build_snarls` requerem `build_topology=true`. Quando
 > `build_gbwt=true` mas o GFA não contém W/P-lines, nada é gravado (o
@@ -230,29 +218,18 @@ divergentes entre espécies.
 > componentes 2-edge-connected significativos resulta em `snarls.bin`
 > com 0 registros.
 
-> `path_backend` é ortogonal a `build_gbwt`: o primeiro escolhe **como** os
-> paths são armazenados (PathStorage cru ou Gbwt comprimido); o segundo
-> apenas decide **se** a Camada 2 é construída.
-
-| Perfil | `save_metadata` | `build_fm_index` | `build_topology` | `build_snarls` | `build_gbwt` | `path_backend` |
-|--------|:-:|:-:|:-:|:-:|:-:|:-:|
-| Metagenômica | ✓ | ✓ | ✓ | — | — | n/a |
-| Pangenoma | ✓ | ✓ | ✓ | ✓ | ✓ | PathStorage |
-| Assembly graph | ✓ | opt | ✓ | ✓ | — | n/a |
-| Comparativa | ✓ | opt | ✓ | — | ✓ | PathStorage |
-
-> O default `PathStorage` em todos os perfis preserva o comportamento
-> atual. Para deploys com pressão de RAM (HPRC v1 com 4,47 G símbolos
-> ocupa 16,64 GiB no PathStorage vs ~1 GiB no Gbwt), troque para
-> `Gbwt` via flag — sem alterar o perfil.
+| Perfil | `save_metadata` | `build_fm_index` | `build_topology` | `build_snarls` | `build_gbwt` |
+|--------|:-:|:-:|:-:|:-:|:-:|
+| Metagenômica | ✓ | ✓ | ✓ | — | — |
+| Pangenoma | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Assembly graph | ✓ | opt | ✓ | ✓ | — |
+| Comparativa | ✓ | opt | ✓ | — | ✓ |
 
 ### CLI
 
-`bench_gbwt` aceita `--path-backend|-b <pathstorage|gbwt|auto>`:
-
 ```bash
-./build/bench_gbwt arquivo.gfa 8 --profile pangenome --path-backend gbwt
-./build/bench_gbwt arquivo.gfa 8 --profile pangenome --path-backend pathstorage  # default
+./build/bench_gbwt arquivo.gfa 8 --profile pangenome
+./build/bench_gbwt arquivo.gfa 8 --profile metagenomics --quiet
 ```
 
 API C++:
@@ -261,8 +238,7 @@ API C++:
 ingestor.ingest(filepath, threads, gamma, verbose,
                 save_metadata, build_topology, build_fm_index,
                 max_paths, keep_gbwt_tmp, cache_dir,
-                build_gbwt, build_snarls,
-                ggql::PathBackendKind::Gbwt);  // <-- backend
+                build_gbwt, build_snarls);
 ```
 
 ---

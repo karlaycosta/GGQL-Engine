@@ -246,8 +246,7 @@ class GfaIngestorMmapParallel {
            bool verbose = true, bool save_metadata = true, bool build_topology = false,
            bool build_fm_index = false, size_t max_gbwt_paths = 0, bool keep_gbwt_tmp = false,
            const std::string& cache_dir = ".idx/",
-           bool build_gbwt = true, bool build_snarls = true,
-           PathBackendKind path_backend = PathBackendKind::PathStorage);
+           bool build_gbwt = true, bool build_snarls = true);
 
     // Retorna ponteiro para a topologia CSR construída (nullptr se build_topology=false)
     [[nodiscard]] GfaCsrTopology* topology() noexcept { return res_.topology.get(); }
@@ -538,8 +537,7 @@ class GfaIngestorMmapParallel {
         const std::string& filepath, const std::string& cache_dir,
         int num_threads, size_t max_gbwt_paths, bool build_snarls,
         bool verbose, IngestStatsParallel stats,
-        std::chrono::high_resolution_clock::time_point t_start,
-        PathBackendKind path_backend = PathBackendKind::PathStorage);
+        std::chrono::high_resolution_clock::time_point t_start);
 
     [[nodiscard]] std::expected<IngestStatsParallel, std::string>
     run_full_ingest(int num_threads, double gamma, bool verbose,
@@ -549,8 +547,7 @@ class GfaIngestorMmapParallel {
                     bool build_gbwt, bool build_snarls,
                     uint64_t file_sz, int64_t file_mtime_ns,
                     uint64_t gfa_hash, bool skip_pass1,
-                    std::chrono::high_resolution_clock::time_point t_start,
-                    PathBackendKind path_backend = PathBackendKind::PathStorage);
+                    std::chrono::high_resolution_clock::time_point t_start);
 };
 
 } // namespace ggql

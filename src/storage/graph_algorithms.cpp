@@ -4,8 +4,8 @@
 #include "ggql/storage/topology.hpp"
 
 #include "ggql/cli/console.hpp"
+#include "ggql/gbwt/gbwt_backend.hpp"
 #include "ggql/gbwt/node_buffer.hpp"
-#include "ggql/gbwt/path_storage.hpp"
 #include "ggql/gbwt/types.hpp"
 
 #include <algorithm>

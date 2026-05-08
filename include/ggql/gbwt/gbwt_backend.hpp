@@ -1,21 +1,16 @@
 #pragma once
 
-// GbwtBackend — adapter sobre ::gbwt::GBWT (libgbwt) implementando
-// IPathBackend.
+// GbwtBackend — wrapper sobre ::gbwt::GBWT (libgbwt) que expoe a interface
+// usada pela GfaCsrTopology (Camada 2: paths/haplotipos por shard).
 //
-// Comprime paths via BWT generalizado (~1-2 bits/no em pangenoma humano,
-// vs 32 bits/no do PathStorage). Trade-off: extract via LF-stepping em vez
-// de memcpy direto (mais lento, mas uma ordem de magnitude menos disco/RAM).
+// Apos a remocao do PathStorage (commit pre-removal:
+// f630dc5 perf(allocator): jemalloc decay:100ms), GbwtBackend e o unico
+// backend de armazenamento de paths. Sem heranca/interface — classe
+// concreta, expoe metodos diretamente.
 //
-// Operacoes especificas do ::gbwt::GBWT (locate, find, paths_through_region,
-// haplotype sampling) ficam acessiveis via raw() — fora da interface
-// IPathBackend, que cobre apenas o contrato comum.
-//
-// O .hpp NAO inclui gbwt headers (pesados): usa pImpl com unique_ptr para
-// ::gbwt::GBWT. Quem precisa do tipo completo deve incluir explicitamente
-// <gbwt/gbwt.h> e usar raw().
-
-#include "path_backend.hpp"
+// O .hpp NAO inclui gbwt headers (pesados): usa pImpl com unique_ptr
+// para ::gbwt::GBWT. Quem precisa do tipo completo deve incluir
+// explicitamente <gbwt/gbwt.h> e usar raw().
 
 #include <cstddef>
 #include <cstdint>
@@ -31,13 +26,15 @@ class GBWT;
 
 namespace ggql {
 
-class GbwtBackend : public IPathBackend {
+class GbwtBackend {
   public:
-    GbwtBackend();
-    ~GbwtBackend() override;
+    using node_type = std::uint32_t;
 
-    // Move-only: ::gbwt::GBWT contem estruturas SDSL que nao sao trivialmente
-    // copiaveis e cujas copias profundas seriam caras.
+    GbwtBackend();
+    ~GbwtBackend();
+
+    // Move-only: ::gbwt::GBWT contem estruturas SDSL que nao sao
+    // trivialmente copiaveis e cujas copias profundas seriam caras.
     GbwtBackend(const GbwtBackend&)            = delete;
     GbwtBackend& operator=(const GbwtBackend&) = delete;
     GbwtBackend(GbwtBackend&&) noexcept;
@@ -47,26 +44,20 @@ class GbwtBackend : public IPathBackend {
     // ownership via unique_ptr — evita expor o tipo completo no header.
     explicit GbwtBackend(std::unique_ptr<::gbwt::GBWT> gbwt) noexcept;
 
-    // ── IPathBackend ────────────────────────────────────────────────────────
-    void extract_into(std::size_t path_id,
-                      std::vector<std::uint64_t>& out) const override;
+    // ── Interface usada pela topology ───────────────────────────────────────
 
-    [[nodiscard]] std::size_t num_paths()    const noexcept override;
-    [[nodiscard]] std::size_t total_nodes()  const noexcept override;
-    [[nodiscard]] std::size_t memory_bytes() const noexcept override;
+    // Hot path: copia a sequencia de nos do path para o buffer.
+    // Substitui o conteudo de `out` por completo.
+    void extract_into(std::size_t                 path_id,
+                      std::vector<std::uint64_t>& out) const;
 
-    void save(std::ostream& out) const override;
+    [[nodiscard]] std::size_t num_paths()    const noexcept;
+    [[nodiscard]] std::size_t total_nodes()  const noexcept;
+    [[nodiscard]] std::size_t memory_bytes() const noexcept;
 
-    [[nodiscard]] std::string_view backend_name() const noexcept override {
-        return "GbwtBackend";
-    }
+    void save(std::ostream& out) const;
 
     // ── Factory ─────────────────────────────────────────────────────────────
-    //
-    // load() le o magic bytes do GbwtBackend (escrito por save()), valida
-    // e entao chama ::gbwt::GBWT::simple_sds_load. Se o magic for de outro
-    // backend, lanca runtime_error — dispatch entre backends acontece em
-    // read_path_stores_payload (Task #6).
     [[nodiscard]] static GbwtBackend load(std::istream& in);
 
     // ── Acesso direto ao ::gbwt::GBWT subjacente ──────────────────────────────

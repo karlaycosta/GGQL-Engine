@@ -3,7 +3,7 @@
 #include "ggql/storage/topology.hpp"
 
 #include "ggql/cli/progress_tracker.hpp"
-#include "ggql/gbwt/path_storage.hpp"
+#include "ggql/gbwt/gbwt_backend.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -17,8 +17,8 @@
 namespace ggql {
 
 // ════════════════════════════════════════════════════════════════════════════
-// Destrutor — definido aqui onde PathStorage é tipo completo
-// (necessário para destruir unique_ptr<PathStorage>).
+// Destrutor — definido aqui onde GbwtBackend e tipo completo (necessario
+// para destruir unique_ptr<GbwtBackend> com forward decl no header).
 // ════════════════════════════════════════════════════════════════════════════
 GfaCsrTopology::~GfaCsrTopology() = default;
 

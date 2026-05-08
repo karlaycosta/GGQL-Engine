@@ -93,7 +93,6 @@ add_library(ggql_storage STATIC
     src/storage/path_index.cpp
     src/storage/fm_index.cpp
     src/storage/snarl_decomposition.cpp
-    src/gbwt/path_storage.cpp
     src/gbwt/gbwt_backend.cpp
 )
 target_compile_options(ggql_storage PRIVATE
@@ -167,14 +166,6 @@ target_compile_options(bench_topology PRIVATE
 )
 target_link_options(bench_topology PRIVATE -flto=auto)
 target_link_libraries(bench_topology PRIVATE ggql_storage)
-
-# bench_path_storage — mede dispatch via topology vs PathStorage direto.
-add_executable(bench_path_storage tools/bench_path_storage.cpp)
-target_compile_options(bench_path_storage PRIVATE
-    -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
-)
-target_link_options(bench_path_storage PRIVATE -flto=auto)
-target_link_libraries(bench_path_storage PRIVATE ggql_storage)
 
 # bench_graph_algorithms — mede build_path_stats, path_nodes,
 # make_component_remap e find_bubbles em isolamento.

@@ -1246,8 +1246,7 @@ IngestStatsParallel GfaIngestorMmapParallel::complete_with_snarls(
 std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::complete_with_gbwt(
     const std::string& /*filepath*/, const std::string& cache_dir, int num_threads,
     size_t max_gbwt_paths, bool build_snarls, bool verbose, IngestStatsParallel stats,
-    std::chrono::high_resolution_clock::time_point t_start,
-    PathBackendKind path_backend) {
+    std::chrono::high_resolution_clock::time_point t_start) {
     using clock = std::chrono::high_resolution_clock;
     using sec = std::chrono::duration<double>;
 
@@ -1299,10 +1298,9 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::complet
     }
     const uint8_t node_width = pass2.node_width;
     const auto t_gb0 = clock::now();
-    auto gbwt_t = res_.topology->build_path_storage_parallel(std::move(pass2.gbwt_groups),
-                                                              node_width,
-                                                              /*num_threads=*/1,
-                                                              path_backend);
+    auto gbwt_t = res_.topology->build_path_index_parallel(std::move(pass2.gbwt_groups),
+                                                            node_width,
+                                                            /*num_threads=*/1);
     const auto t_gb1 = clock::now();
     stats.elapsed_gbwt_s = gbwt_t.wall_s;
     stats.gbwt_cpu_avg_s = gbwt_t.cpu_avg_s;
@@ -1450,8 +1448,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
     int num_threads, double gamma, bool verbose, bool save_metadata, bool build_topology,
     bool build_fm_index, size_t max_gbwt_paths, bool keep_gbwt_tmp, const std::string& cache_dir,
     bool build_gbwt, bool build_snarls, uint64_t file_sz, int64_t file_mtime_ns, uint64_t gfa_hash,
-    bool skip_pass1, std::chrono::high_resolution_clock::time_point t_start,
-    PathBackendKind path_backend) {
+    bool skip_pass1, std::chrono::high_resolution_clock::time_point t_start) {
     using clock = std::chrono::high_resolution_clock;
     using sec = std::chrono::duration<double>;
 
@@ -1800,9 +1797,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
             }
 
             auto t_gbwt0 = clock::now();
-            auto gbwt_t = res_.topology->build_path_storage_parallel(std::move(topo_groups),
-                                                                      node_width, num_threads,
-                                                                      path_backend);
+            auto gbwt_t = res_.topology->build_path_index_parallel(std::move(topo_groups),
+                                                                    node_width, num_threads);
             auto t_gbwt1 = clock::now();
 
             stats.elapsed_gbwt_s = gbwt_t.wall_s;
@@ -1914,8 +1910,7 @@ std::expected<IngestStatsParallel, std::string>
 GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, double gamma,
                                 bool verbose, bool save_metadata, bool build_topology,
                                 bool build_fm_index, size_t max_gbwt_paths, bool keep_gbwt_tmp,
-                                const std::string& cache_dir, bool build_gbwt, bool build_snarls,
-                                PathBackendKind path_backend) {
+                                const std::string& cache_dir, bool build_gbwt, bool build_snarls) {
     using clock = std::chrono::high_resolution_clock;
 
     if (num_threads <= 0) {
@@ -1993,7 +1988,7 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
     // try_cache_hash adiante seria redundante (mtime+size já casou).
     if (complete_gbwt_only) {
         return complete_with_gbwt(filepath, cache_dir, num_threads, max_gbwt_paths, build_snarls,
-                                  verbose, IngestStatsParallel{}, t_start, path_backend);
+                                  verbose, IngestStatsParallel{}, t_start);
     }
 
     // ── verificação por hash XXH64 (só se mtime não casou) ───────────────────
@@ -2018,8 +2013,7 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
                 res_.mmap = std::make_unique<MmapFileParallel>(std::move(*mmap_res2));
             }
             return complete_with_gbwt(filepath, cache_dir, num_threads, max_gbwt_paths,
-                                      build_snarls, verbose, IngestStatsParallel{}, t_start,
-                                      path_backend);
+                                      build_snarls, verbose, IngestStatsParallel{}, t_start);
         }
         // try_cache_hash fechou mmap_data_; reabrir para pass1
         auto mmap_res2 = MmapFileParallel::open(filepath);
@@ -2032,8 +2026,7 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
     // ── ingestão completa (pass1 + MPHF + pass2 + topologia + save) ──────────
     return run_full_ingest(num_threads, gamma, verbose, save_metadata, build_topology,
                            build_fm_index, max_gbwt_paths, keep_gbwt_tmp, cache_dir, build_gbwt,
-                           build_snarls, file_sz, file_mtime_ns, gfa_hash, skip_pass1, t_start,
-                           path_backend);
+                           build_snarls, file_sz, file_mtime_ns, gfa_hash, skip_pass1, t_start);
 }
 
 } // namespace ggql

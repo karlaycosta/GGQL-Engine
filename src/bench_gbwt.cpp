@@ -21,7 +21,6 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <unistd.h>
@@ -41,11 +40,9 @@ static size_t read_process_rss_kb() {
 }
 
 int main(int argc, char* argv[]) {
-    // Coleta args posicionais e flags (--quiet/-q, --profile/-p <name>,
-    // --path-backend/-b <pathstorage|gbwt|auto>).
+    // Coleta args posicionais e flags (--quiet/-q, --profile/-p <name>).
     bool quiet = false;
     ggql::IngestProfile profile = ggql::IngestProfile::Pangenome;
-    std::optional<ggql::PathBackendKind> path_backend_override;
     std::vector<const char*> pos;
     for (int i = 1; i < argc; ++i) {
         std::string_view a{argv[i]};
@@ -61,16 +58,6 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             profile = *parsed;
-        } else if ((a == "--path-backend" || a == "-b") && i + 1 < argc) {
-            const std::string_view bv{argv[++i]};
-            auto parsed = ggql::parse_path_backend(bv);
-            if (!parsed) {
-                fmt::println(stderr,
-                             "Backend desconhecido: '{}'  (use: pathstorage|gbwt|auto)",
-                             bv);
-                return 1;
-            }
-            path_backend_override = *parsed;
         } else {
             pos.push_back(argv[i]);
         }
@@ -79,14 +66,11 @@ int main(int argc, char* argv[]) {
     if (pos.empty()) {
         fmt::println(stderr,
                      "Uso: bench_gbwt <arquivo.gfa> [threads] [max_paths] [--quiet|-q] "
-                     "[--profile|-p <name>] [--path-backend|-b <name>]\n"
+                     "[--profile|-p <name>]\n"
                      "  --profile pangenome     (default) tudo habilitado\n"
                      "  --profile metagenomics  sem gBWT, sem snarls\n"
                      "  --profile assembly      sem gBWT, com snarls\n"
-                     "  --profile comparative   com gBWT, sem snarls\n"
-                     "  --path-backend pathstorage  (default) array uint32 cru, ratio 4 B/no\n"
-                     "  --path-backend gbwt         BWT comprimido, ratio ~1-2 bits/no, extract via LF\n"
-                     "  --path-backend auto         heuristica futura (= pathstorage hoje)");
+                     "  --profile comparative   com gBWT, sem snarls");
         return 1;
     }
 
@@ -98,16 +82,12 @@ int main(int argc, char* argv[]) {
     const size_t max_paths = (max_p_arg == 0) ? std::numeric_limits<size_t>::max() : max_p_arg;
 
     const std::string cache_dir = path + ".idx";
-    auto pf = ggql::flags_for(profile);
-    if (path_backend_override) {
-        pf.path_backend = *path_backend_override;
-    }
+    const auto pf = ggql::flags_for(profile);
 
     cli::title("bench_gbwt · GfaCsrTopology gBWT");
     cli::kv("Arquivo", path);
     cli::kv("Threads", std::to_string(threads));
     cli::kv("Perfil", std::string(ggql::name_of(profile)));
-    cli::kv("Backend", std::string(ggql::name_of(pf.path_backend)));
     cli::kv("Max paths", (max_p_arg == 0) ? "ilimitado" : std::to_string(max_p_arg));
     cli::kv("Cache idx", cache_dir);
 
@@ -125,8 +105,7 @@ int main(int argc, char* argv[]) {
                                false,           // keep_gbwt_tmp
                                cache_dir,
                                pf.build_gbwt,
-                               pf.build_snarls,
-                               pf.path_backend);
+                               pf.build_snarls);
 
     if (!res) {
         cli::blank();

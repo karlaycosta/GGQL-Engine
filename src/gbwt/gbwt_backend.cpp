@@ -38,7 +38,7 @@ GbwtBackend& GbwtBackend::operator=(GbwtBackend&&) noexcept = default;
 GbwtBackend::GbwtBackend(std::unique_ptr<::gbwt::GBWT> gbwt) noexcept
     : gbwt_(std::move(gbwt)) {}
 
-// ── IPathBackend ───────────────────────────────────────────────────────────
+// ── Interface usada pela topology ─────────────────────────────────────────
 
 void GbwtBackend::extract_into(std::size_t                 path_id,
                                std::vector<std::uint64_t>& out) const {
@@ -46,8 +46,8 @@ void GbwtBackend::extract_into(std::size_t                 path_id,
     if (!gbwt_) { return; }
 
     // ::gbwt::GBWT::extract retorna sequencia ENCODED (gbwt-bound: shift+1 +
-    // bit de orientacao). Para paridade com PathStorage (que ja armazena
-    // valores decodificados), aplicamos gbwt_decode_node aqui — espelha
+    // bit de orientacao). Aplicamos gbwt_decode_node aqui para que o caller
+    // (path_nodes em GfaCsrTopology) receba IDs internos globais — espelha
     // exatamente o comportamento de cb905db:src/storage/graph_algorithms.cpp.
     //
     // ENDMARKER (=0) e filtrado: nao representa um no real, e gbwt_decode_node

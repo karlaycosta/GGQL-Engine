@@ -25,18 +25,19 @@
 //   offsets_cache ≈ 680 MB  LAZY — alocado só na 1ª chamada a find_bubbles
 //
 // ═══════════════════════════════════════════════════════════════════════════
-// CAMADA 2 — PathStorage  ("o mapa dos haplótipos")
+// CAMADA 2 — GbwtBackend  ("o mapa dos haplótipos")
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Indexa paths/haplótipos com PathStorage (CSR-like custom; Fase 6).
-// Construção sequencial path-a-path por shard; layout `int_vector<W>` +
-// `sd_vector` para offsets. Substitui o gBWT comprimido — extração
-// é memcpy direto, sem LF-mapping.
+// Indexa paths/haplótipos via libgbwt (third_party/gbwt) — gBWT é a BWT
+// generalizada para coleções de paths em grafos. Compressão tipica de
+// 1-2 bits/no em pangenoma denso. Cada shard (= componente conexo) vira
+// um GbwtBackend independente; gbwt_offsets_ mapeia path_id global para
+// (shard, local_id).
 //
 // API de paths:
 //   path_count()                         — número de paths indexados
 //   path_name(path_id)                   — nome do path
-//   build_path_storage_parallel(g,w,t)   — construção paralela do índice
+//   build_path_index_parallel(g,w,t)     — construção paralela do índice
 //
 // ═══════════════════════════════════════════════════════════════════════════
 // NOTA DE COMPILAÇÃO
@@ -51,9 +52,7 @@
 //   • Métodos inline triviais (< 5 LOC, hot paths de benchmark)
 //   • find_tips e find_repeats (inline por performance — hot paths medidos)
 
-#include "ggql/gbwt/path_backend.hpp"
-#include "ggql/gbwt/path_storage.hpp"
-#include "ggql/ingest/profile.hpp"  // PathBackendKind
+#include "ggql/gbwt/gbwt_backend.hpp"
 #include "ggql/ingest/gbwt_group.hpp"
 #include "ggql/storage/topology_types.hpp"
 
@@ -88,8 +87,9 @@ class GfaCsrTopology {
   public:
     GfaCsrTopology() = default;
 
-    // Destrutor virtual da interface IPathBackend ja resolve a destruicao
-    // dos shards. Mantido fora-de-linha para reduzir code bloat em headers.
+    // Destrutor declarado aqui; definido no .cpp onde GbwtBackend e tipo
+    // completo (necessario para destruir unique_ptr<GbwtBackend> com forward
+    // decl de ::gbwt::GBWT no header).
     ~GfaCsrTopology();
 
     // Sem cópia — contém unique_ptr e recursos grandes
@@ -364,23 +364,21 @@ class GfaCsrTopology {
 
     // ── Camada 2 — Construção do índice de paths ─────────────────────────────
 
-    // Constroi path_stores_ em paralelo a partir de N GbwtGroups.
-    // Os valores nos GbwtGroups vem no encoding gbwt-bound (shift+1 + bit de
-    // orientacao) — o builder decodifica via `gbwt_decode_node` antes de
-    // armazenar.
+    // Constroi path_stores_ (vector<GbwtBackend>) em paralelo a partir de N
+    // GbwtGroups. Cada shard vira um GbwtBackend independente (sem merge
+    // cross-shard). Os valores nos GbwtGroups vem no encoding gbwt-bound
+    // (shift+1 + bit de orientacao) e sao inseridos diretamente no GBWTBuilder.
     //
-    // backend escolhe o tipo concreto de cada shard:
-    //   - PathStorage: array uint32 cru, ratio 4 B/no, extract O(L) memcpy.
-    //     Caminho paralelo (1 builder por shard, OMP).
-    //   - Gbwt: gbwt::GBWT comprimido, ratio ~1-2 bits/no, extract via LF.
-    //     Por enquanto SERIAL (modo paralelo do gBWT requer particionamento
-    //     topologico — vira em refinamento futuro).
-    //   - Auto: equivale a PathStorage por enquanto (heuristica vem em #6).
-    [[nodiscard]] GbwtTimings build_path_storage_parallel(
+    // Otimizacoes aplicadas (P1+P3+P4+P5+P6 — ver docs/bench_gbwt_baseline.md):
+    //   - Paralelismo OMP por shard
+    //   - Batch adaptativo (clamp por shard_size)
+    //   - sample_interval=max (extract-only, sem locate)
+    //   - compress_sem cap em 2 simultaneas
+    //   - jemalloc allocator (linkado em ggql_storage)
+    [[nodiscard]] GbwtTimings build_path_index_parallel(
         std::vector<GbwtGroup> groups,
         uint8_t                node_width,
-        int                    num_threads = 1,
-        PathBackendKind        backend     = PathBackendKind::PathStorage);
+        int                    num_threads = 1);
 
     // ── Consultas ao índice de paths (inline triviais) ────────────────────────
     [[nodiscard]] size_t path_count() const noexcept { return path_names_.size(); }
@@ -490,15 +488,14 @@ class GfaCsrTopology {
     mutable std::vector<uint32_t> offsets_cache_fwd_;
     mutable std::vector<uint32_t> offsets_cache_bwd_;
 
-    // ── Camada 2: backend de paths (1 shard por componente) ─────────────────
+    // ── Camada 2: GbwtBackend (1 shard por componente conexo) ──────────────
     // path_stores_[i] indexa paths localmente; gbwt_offsets_ mapeia
     // global_path_id → (shard, local_id) via upper_bound.
     //
-    // O tipo concreto de cada shard pode ser PathStorage ou GbwtBackend
-    // (selecionavel por flag no IngestProfile). Acesso polimorfico via
-    // IPathBackend; ops especificas (nodes_view, gbwt::raw) requerem
-    // dynamic_cast.
-    std::vector<std::unique_ptr<IPathBackend>> path_stores_;
+    // GbwtBackend e wrapper sobre ::gbwt::GBWT (libgbwt em third_party/gbwt).
+    // Para operacoes posicionais avancadas (locate, find, paths_through_region)
+    // use GbwtBackend::raw() para acesso direto ao ::gbwt::GBWT.
+    std::vector<std::unique_ptr<GbwtBackend>> path_stores_;
     std::vector<size_t>                       gbwt_offsets_;
     std::vector<std::string>                  path_names_;
 

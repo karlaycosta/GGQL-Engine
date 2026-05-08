@@ -1,5 +1,5 @@
 // path_index.cpp — Construção paralela do índice de paths e persistência
-// (save/load) de GfaCsrTopology. Usa PathStorage (sem gBWT comprimido).
+// (save/load) de GfaCsrTopology. Usa GbwtBackend (libgbwt em third_party/gbwt).
 
 // ── jemalloc default config ──────────────────────────────────────────────────
 // jemalloc lê este símbolo global no startup. dirty_decay/muzzy_decay = 100ms
@@ -32,7 +32,6 @@ const char* malloc_conf = "dirty_decay_ms:100,muzzy_decay_ms:100";
 // Headers pesados — incluídos só aqui, não no .hpp público.
 #include "ggql/gbwt/gbwt_backend.hpp"
 #include "ggql/gbwt/node_buffer.hpp"
-#include "ggql/gbwt/path_storage.hpp"
 #include "ggql/storage/checksum_builder.hpp"
 
 #include <gbwt/dynamic_gbwt.h>  // GBWTBuilder, DynamicGBWT, vector_type
@@ -139,15 +138,17 @@ inline void write_path_stats_payload(std::ofstream& out,
               static_cast<std::streamsize>(n * sizeof(int64_t)));
 }
 
-// Formato path_stores.bin (Fase 4):
+// Formato path_stores.bin:
 //   [num_shards: u64]
 //   Para cada shard:
 //     [present: u8] (1 = não-nulo, 0 = nullptr)
-//     Se present: PathStorage::save() inline (header próprio + checksum)
-// Sem header global — cada shard é validado individualmente pelo seu checksum.
+//     Se present: GbwtBackend::save() inline (envelope GGQLGB + payload
+//                 simple_sds da libgbwt + checksum proprio)
+// Sem header global — cada shard e validado individualmente pelo proprio
+// envelope.
 inline void
-write_path_stores_payload(std::ofstream&                                          out,
-                          const std::vector<std::unique_ptr<IPathBackend>>& path_stores) {
+write_path_stores_payload(std::ofstream&                                       out,
+                          const std::vector<std::unique_ptr<GbwtBackend>>& path_stores) {
     const uint64_t n_shards = static_cast<uint64_t>(path_stores.size());
     out.write(reinterpret_cast<const char*>(&n_shards), sizeof(n_shards));
     for (const auto& ps : path_stores) {
@@ -157,63 +158,9 @@ write_path_stores_payload(std::ofstream&                                        
     }
 }
 
-// Magic bytes esperados de cada backend, usados para auto-detect no
-// dispatch shard-by-shard. Valores DEVEM bater com os escritos por
-// PathStorage::save() e GbwtBackend::save().
-inline constexpr std::array<char, 8> kMagicPathStorage =
-    {'G', 'G', 'Q', 'L', 'P', 'S', '\0', '\0'};
-inline constexpr std::array<char, 8> kMagicGbwtBackend =
-    {'G', 'G', 'Q', 'L', 'G', 'B', '\0', '\0'};
-
-// Le o magic do shard atual e dispatcha para a load() do backend correto.
-// Usa tellg/seekg para rebobinar o stream antes de chamar a factory de
-// cada backend (que espera ler o magic ela mesma como parte do envelope).
-inline std::unique_ptr<IPathBackend>
-load_one_shard(std::istream& in, uint64_t shard_idx) {
-    const auto pos = in.tellg();
-    if (pos == std::streampos(-1)) {
-        throw std::runtime_error(
-            "[topology] path_stores.bin: tellg() falhou no shard " +
-            std::to_string(shard_idx) + " (stream nao seekable)");
-    }
-
-    std::array<char, 8> magic{};
-    in.read(magic.data(), magic.size());
-    if (!in.good()) {
-        throw std::runtime_error(
-            "[topology] path_stores.bin: falha ao ler magic do shard " +
-            std::to_string(shard_idx));
-    }
-    in.seekg(pos);
-    if (!in.good()) {
-        throw std::runtime_error(
-            "[topology] path_stores.bin: seekg(rewind) falhou no shard " +
-            std::to_string(shard_idx));
-    }
-
-    if (magic == kMagicPathStorage) {
-        return std::make_unique<PathStorage>(PathStorage::load(in));
-    }
-    if (magic == kMagicGbwtBackend) {
-        return std::make_unique<GbwtBackend>(GbwtBackend::load(in));
-    }
-
-    // Magic desconhecido — provavelmente cache corrompido ou de versao
-    // futura. Inclui hex-dump do magic lido para facilitar diagnostico.
-    std::string magic_hex;
-    for (auto c : magic) {
-        magic_hex += fmt::format("{:02x} ", static_cast<unsigned char>(c));
-    }
-    throw std::runtime_error(
-        "[topology] path_stores.bin: magic bytes desconhecidos no shard " +
-        std::to_string(shard_idx) + ": " + magic_hex +
-        "(esperado GGQLPS\\0\\0 ou GGQLGB\\0\\0). Cache corrompido ou de "
-        "versao incompativel — regenere via `ggql ingest`.");
-}
-
 inline void
-read_path_stores_payload(std::istream&                                     in,
-                         std::vector<std::unique_ptr<IPathBackend>>& out_stores) {
+read_path_stores_payload(std::istream&                                  in,
+                         std::vector<std::unique_ptr<GbwtBackend>>& out_stores) {
     uint64_t n_shards = 0;
     in.read(reinterpret_cast<char*>(&n_shards), sizeof(n_shards));
     if (!in.good()) {
@@ -230,7 +177,8 @@ read_path_stores_payload(std::istream&                                     in,
                 std::to_string(i));
         }
         if (present) {
-            out_stores.push_back(load_one_shard(in, i));
+            out_stores.push_back(
+                std::make_unique<GbwtBackend>(GbwtBackend::load(in)));
         } else {
             out_stores.emplace_back();
         }
@@ -240,15 +188,27 @@ read_path_stores_payload(std::istream&                                     in,
 } // namespace
 
 // ════════════════════════════════════════════════════════════════════════════
-// build_path_storage_parallel — constrói path_stores_ direto a partir de
-// GbwtGroups. Custo: O(total_nodes), sem indireção via LF-mapping. Cada
-// shard é independente (sem merge final, diferente do gBWT antigo).
+// build_path_index_parallel — constroi path_stores_ a partir de GbwtGroups.
+//
+// Cada shard vira um GbwtBackend independente (sem merge cross-shard). A
+// invariante "shards nao compartilham nos" e garantida upstream por
+// repartition_groups_topological — o que permite N builders em paralelo
+// com escrita em indices unicos de path_stores_[i] (sem race).
+//
+// Otimizacoes aplicadas (ver docs/bench_gbwt_baseline.md):
+//   P1: paralelismo OMP por shard
+//   P3: batch_size adaptativo (clamp por shard_size)
+//   P4: sample_interval=max (extract-only, sem locate)
+//   P5: compress_sem cap em 2 simultaneas (reduz pico de RAM)
+//   P6: jemalloc allocator (linkado em ggql_storage)
+//
+// Cumulativo vs serial original: 4.41x mais rapido com -26% RAM em
+// chm13_subset_100w.
 // ════════════════════════════════════════════════════════════════════════════
 GfaCsrTopology::GbwtTimings
-GfaCsrTopology::build_path_storage_parallel(std::vector<GbwtGroup> groups,
-                                             uint8_t                node_width,
-                                             int                    num_threads,
-                                             PathBackendKind        backend) {
+GfaCsrTopology::build_path_index_parallel(std::vector<GbwtGroup> groups,
+                                           uint8_t                node_width,
+                                           int                    num_threads) {
     using clk = std::chrono::high_resolution_clock;
     using sec = std::chrono::duration<double>;
 
@@ -268,25 +228,9 @@ GfaCsrTopology::build_path_storage_parallel(std::vector<GbwtGroup> groups,
     for (const auto& g : groups) { est_total_paths += g.path_names.size(); }
     path_names_.reserve(est_total_paths);
 
-    // Numero de threads desejado (compartilhado entre os caminhos PathStorage
-    // e Gbwt — definido aqui no topo para que o branch Gbwt abaixo possa
-    // referencia-lo antes do bloco PathStorage adiante).
     const int requested_threads = (num_threads > 0) ? num_threads : 1;
 
-    // ── Caminho Gbwt: paralelo via OMP, 1 GBWTBuilder por shard ──────────────
-    //
-    // Cada shard e auto-contido (cada path_stores_[i] e um GbwtBackend
-    // independente, sem merge cross-shard). A invariante "shards nao
-    // compartilham nos" e garantida upstream por repartition_groups_topological
-    // — entao podemos rodar N builders em paralelo com escrita em indices
-    // unicos de path_stores_[i] (sem race).
-    //
-    // O numero de threads e clamped por min(requested_threads, N) — nao
-    // vale a pena mais threads que shards. Sem modelo de custo elaborado
-    // por enquanto; cada DynamicGBWT em flight ocupa ate ~2*batch*node_bytes
-    // (com batch=INSERT_BATCH_SIZE=100M, ~1.6 GB pico por thread no pior caso).
-    // Caller deve dimensionar threads conforme RAM disponivel.
-    if (backend == PathBackendKind::Gbwt) {
+    {
         const size_t kMaxBatch =
             static_cast<size_t>(::gbwt::DynamicGBWT::INSERT_BATCH_SIZE);
         // Floor: o GBWTBuilder com batch < ~1024 vira ineficiente (overhead
@@ -461,147 +405,8 @@ GfaCsrTopology::build_path_storage_parallel(std::vector<GbwtGroup> groups,
             if (ps) { total_bytes += ps->memory_bytes(); }
         }
         t.index_size_b = total_bytes;
-        return t;
     }
 
-    // ── Caminho PathStorage (paralelo, default) ──────────────────────────────
-    std::atomic<uint64_t> total_nodes_acc{0};
-
-    // ── Budget-based parallelism ──────────────────────────────────────────
-    // PathStorageBuilder acumula `vector<node_type> nodes_` sem compressão
-    // durante o build. Pico por job ≈ total_nós_do_shard × sizeof(node_type).
-    // Sem o clamp abaixo, datasets como HPRC (~10⁹ símbolos no maior shard)
-    // × num_threads em paralelo facilmente excedem 32 GB de RAM.
-    //
-    // Modelo: estima nós por shard via in_ram_seqs.size() (somatório) ou
-    // tamanho do tmp_path em bits / node_width. Toma o pior shard como
-    // custo unitário e divide o budget (75% da RAM disponível) por ele.
-    namespace fs = std::filesystem;
-    constexpr size_t kBytesPerNode      = sizeof(PathStorage::node_type);
-    constexpr size_t kPerJobOverhead    = 32u << 20; // dec buffer + reserves
-    size_t           max_shard_nodes    = 0;
-    size_t           total_est_nodes    = 0;
-    const uint64_t   bits_per_sym       = std::max<uint8_t>(node_width, 1);
-    for (const auto& g : groups) {
-        size_t shard_nodes = 0;
-        if (!g.in_ram_seqs.empty()) {
-            for (const auto& seq : g.in_ram_seqs) { shard_nodes += seq.size(); }
-        } else if (!g.tmp_path.empty()) {
-            try {
-                const size_t bytes_on_disk = static_cast<size_t>(fs::file_size(g.tmp_path));
-                shard_nodes = static_cast<size_t>((bytes_on_disk * 8ull) / bits_per_sym);
-            } catch (...) { shard_nodes = 0; }
-        }
-        max_shard_nodes  = std::max(max_shard_nodes, shard_nodes);
-        total_est_nodes += shard_nodes;
-    }
-    const size_t cost_per_job = max_shard_nodes * kBytesPerNode + kPerJobOverhead;
-    const size_t avail_bytes  = available_ram_kb() * 1024ull;
-    const size_t budget       = (avail_bytes > 0) ? (avail_bytes * 75ull / 100ull)
-                                                  : (size_t(8) << 30);
-    size_t       max_parallel = (cost_per_job > 0) ? std::max<size_t>(1, budget / cost_per_job)
-                                                   : static_cast<size_t>(requested_threads);
-    if (max_parallel > static_cast<size_t>(requested_threads)) {
-        max_parallel = static_cast<size_t>(requested_threads);
-    }
-    const int omp_threads = static_cast<int>(std::max<size_t>(1, max_parallel));
-
-    if (omp_threads < requested_threads) {
-        cli::step_info(fmt::format(
-            "PathStorage build: clamp {} → {} threads (maior shard ~{} MB, "
-            "budget {:.1f} GB)",
-            requested_threads, omp_threads,
-            (cost_per_job + (1u << 20) - 1) / (1u << 20),
-            budget / 1e9));
-    }
-
-    // Cada shard é independente — paraleliza por shard. Não há merge final
-    // (cada PathStorage é auto-contido).
-#ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic) num_threads(omp_threads)
-#endif
-    for (size_t i = 0; i < N; ++i) {
-        auto& g = groups[i];
-        if (g.in_ram_seqs.empty() && g.tmp_path.empty()) {
-            path_stores_[i] = std::make_unique<PathStorage>();
-            continue;
-        }
-
-        PathStorageBuilder                       builder;
-        std::vector<PathStorage::node_type>      dec;
-        size_t                                   local_syms = 0;
-
-        // Decode inline em uint32_t — equivalente a `gbwt_decode_node(enc)`
-        // mas sem o triplo cast (uint32→uint64→subtract→uint32). Para enc≥2
-        // (garantido pelo encoding +1 anti-ENDMARKER), `(enc>>1)-1` em uint32
-        // produz o mesmo resultado que em uint64 e ajuda o auto-vectorizer.
-        const auto decode32 = [](PathStorage::node_type enc) noexcept {
-            return static_cast<PathStorage::node_type>((enc >> 1) - 1u);
-        };
-
-        if (!g.in_ram_seqs.empty()) {
-            for (const auto& seq : g.in_ram_seqs) {
-                if (seq.empty()) { continue; }
-                dec.clear();
-                dec.reserve(seq.size());
-                for (auto enc : seq) { dec.push_back(decode32(enc)); }
-                builder.insert(dec);
-                local_syms += dec.size();
-            }
-        } else {
-            ggql::NodeBuffer buf(g.tmp_path, std::ios::in, 64u << 20, node_width);
-            dec.clear();
-            dec.reserve(1u << 16);
-            for (std::uint64_t val : buf) {
-                if (val == ggql::kEndmarker) {
-                    if (!dec.empty()) {
-                        builder.insert(dec);
-                        local_syms += dec.size();
-                        dec.clear();
-                    }
-                } else {
-                    dec.push_back(decode32(static_cast<PathStorage::node_type>(val)));
-                }
-            }
-            if (!dec.empty()) {
-                builder.insert(dec);
-                local_syms += dec.size();
-            }
-            (void)::unlink(g.tmp_path.c_str());
-        }
-
-        path_stores_[i] = std::make_unique<PathStorage>(builder.finish());
-        total_nodes_acc.fetch_add(local_syms, std::memory_order_relaxed);
-    }
-
-    // path_names em ordem de shard (serial — preserva ordem global).
-    for (size_t i = 0; i < N; ++i) {
-        for (auto& name : groups[i].path_names) {
-            path_names_.push_back(std::move(name));
-        }
-    }
-
-    rebuild_offsets_();
-
-    t.wall_s      = sec(clk::now() - wall_start).count();
-    t.total_nodes = total_nodes_acc.load();
-    t.cpu_avg_s   = t.wall_s;
-    t.cpu_max_s   = t.wall_s;
-
-    // Pico de RSS observado durante o build (em KB). Capturado pelo monitor
-    // em background. Útil para validar empiricamente o modelo de cost_per_job
-    // do clamp acima e ajustar 75%-budget se necessário.
-    monitor.stop();
-    t.peak_rss_kb = monitor.peak_kb();
-
-    // index_size_b reporta o tamanho efetivo dos PathStorages em RAM —
-    // próximo do tamanho em disco do path_stores.bin (sem o overhead do
-    // header de 32 B por shard). Preserva a UI do ingestor.
-    size_t total_bytes = 0;
-    for (const auto& ps : path_stores_) {
-        if (ps) { total_bytes += ps->memory_bytes(); }
-    }
-    t.index_size_b = total_bytes;
     return t;
 }
 

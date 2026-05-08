@@ -1,4 +1,10 @@
-# Baseline de performance — Backend Gbwt vs PathStorage
+# Baseline de performance — Backend Gbwt
+
+> **NOTA HISTÓRICA (2026-05-08):** o backend PathStorage foi removido
+> em commit posterior. O GGQL agora tem APENAS o GbwtBackend (libgbwt).
+> Este documento permanece como referência das otimizações P1–P6
+> aplicadas ao GbwtBackend. As comparações cruzadas com PathStorage
+> são preservadas como contexto histórico do trabalho de paridade.
 
 Documento de referência para medir o impacto das melhorias futuras na
 construção do índice Gbwt. Os números abaixo são o estado **antes** das
