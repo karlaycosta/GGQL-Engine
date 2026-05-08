@@ -4,20 +4,20 @@
 #include <string>
 #include <vector>
 
-#include "ggql/gbwt/types.hpp"
+#include <gbwt/utils.h>  // ::gbwt::vector_type, ::gbwt::ENDMARKER
 
 namespace ggql {
 
 // GbwtGroup — agrupa sequências de um job de construção do índice de paths.
 //
 // em RAM:  in_ram_seqs não vazio → tmp_path ignorado.
-// em disco: tmp_path aponta para um NodeBuffer temporário.
+// em disco: tmp_path aponta para um text_buffer_type temporário.
 // sigma (vg-equivalent): max encoded value + 1 (vide gbwt_encode_node).
 //   0 = desconhecido → usa num_nodes_ como fallback.
 struct GbwtGroup {
     std::string tmp_path;
     std::vector<std::string> path_names;
-    std::vector<ggql::gbwt::vector_type> in_ram_seqs;
+    std::vector<::gbwt::vector_type> in_ram_seqs;
     uint64_t sigma = 0;
 };
 
@@ -36,7 +36,7 @@ struct GbwtGroup {
 //   encode: ((internal_id + 1) << 1) | orient_bit  → mínimo = 2 (≠ ENDMARKER)
 //   decode: (encoded >> 1) - 1
 //
-// Usar EXCLUSIVAMENTE em valores que vão para NodeBuffer ou PathStorage.
+// Usar EXCLUSIVAMENTE em valores que vão para text_buffer_type ou GbwtBackend.
 // NÃO aplicar a E_fwd/E_bwd/CSR (não têm conceito de ENDMARKER e usam o
 // encoding bruto).
 

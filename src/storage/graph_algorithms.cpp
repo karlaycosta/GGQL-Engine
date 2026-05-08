@@ -5,8 +5,8 @@
 
 #include "ggql/cli/console.hpp"
 #include "ggql/gbwt/gbwt_backend.hpp"
-#include "ggql/gbwt/node_buffer.hpp"
-#include "ggql/gbwt/types.hpp"
+
+#include <gbwt/utils.h>  // ::gbwt::text_buffer_type, vector_type, ENDMARKER
 
 #include <algorithm>
 #include <atomic>
@@ -503,7 +503,7 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
 
     std::vector<bool>                                    output_is_disk(target_n, false);
     std::vector<std::string>                             comp_tmp(target_n);
-    std::vector<std::unique_ptr<ggql::NodeBuffer>>       comp_buf(target_n);
+    std::vector<std::unique_ptr<::gbwt::text_buffer_type>>       comp_buf(target_n);
 
     // B2: contador atômico estático garante unicidade entre chamadas
     // múltiplas na mesma instância (uintptr_t do `this` sozinho colidiria).
@@ -512,12 +512,12 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
     const uint64_t seq = call_seq.fetch_add(1, std::memory_order_relaxed);
 
     // Garante buffer de disco para o componente c; drena in_ram_seqs acumuladas.
-    const auto ensure_disk_buf = [&](size_t c) -> ggql::NodeBuffer& {
+    const auto ensure_disk_buf = [&](size_t c) -> ::gbwt::text_buffer_type& {
         if (!comp_buf[c]) {
             comp_tmp[c] = data_dir + "/gbwt_comp_" + std::to_string(c) + "_" +
                           std::to_string(reinterpret_cast<uintptr_t>(this)) + "_" +
                           std::to_string(seq) + ".tmp";
-            comp_buf[c] = std::make_unique<ggql::NodeBuffer>(comp_tmp[c], std::ios::out,
+            comp_buf[c] = std::make_unique<::gbwt::text_buffer_type>(comp_tmp[c], std::ios::out,
                                                               64u << 20, node_width);
             output_is_disk[c] = true;
             // Drena sequências in-RAM já acumuladas para este componente
@@ -525,7 +525,7 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
                 for (auto v : seq) {
                     comp_buf[c]->push_back(v);
                 }
-                comp_buf[c]->push_back(ggql::kEndmarker);
+                comp_buf[c]->push_back(::gbwt::ENDMARKER);
             }
             out[c].in_ram_seqs.clear();
             out[c].in_ram_seqs.shrink_to_fit();
@@ -534,9 +534,9 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
     };
 
     // Devolve comp_id do path a partir do primeiro nó válido
-    const auto path_comp = [&](const ggql::gbwt::vector_type& seq) -> size_t {
+    const auto path_comp = [&](const ::gbwt::vector_type& seq) -> size_t {
         for (auto enc : seq) {
-            if (enc != ggql::kEndmarker) {
+            if (enc != ::gbwt::ENDMARKER) {
                 const uint64_t nid = gbwt_decode_node(static_cast<uint64_t>(enc));
                 if (nid < node_component.size()) {
                     return std::min<size_t>(node_component[nid], target_n - 1);
@@ -555,7 +555,7 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
                     for (auto v : g.in_ram_seqs[si]) {
                         buf.push_back(v);
                     }
-                    buf.push_back(ggql::kEndmarker);
+                    buf.push_back(::gbwt::ENDMARKER);
                 } else {
                     out[c].in_ram_seqs.push_back(std::move(g.in_ram_seqs[si]));
                 }
@@ -564,20 +564,20 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
                 }
             }
         } else if (!g.tmp_path.empty()) {
-            ggql::NodeBuffer in_buf(g.tmp_path, std::ios::in, 64u << 20, node_width);
-            ggql::gbwt::vector_type cur;
+            ::gbwt::text_buffer_type in_buf(g.tmp_path, std::ios::in, 64u << 20, node_width);
+            ::gbwt::vector_type cur;
             cur.reserve(1u << 16);
             size_t pidx = 0;
 
             for (std::uint64_t val : in_buf) {
-                if (val == ggql::kEndmarker) {
+                if (val == ::gbwt::ENDMARKER) {
                     if (!cur.empty()) {
                         const size_t c = path_comp(cur);
                         auto& buf = ensure_disk_buf(c);
                         for (auto v : cur) {
                             buf.push_back(v);
                         }
-                        buf.push_back(ggql::kEndmarker);
+                        buf.push_back(::gbwt::ENDMARKER);
                         if (pidx < g.path_names.size()) {
                             out[c].path_names.push_back(std::move(g.path_names[pidx]));
                         }
@@ -595,7 +595,7 @@ GfaCsrTopology::repartition_groups_topological(std::vector<GbwtGroup> input_grou
                 for (auto v : cur) {
                     buf.push_back(v);
                 }
-                buf.push_back(ggql::kEndmarker);
+                buf.push_back(::gbwt::ENDMARKER);
                 if (pidx < g.path_names.size()) {
                     out[c].path_names.push_back(std::move(g.path_names[pidx]));
                 }

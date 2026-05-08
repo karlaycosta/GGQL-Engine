@@ -73,10 +73,7 @@
 #include <sdsl/int_vector_buffer.hpp>
 #include <sdsl/sd_vector.hpp>
 
-// Tipos do subsistema interno de paths (vector_type / node_type / ENDMARKER).
-// Usados em GbwtGroups e em repartition_groups_topological. Substitui a
-// dependência de <gbwt/utils.h> (Fase 6 — onda 3).
-#include "ggql/gbwt/types.hpp"
+#include <gbwt/utils.h>  // ::gbwt::vector_type, ENDMARKER (usados via GbwtGroup)
 
 // ── Garante C++23 em tempo de compilação ────────────────────────────────────
 static_assert(__cplusplus >= 202302L, "topology.hpp requer C++23 — compile com -std=c++23.");

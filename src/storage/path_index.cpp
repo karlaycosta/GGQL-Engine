@@ -31,7 +31,6 @@ const char* malloc_conf = "dirty_decay_ms:100,muzzy_decay_ms:100";
 
 // Headers pesados — incluídos só aqui, não no .hpp público.
 #include "ggql/gbwt/gbwt_backend.hpp"
-#include "ggql/gbwt/node_buffer.hpp"
 #include "ggql/storage/checksum_builder.hpp"
 
 #include <gbwt/dynamic_gbwt.h>  // GBWTBuilder, DynamicGBWT, vector_type
@@ -341,11 +340,11 @@ GfaCsrTopology::build_path_index_parallel(std::vector<GbwtGroup> groups,
                     local_syms += seq.size();
                 }
             } else {
-                ggql::NodeBuffer buf(g.tmp_path, std::ios::in, 64u << 20, node_width);
+                ::gbwt::text_buffer_type buf(g.tmp_path, std::ios::in, 64u << 20, node_width);
                 ::gbwt::vector_type seq;
                 seq.reserve(1u << 20);
                 for (std::uint64_t val : buf) {
-                    if (val == ggql::kEndmarker) {
+                    if (val == ::gbwt::ENDMARKER) {
                         if (!seq.empty()) {
                             builder.insert(seq, /*both_orientations=*/false);
                             local_syms += seq.size();
