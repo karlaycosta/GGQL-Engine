@@ -634,6 +634,77 @@ do `gbwt.cpp` upstream (gbwt_cpp23_modernization.md) — modificações
 no third_party/gbwt em si, não no GGQL. Esses são para queries (não
 build), então não impactam a Fase 5.
 
+### 05 — jemalloc como allocator default (P6)
+
+Commit: (a preencher)
+Data: 2026-05-07
+
+**Mudança:** Linka `libjemalloc.so.2` em `ggql_storage` (PUBLIC,
+propaga para todos os executáveis). jemalloc substitui o `malloc/free`
+do glibc para o processo inteiro. Detectado via `find_library` com
+fail-loud (`REQUIRED`).
+
+**Por que essa otimização:** o profile com `perf record` revelou que
+**~42% do tempo do gBWT build estava em allocator** (`malloc/free/
+malloc_consolidate`). Com 8 threads paralelas alocando milhões de
+small vectors em `DynamicRecord` + bulk-free quando `builder.index =
+DynamicGBWT()` libera o shard, o `ptmalloc` (glibc) saturou na
+contenção/coalescing.
+
+**Bench comparativo (chm13_subset_100w · 8 threads · g++-14):**
+
+| Allocator | Wall Fase 5 | Pico RSS | Throughput | Total Pipeline |
+|---|---:|---:|---:|---:|
+| glibc (baseline) | 5.60 s | 2.14 GB | 2.86 M/s | 19.04 s |
+| **jemalloc** ✅ | **3.47 s** | **1.38 GB** | **4.62 M/s** | 17.68 s |
+| mimalloc | 3.67 s | 1.73 GB | 4.37 M/s | 17.01 s |
+| tbbmalloc | 4.52 s | 1.44 GB | 3.55 M/s | 18.51 s |
+| tcmalloc_min | 3.75 s | 3.02 GB ⚠️ | 4.28 M/s | 17.20 s |
+
+**jemalloc venceu em todas as 3 dimensões** (wall, RSS, throughput).
+mimalloc 2º (~5% mais lento, +25% RAM); tbbmalloc 3º; tcmalloc_min
+explodiu RSS (cache muito agressivo).
+
+**Custo de portabilidade:**
+- Linux: nativo (`apt install libjemalloc-dev`)
+- macOS: funciona (`brew install jemalloc`) mas não é o default da Apple
+- Windows: suporte limitado (port mal mantido) — considerar mimalloc
+  como alternativa nesse ambiente (~5% mais lento mas cross-platform)
+
+**Implementação em CMakeLists.txt:**
+
+```cmake
+find_library(JEMALLOC_LIB NAMES jemalloc REQUIRED)
+target_link_libraries(ggql_storage PUBLIC ... ${JEMALLOC_LIB})
+```
+
+`PUBLIC` propaga para todos os executáveis que linkam `ggql_storage`
+(bench_gbwt, bench_*, ggql_repl, libggql_ffi.so, etc.).
+
+| Métrica | Antes (P5) | **P6 (+jemalloc)** | Δ |
+|---|---:|---:|---:|
+| Wall build | 5.54 s | **3.47 s** | **−37% (1.60×)** |
+| Pico RSS | 2.11 GB | **1.38 GB** | **−35%** |
+| Throughput | 2.89 M/s | **4.62 M/s** | **+60%** |
+| Disco | 62.548.320 B | 62.548.320 B | bit-exato ✓ |
+| bits/nó | 31.71 | 31.71 | igual |
+
+### Cumulativo final Baseline → P1 → P3 → P4 → P5 → P6
+
+| | Baseline | P1 | P3 | P4 | P5 | **P6 (jemalloc)** | Δ vs Baseline |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **Tempo build** | 15.32 s | 6.11 s | 5.89 s | 5.59 s | 5.54 s | **3.47 s** | **4.41× mais rápido** |
+| **Pico RSS** | 1.87 GB | 4.20 GB | 2.14 GB | 2.15 GB | 2.11 GB | **1.38 GB** | **−26% (melhor que serial!)** |
+| Throughput | 1.05 M/s | 2.62 | 2.72 | 2.87 | 2.89 | **4.62 M/s** | **4.4× maior** |
+| bits/nó | 31.72 | 31.72 | 31.72 | 31.71 | 31.71 | 31.71 | igual |
+| Disco | 62.5 MB | 62.5 | 62.5 | 62.5 | 62.5 | **62.5 MB** | bit-exato em todas |
+
+**Marcos atingidos:**
+- ✅ 4.41× speedup vs baseline serial
+- ✅ Pico de RAM MENOR que o baseline serial (+13% antes do P6 → −26% depois)
+- ✅ Output bit-exato preservado em TODAS as fases
+- ✅ Validado por parity test em cada commit
+
 ### (template — preencher conforme avança)
 
 ```

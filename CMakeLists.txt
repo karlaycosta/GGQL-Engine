@@ -69,6 +69,23 @@ target_compile_options(ggql_core PRIVATE
 )
 target_link_libraries(ggql_core PUBLIC fmt::fmt)
 
+# ── Allocator: jemalloc ──────────────────────────────────────────────────────
+# jemalloc substitui o malloc/free do glibc para o processo inteiro. Em
+# workloads alloc-heavy como o gBWT build (DynamicGBWT cria/libera milhoes
+# de small vectors em multiplas threads), jemalloc venceu glibc/mimalloc/
+# tbbmalloc/tcmalloc no nosso bench:
+#
+#   chm13_subset_100w (8 threads):
+#     glibc:    5.60 s · 2.14 GB · 2.86 M nos/s  (baseline)
+#     jemalloc: 3.47 s · 1.38 GB · 4.62 M nos/s  (-38% wall, -36% RSS, +62% throughput)
+#
+# REQUIRED falha o build se libjemalloc nao estiver disponivel — instale
+# com `sudo apt install libjemalloc-dev` (Ubuntu/Debian) ou
+# `brew install jemalloc` (macOS). Em Windows o suporte e limitado;
+# considere mimalloc como alternativa nesses ambientes.
+find_library(JEMALLOC_LIB NAMES jemalloc REQUIRED)
+message(STATUS "Found jemalloc: ${JEMALLOC_LIB}")
+
 # ── Camada 1 — ggql_storage (CSR + FM-Index + PathStorage + GbwtBackend) ─────
 add_library(ggql_storage STATIC
     src/storage/csr_builder.cpp
@@ -83,7 +100,7 @@ target_compile_options(ggql_storage PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
     -funroll-loops -ftree-vectorize -fomit-frame-pointer
 )
-target_link_libraries(ggql_storage PUBLIC ggql_core sdsl gbwt libsais tbb gomp pthread)
+target_link_libraries(ggql_storage PUBLIC ggql_core sdsl gbwt libsais tbb gomp pthread ${JEMALLOC_LIB})
 
 # ── Camada 2 — ggql_ingest (parser GFA; depende de Storage) ──────────────────
 add_library(ggql_ingest STATIC
