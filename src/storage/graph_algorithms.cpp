@@ -4,7 +4,7 @@
 #include "ggql/storage/topology.hpp"
 
 #include "ggql/cli/console.hpp"
-#include "ggql/gbwt/gbwt_backend.hpp"
+#include "ggql/storage/gbwt_backend.hpp"
 
 #include <gbwt/utils.h>  // ::gbwt::text_buffer_type, vector_type, ENDMARKER
 

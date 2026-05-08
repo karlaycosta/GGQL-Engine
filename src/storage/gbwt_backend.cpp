@@ -1,6 +1,6 @@
 // gbwt_backend.cpp — Implementacao do adapter GbwtBackend.
 
-#include "ggql/gbwt/gbwt_backend.hpp"
+#include "ggql/storage/gbwt_backend.hpp"
 
 #include "ggql/ingest/gbwt_group.hpp"  // gbwt_decode_node, kEndmarker
 

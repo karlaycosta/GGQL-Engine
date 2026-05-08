@@ -3,7 +3,7 @@
 #include "ggql/storage/topology.hpp"
 
 #include "ggql/cli/progress_tracker.hpp"
-#include "ggql/gbwt/gbwt_backend.hpp"
+#include "ggql/storage/gbwt_backend.hpp"
 
 #include <algorithm>
 #include <cstdint>

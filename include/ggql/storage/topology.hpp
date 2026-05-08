@@ -52,7 +52,7 @@
 //   • Métodos inline triviais (< 5 LOC, hot paths de benchmark)
 //   • find_tips e find_repeats (inline por performance — hot paths medidos)
 
-#include "ggql/gbwt/gbwt_backend.hpp"
+#include "ggql/storage/gbwt_backend.hpp"
 #include "ggql/ingest/gbwt_group.hpp"
 #include "ggql/storage/topology_types.hpp"
 

@@ -30,7 +30,7 @@ const char* malloc_conf = "dirty_decay_ms:100,muzzy_decay_ms:100";
 #include "ggql/util/memory_monitor.hpp"
 
 // Headers pesados — incluídos só aqui, não no .hpp público.
-#include "ggql/gbwt/gbwt_backend.hpp"
+#include "ggql/storage/gbwt_backend.hpp"
 #include "ggql/storage/checksum_builder.hpp"
 
 #include <gbwt/dynamic_gbwt.h>  // GBWTBuilder, DynamicGBWT, vector_type

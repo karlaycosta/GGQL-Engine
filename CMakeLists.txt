@@ -35,8 +35,8 @@ add_subdirectory(third_party/sdsl-cmake)
 
 # libgbwt — wrapper local em third_party/gbwt-cmake/ (padrão idêntico ao
 # sdsl-cmake). Compila os fontes do submódulo jltsiren/gbwt como biblioteca
-# estática `gbwt`. Coexiste com PathStorage (include/ggql/gbwt/) — backend
-# selecionável por flag em runtime/build (feat/path-backend-coexistence).
+# estática `gbwt`. Usado por GbwtBackend (Camada 2 da GfaCsrTopology) em
+# include/ggql/storage/gbwt_backend.hpp.
 # Clone com: git submodule update --init third_party/gbwt
 add_subdirectory(third_party/gbwt-cmake)
 
@@ -93,7 +93,7 @@ add_library(ggql_storage STATIC
     src/storage/path_index.cpp
     src/storage/fm_index.cpp
     src/storage/snarl_decomposition.cpp
-    src/gbwt/gbwt_backend.cpp
+    src/storage/gbwt_backend.cpp
 )
 target_compile_options(ggql_storage PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
