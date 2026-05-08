@@ -1,6 +1,28 @@
 // path_index.cpp — Construção paralela do índice de paths e persistência
 // (save/load) de GfaCsrTopology. Usa PathStorage (sem gBWT comprimido).
 
+// ── jemalloc default config ──────────────────────────────────────────────────
+// jemalloc lê este símbolo global no startup. dirty_decay/muzzy_decay = 100ms
+// libera páginas dirty/muzzy quase imediatamente, evitando que jemalloc segure
+// GBs em arenas durante fases de alocação intensiva sem bulk-free (snarl
+// decomposition).
+//
+// Validação empírica em chm13_subset_100w (P6 commit 52dab54):
+//   default (decay=10000ms): snarl peak RSS=4.75 GB · gBWT wall=3.55 s
+//   decay=100ms (este):      snarl peak RSS=0.27 GB (-94%) · gBWT wall=3.72 s (+5%)
+//
+// Win-win vs glibc:
+//   gBWT wall: 5.60 s → 3.72 s (-34%)
+//   gBWT RSS:  2.14 GB → 1.37 GB (-36%)
+//   snarl wall: 9.08 s → 8.32 s (-8%)
+//   snarl RSS: 0.49 GB → 0.27 GB (-45%)
+//
+// __attribute__((used)) garante que o linker preserve o símbolo na static lib.
+extern "C" {
+__attribute__((used))
+const char* malloc_conf = "dirty_decay_ms:100,muzzy_decay_ms:100";
+}
+
 #include "ggql/storage/topology.hpp"
 
 #include "ggql/cli/console.hpp"
