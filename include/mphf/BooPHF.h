@@ -15,11 +15,13 @@
 #include <cassert>
 #include <climits>
 #include <cmath>
+#include <concepts>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -189,9 +191,14 @@ class bitVector {
     uint64_t build_ranks(uint64_t offset = 0) {
         _ranks.reserve(2 + _size / _nb_bits_per_rank_sample);
 
+        // Sample rate is 512 bits = 8 words, so a sample is taken every 8th word.
+        // Equivalent to `(ii * 64) % _nb_bits_per_rank_sample == 0` but avoids
+        // reliance on the compiler's strength reduction.
+        static_assert(_nb_bits_per_rank_sample == 512);
+        constexpr uint64_t WORDS_PER_SAMPLE = _nb_bits_per_rank_sample / 64;
         uint64_t curent_rank = offset;
         for (size_t ii = 0; ii < _nchar; ii++) {
-            if (((ii * 64) % _nb_bits_per_rank_sample) == 0) {
+            if ((ii & (WORDS_PER_SAMPLE - 1)) == 0) {
                 _ranks.push_back(curent_rank);
             }
             curent_rank += std::popcount(_bitArray[ii]);
@@ -296,6 +303,14 @@ void thread_processLevel(thread_args<Range>* args);
        operator()(elem_t key, uint64_t seed) */
 template <typename elem_t, typename Hasher_t> class mphf {
 
+    static_assert(std::invocable<Hasher_t, elem_t>,
+                  "Hasher_t must support operator()(elem_t key) — used by _final_hash "
+                  "(std::unordered_map). See StringViewHasherParallel as reference.");
+    static_assert(std::invocable<Hasher_t, elem_t, uint64_t>,
+                  "Hasher_t must support operator()(elem_t key, uint64_t seed) — required "
+                  "by XorshiftHashFunctors for multi-hash derivation. The single-arg "
+                  "overload is the seed=0 case.");
+
     using MultiHasher_t = XorshiftHashFunctors<elem_t, Hasher_t>;
 
   public:
@@ -378,15 +393,16 @@ template <typename elem_t, typename Hasher_t> class mphf {
         for (bool isRunning = true; isRunning;) {
 
             // safely copy n items into buffer
-            _mutex.lock();
-            for (; inbuff < NBBUFF && (*shared_it) != until; ++(*shared_it)) {
-                buffer[inbuff] = *(*shared_it);
-                inbuff++;
+            {
+                std::scoped_lock lk(_mutex);
+                for (; inbuff < NBBUFF && (*shared_it) != until; ++(*shared_it)) {
+                    buffer[inbuff] = *(*shared_it);
+                    inbuff++;
+                }
+                if ((*shared_it) == until) {
+                    isRunning = false;
+                }
             }
-            if ((*shared_it) == until) {
-                isRunning = false;
-            }
-            _mutex.unlock();
 
             // do work on the n elems of the buffer
             for (uint64_t ii = 0; ii < inbuff; ii++) {
@@ -417,9 +433,10 @@ template <typename elem_t, typename Hasher_t> class mphf {
                         // last level reached: insert into exact hash
                         uint64_t hashidx = std::atomic_ref<uint64_t>(_hashidx).fetch_add(
                             1, std::memory_order_relaxed);
-                        _mutex.lock();
-                        _final_hash[val] = hashidx;
-                        _mutex.unlock();
+                        {
+                            std::scoped_lock lk(_mutex);
+                            _final_hash[val] = hashidx;
+                        }
                     } else {
                         // compute next hash and insert into bitarray
                         if (level == 0) {
@@ -438,7 +455,20 @@ template <typename elem_t, typename Hasher_t> class mphf {
         }
     }
 
+    // File format header. Bump VERSION whenever the on-disk layout of mphf
+    // changes (e.g. _final_hash representation, bitVector internals, _nb_levels
+    // semantics). MAGIC catches files that are not BooPHF-serialized at all.
+    static constexpr uint32_t SAVE_MAGIC = 0x42504846;  // "BPHF"
+    static constexpr uint16_t SAVE_VERSION = 1;
+
     void save(std::ostream& os) const {
+        const uint32_t magic = SAVE_MAGIC;
+        const uint16_t version = SAVE_VERSION;
+        const uint16_t flags = 0;
+        os.write(reinterpret_cast<char const*>(&magic), sizeof(magic));
+        os.write(reinterpret_cast<char const*>(&version), sizeof(version));
+        os.write(reinterpret_cast<char const*>(&flags), sizeof(flags));
+
         os.write(reinterpret_cast<char const*>(&_gamma), sizeof(_gamma));
         os.write(reinterpret_cast<char const*>(&_nb_levels), sizeof(_nb_levels));
         os.write(reinterpret_cast<char const*>(&_lastbitsetrank), sizeof(_lastbitsetrank));
@@ -457,6 +487,20 @@ template <typename elem_t, typename Hasher_t> class mphf {
     }
 
     void load(std::istream& is) {
+        uint32_t magic = 0;
+        uint16_t version = 0;
+        uint16_t flags = 0;
+        is.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+        is.read(reinterpret_cast<char*>(&version), sizeof(version));
+        is.read(reinterpret_cast<char*>(&flags), sizeof(flags));
+        if (magic != SAVE_MAGIC) {
+            throw std::runtime_error("BooPHF::load: not a BooPHF stream (bad magic)");
+        }
+        if (version != SAVE_VERSION) {
+            throw std::runtime_error("BooPHF::load: unsupported file version");
+        }
+        (void)flags;
+
         is.read(reinterpret_cast<char*>(&_gamma), sizeof(_gamma));
         is.read(reinterpret_cast<char*>(&_nb_levels), sizeof(_nb_levels));
         is.read(reinterpret_cast<char*>(&_lastbitsetrank), sizeof(_lastbitsetrank));
