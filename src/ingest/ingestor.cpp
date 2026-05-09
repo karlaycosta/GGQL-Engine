@@ -1141,7 +1141,13 @@ GfaIngestorMmapParallel::load_index(const std::string& dir, std::optional<uint64
         return std::nullopt;
     }
     res_.mphf = std::make_unique<boophf_parallel_t>();
-    res_.mphf->load(in_mphf);
+    try {
+        res_.mphf->load(in_mphf);
+    } catch (const std::exception& e) {
+        cli::step_info(fmt::format("falha ao carregar mphf: {} — regenerando", e.what()));
+        res_.mphf.reset();
+        return std::nullopt;
+    }
 
     res_.topology = std::make_unique<GfaCsrTopology>();
     try {
@@ -1480,7 +1486,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
         }
 
         res_.mphf = std::make_unique<boophf_parallel_t>(pass1.keys.size(), pass1.keys, num_threads,
-                                                        gamma, false, false);
+                                                        gamma);
         t_built = clock::now();
         if (verbose) {
             cli::step_ok("MPHF construído",
