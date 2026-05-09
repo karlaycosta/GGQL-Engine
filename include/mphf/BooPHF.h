@@ -21,6 +21,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -110,10 +111,12 @@ class bitVector {
     [[nodiscard]] size_t size() const noexcept { return _size; }
 
     [[nodiscard]] uint64_t bitSize() const noexcept {
-        return (_nchar * 64ULL + _ranks.capacity() * 64ULL);
+        return (_nchar * 64ULL + _ranks.size() * 64ULL);
     }
 
-    void clear() noexcept {
+    // Zera apenas os bits — _ranks fica intacto (uso em clearCollisions).
+    // Para reset completo, prefira reconstruir via ctor/resize.
+    void clearBits() noexcept {
         std::fill(_bitArray.begin(), _bitArray.end(), uint64_t{0});
     }
 
@@ -125,7 +128,7 @@ class bitVector {
         for (uint64_t ii = 0; ii < (size / 64ULL); ii++) {
             _bitArray[ids + ii] = _bitArray[ids + ii] & (~(cc->get64(ii)));
         }
-        cc->clear();
+        cc->clearBits();
     }
 
     [[nodiscard]] uint64_t operator[](uint64_t pos) const noexcept {
@@ -343,14 +346,20 @@ template <typename elem_t, typename Hasher_t> class mphf {
         for (int ii = 0; ii < _nb_levels; ii++) {
             totalsizeBitset += _levels[ii].bitset.bitSize();
         }
-        // unordered_map: ~42B per elem (uint64_t key); larger for other types
-        uint64_t totalsize = totalsizeBitset + _final_hash.size() * 42 * 8;
-        return totalsize;
+        // _final_hash: nó (key+value+next-ptr) + bucket (ptr) — aproximação
+        // baseada no sizeof real do tipo elem_t, em vez do antigo "42 bytes"
+        // hard-coded que assumia uint64_t como key. Para string_view:
+        // ~24B node (16B sv + 8B value) + 8B next + 8B bucket ≈ 48B.
+        constexpr uint64_t NODE_OVERHEAD = sizeof(elem_t) + sizeof(uint64_t)
+                                           + 2 * sizeof(void*);
+        const uint64_t buckets_b = _final_hash.bucket_count() * sizeof(void*);
+        const uint64_t nodes_b = _final_hash.size() * NODE_OVERHEAD;
+        return totalsizeBitset + (buckets_b + nodes_b) * 8;
     }
 
     template <typename Iterator>
-    void pthread_processLevel(std::vector<elem_t>& buffer, std::shared_ptr<Iterator> shared_it,
-                              std::shared_ptr<Iterator> until_p, int i) {
+    void worker_processLevel(std::span<elem_t> buffer, std::shared_ptr<Iterator> shared_it,
+                             std::shared_ptr<Iterator> until_p, int i) {
         (void)std::atomic_ref<int>(_nb_living).fetch_add(1, std::memory_order_relaxed);
         auto until = *until_p;
         uint64_t inbuff = 0;
@@ -471,25 +480,25 @@ template <typename elem_t, typename Hasher_t> class mphf {
         is.read(reinterpret_cast<char*>(&_lastbitsetrank), sizeof(_lastbitsetrank));
         is.read(reinterpret_cast<char*>(&_nelem), sizeof(_nelem));
 
+        // Mirror do early-return do ctor para n==0: ninguém serializa MPHF
+        // vazio, mas se acontecer (header válido + nelem=0), evita NaN
+        // em _proba_collision (divisão por zero).
+        if (_nelem == 0) {
+            _built = false;
+            return;
+        }
+
         _levels.resize(_nb_levels);
         for (int ii = 0; ii < _nb_levels; ii++) {
             _levels[ii].bitset.load(is);
         }
 
-        // recompute level sizes
+        // recompute level sizes (mirror de setup() — extraído para
+        // recompute_level_geometry no Tier 4 #3.5)
         _proba_collision =
             1.0 - pow(((_gamma * (double)_nelem - 1) / (_gamma * (double)_nelem)), _nelem - 1);
-        uint64_t previous_idx = 0;
         _hash_domain = (size_t)(ceil(double(_nelem) * _gamma));
-        for (int ii = 0; ii < _nb_levels; ii++) {
-            _levels[ii].idx_begin = previous_idx;
-            _levels[ii].hash_domain =
-                (((uint64_t)(_hash_domain * pow(_proba_collision, ii)) + 63) / 64) * 64;
-            if (_levels[ii].hash_domain == 0) {
-                _levels[ii].hash_domain = 64;
-            }
-            previous_idx += _levels[ii].hash_domain;
-        }
+        recompute_level_geometry();
 
         _final_hash.clear();
         size_t final_hash_size;
@@ -506,17 +515,10 @@ template <typename elem_t, typename Hasher_t> class mphf {
     }
 
   private:
-    void setup() {
-        if (_fastmode) {
-            setLevelFastmode.resize(_percent_elem_loaded_for_fastMode * (double)_nelem);
-        }
-
-        _proba_collision =
-            1.0 - pow(((_gamma * (double)_nelem - 1) / (_gamma * (double)_nelem)), _nelem - 1);
-
-        _nb_levels = 25;
-        _levels.resize(_nb_levels);
-
+    // Calcula idx_begin/hash_domain de cada nível e _fastModeLevel a partir
+    // de _hash_domain (já calculado pelo caller), _proba_collision e _nb_levels.
+    // Chamado por setup() (build path) e load() (deserialize path).
+    void recompute_level_geometry() {
         uint64_t previous_idx = 0;
         for (int ii = 0; ii < _nb_levels; ii++) {
             _levels[ii].idx_begin = previous_idx;
@@ -537,9 +539,23 @@ template <typename elem_t, typename Hasher_t> class mphf {
         }
     }
 
+    void setup() {
+        if (_fastmode) {
+            setLevelFastmode.resize(_percent_elem_loaded_for_fastMode * (double)_nelem);
+        }
+
+        _proba_collision =
+            1.0 - pow(((_gamma * (double)_nelem - 1) / (_gamma * (double)_nelem)), _nelem - 1);
+
+        _nb_levels = 25;
+        _levels.resize(_nb_levels);
+
+        recompute_level_geometry();
+    }
+
     // Compute level reached for `val` and return the hash that landed there.
     //
-    // Invariant on `bbhash` exit state — load-bearing for pthread_processLevel
+    // Invariant on `bbhash` exit state — load-bearing for worker_processLevel
     // which calls h0/h1/next once more to obtain the hash for `level`:
     //   - level == 0 (called with maxlevel=0): loop did not run, bbhash untouched
     //                → caller's h0(bbhash, val) yields the level-0 hash.
@@ -670,7 +686,7 @@ void thread_processLevel(thread_args<Range>* targ) {
     std::shared_ptr<it_type> until_p = std::static_pointer_cast<it_type>(targ->until_p);
     obw->_mutex.unlock();
 
-    obw->pthread_processLevel(buffer, startit, until_p, level);
+    obw->worker_processLevel(std::span<elem_t>(buffer), startit, until_p, level);
 }
 
 } // namespace boomphf
