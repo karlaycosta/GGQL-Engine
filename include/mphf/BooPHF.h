@@ -207,14 +207,18 @@ class bitVector {
     }
 
     [[nodiscard]] uint64_t rank(uint64_t pos) const noexcept {
-        uint64_t word_idx = pos / 64ULL;
-        uint64_t word_offset = pos % 64;
-        uint64_t block = pos / _nb_bits_per_rank_sample;
+        const uint64_t word_idx = pos / 64ULL;
+        const uint64_t word_offset = pos % 64;
+        const uint64_t block = pos / _nb_bits_per_rank_sample;
+        // The loop below reads up to WORDS_PER_SAMPLE=8 adjacent words.
+        // Prefetch the target word so its cache line (which usually covers
+        // the loop body too — 8 × 8B = 64B fits one line) is in flight.
+        __builtin_prefetch(&_bitArray[word_idx], 0, 0);
         uint64_t r = _ranks[block];
         for (uint64_t w = block * _nb_bits_per_rank_sample / 64; w < word_idx; ++w) {
             r += std::popcount(_bitArray[w]);
         }
-        uint64_t mask = (uint64_t(1) << word_offset) - 1;
+        const uint64_t mask = (uint64_t(1) << word_offset) - 1;
         r += std::popcount(_bitArray[word_idx] & mask);
         return r;
     }
