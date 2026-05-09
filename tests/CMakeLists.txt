@@ -42,6 +42,23 @@ foreach(src ${STORAGE_TEST_SRCS})
     add_test(NAME ${tname} COMMAND ${tname})
 endforeach()
 
+# ── Teste do BooPHF (header-only, só precisa de OpenMP) ──────────────────────
+add_executable(test_boophf test_boophf.cpp)
+target_compile_options(test_boophf PRIVATE
+    -std=c++23 -march=native -fopenmp -fno-strict-aliasing
+    $<$<CONFIG:Debug>:-O0 -g>
+    $<$<NOT:$<CONFIG:Debug>>:-O2>
+)
+target_link_options(test_boophf PRIVATE -fopenmp)
+add_test(NAME test_boophf COMMAND test_boophf)
+
+# Bench standalone (não roda em ctest — gera CSV em stdout).
+add_executable(bench_boophf bench_boophf.cpp)
+target_compile_options(bench_boophf PRIVATE
+    -std=c++23 -O3 -march=native -fopenmp -fno-strict-aliasing
+)
+target_link_options(bench_boophf PRIVATE -fopenmp)
+
 # ── Testes do query planner (dependem de ggql_query) ─────────────────────────
 add_executable(test_query_planner test_query_planner.cpp)
 target_compile_options(test_query_planner PRIVATE

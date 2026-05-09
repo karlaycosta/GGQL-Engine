@@ -170,7 +170,11 @@ class bitVector {
         return (_bitArray[pos >> 6ULL] >> (pos & 63)) & 1;
     }
 
-    // atomically return old val and set to 1
+    // atomically return old val and set to 1.
+    // memory_order_relaxed is safe here because mphf::processLevel relies on the
+    // implicit barrier at the end of `#pragma omp parallel` to publish all bits
+    // before clearCollisions/build_ranks read them. Do not change to a custom
+    // thread pool without revisiting this ordering.
     [[nodiscard]] uint64_t atomic_test_and_set(uint64_t pos) noexcept {
         uint64_t oldval = std::atomic_ref<uint64_t>(_bitArray[pos >> 6])
                               .fetch_or(1ULL << (pos & 63), std::memory_order_relaxed);
@@ -398,9 +402,12 @@ template <typename elem_t, typename Hasher_t> class mphf {
                         uint64_t idxl2 = std::atomic_ref<uint64_t>(_idxLevelsetLevelFastmode)
                                              .fetch_add(1, std::memory_order_relaxed);
                         // if exceeds expected size, fall back to slow mode
-                        // (shouldn't happen with a good hash and reasonable probabilities)
+                        // (shouldn't happen with a good hash and reasonable probabilities).
+                        // atomic_ref avoids a formal data race on _fastmode — other
+                        // OMP threads read it on the line above without synchronization.
                         if (idxl2 >= setLevelFastmode.size()) {
-                            _fastmode = false;
+                            std::atomic_ref<bool>(_fastmode).store(false,
+                                                                   std::memory_order_relaxed);
                         } else {
                             setLevelFastmode[idxl2] = val;
                         }
@@ -521,7 +528,18 @@ template <typename elem_t, typename Hasher_t> class mphf {
         }
     }
 
-    // compute level and return hash of last level reached
+    // Compute level reached for `val` and return the hash that landed there.
+    //
+    // Invariant on `bbhash` exit state — load-bearing for pthread_processLevel
+    // which calls h0/h1/next once more to obtain the hash for `level`:
+    //   - level == 0 (called with maxlevel=0): loop did not run, bbhash untouched
+    //                → caller's h0(bbhash, val) yields the level-0 hash.
+    //   - level == 1 (maxlevel=1): loop ran ii=0 (h0), bbhash[0]=h0_hash
+    //                → caller's h1(bbhash, val) yields the level-1 hash.
+    //   - level >= 2 (maxlevel=i): loop ran ii=0..i-1 → 1× h0, 1× h1, (i-2)× next
+    //                → caller's next(bbhash) yields the (i-1)-th next, i.e. level-i hash.
+    // Changing the call sequence (h0/h1/next) here will silently miscompute
+    // insertion slots in the caller — keep the cascade exact.
     uint64_t getLevel(hash_pair_t& bbhash, const elem_t& val, int* res_level,
                       int maxlevel = 100) const {
         int level = 0;
