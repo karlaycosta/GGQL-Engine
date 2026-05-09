@@ -92,60 +92,18 @@ class XorshiftHashFunctors {
 class bitVector {
 
   public:
-    bitVector() noexcept : _bitArray(nullptr), _size(0), _nchar(0) {}
+    bitVector() = default;
+    ~bitVector() = default;
+    bitVector(bitVector const&) = default;
+    bitVector(bitVector&&) noexcept = default;
+    bitVector& operator=(bitVector const&) = default;
+    bitVector& operator=(bitVector&&) noexcept = default;
 
-    explicit bitVector(uint64_t n) : _size(n), _nchar(1ULL + n / 64ULL) {
-        _bitArray = new uint64_t[_nchar]();
-    }
-
-    ~bitVector() { delete[] _bitArray; }
-
-    bitVector(bitVector const& r)
-        : _bitArray(nullptr), _size(r._size), _nchar(r._nchar), _ranks(r._ranks) {
-        if (_nchar > 0) {
-            _bitArray = new uint64_t[_nchar]();
-            std::memcpy(_bitArray, r._bitArray, _nchar * sizeof(uint64_t));
-        }
-    }
-
-    bitVector& operator=(bitVector const& r) {
-        if (&r != this) {
-            delete[] _bitArray;
-            _size = r._size;
-            _nchar = r._nchar;
-            _ranks = r._ranks;
-            if (_nchar > 0) {
-                _bitArray = new uint64_t[_nchar]();
-                std::memcpy(_bitArray, r._bitArray, _nchar * sizeof(uint64_t));
-            } else {
-                _bitArray = nullptr;
-            }
-        }
-        return *this;
-    }
-
-    bitVector& operator=(bitVector&& r) noexcept {
-        if (&r != this) {
-            delete[] _bitArray;
-            _size = r._size;
-            _nchar = r._nchar;
-            _ranks = std::move(r._ranks);
-            _bitArray = r._bitArray;
-            r._bitArray = nullptr;
-            r._size = 0;
-            r._nchar = 0;
-        }
-        return *this;
-    }
-
-    bitVector(bitVector&& r) noexcept : _bitArray(nullptr), _size(0), _nchar(0) {
-        *this = std::move(r);
-    }
+    explicit bitVector(uint64_t n) : _bitArray(1ULL + n / 64ULL, 0), _size(n), _nchar(1ULL + n / 64ULL) {}
 
     void resize(uint64_t newsize) {
-        delete[] _bitArray;
-        _nchar = (1ULL + newsize / 64ULL);
-        _bitArray = new uint64_t[_nchar]();
+        _nchar = 1ULL + newsize / 64ULL;
+        _bitArray.assign(_nchar, 0);
         _size = newsize;
     }
 
@@ -155,7 +113,9 @@ class bitVector {
         return (_nchar * 64ULL + _ranks.capacity() * 64ULL);
     }
 
-    void clear() noexcept { std::memset(_bitArray, 0, _nchar * sizeof(uint64_t)); }
+    void clear() noexcept {
+        std::fill(_bitArray.begin(), _bitArray.end(), uint64_t{0});
+    }
 
     // clear collisions in interval, only works with start and size multiple of 64
     void clearCollisions(uint64_t start, size_t size, bitVector* cc) {
@@ -226,7 +186,7 @@ class bitVector {
     void save(std::ostream& os) const {
         os.write(reinterpret_cast<char const*>(&_size), sizeof(_size));
         os.write(reinterpret_cast<char const*>(&_nchar), sizeof(_nchar));
-        os.write(reinterpret_cast<char const*>(_bitArray),
+        os.write(reinterpret_cast<char const*>(_bitArray.data()),
                  (std::streamsize)(sizeof(uint64_t) * _nchar));
         size_t sizer = _ranks.size();
         os.write(reinterpret_cast<char const*>(&sizer), sizeof(size_t));
@@ -238,7 +198,8 @@ class bitVector {
         is.read(reinterpret_cast<char*>(&_size), sizeof(_size));
         is.read(reinterpret_cast<char*>(&_nchar), sizeof(_nchar));
         this->resize(_size);
-        is.read(reinterpret_cast<char*>(_bitArray), (std::streamsize)(sizeof(uint64_t) * _nchar));
+        is.read(reinterpret_cast<char*>(_bitArray.data()),
+                (std::streamsize)(sizeof(uint64_t) * _nchar));
 
         size_t sizer;
         is.read(reinterpret_cast<char*>(&sizer), sizeof(size_t));
@@ -248,9 +209,9 @@ class bitVector {
     }
 
   protected:
-    uint64_t* _bitArray;
-    uint64_t _size;
-    uint64_t _nchar;
+    std::vector<uint64_t> _bitArray;
+    uint64_t _size = 0;
+    uint64_t _nchar = 0;
 
     // additional size for rank is epsilon * _size
     static constexpr uint64_t _nb_bits_per_rank_sample = 512;
