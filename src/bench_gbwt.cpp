@@ -23,6 +23,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <sys/resource.h>  // getrusage / RUSAGE_SELF
 #include <unistd.h>
 #include <vector>
 
@@ -37,6 +38,13 @@ static size_t read_process_rss_kb() {
     size_t pages_total = 0, pages_rss = 0;
     f >> pages_total >> pages_rss;
     return pages_rss * static_cast<size_t>(::sysconf(_SC_PAGESIZE)) / 1024;
+}
+
+// Pico de RSS desde o início do processo. ru_maxrss em Linux: KB.
+static size_t read_process_peak_rss_kb() {
+    struct rusage ru{};
+    ::getrusage(RUSAGE_SELF, &ru);
+    return static_cast<size_t>(ru.ru_maxrss);
 }
 
 int main(int argc, char* argv[]) {
@@ -114,10 +122,29 @@ int main(int argc, char* argv[]) {
     }
 
     const auto& st = *res;
-    const size_t rss_final = read_process_rss_kb();
+    const size_t peak_rss_kb = read_process_peak_rss_kb();
+    (void)rss_initial;  // rss_initial fica como referência; usamos peak agora
+
+    // Heurística cache hit: gBWT não foi (re)construído, então o painel de
+    // perf de gBWT não tem dados — só elapsed_total_s reflete o trabalho
+    // feito (load do cache + eventuais rebuilds incrementais como snarls).
+    const bool gbwt_was_built = st.elapsed_gbwt_s > 0.0 && st.gbwt_total_nodes > 0;
 
     cli::title("Métricas de Performance gBWT");
     cli::blank();
+
+    if (!gbwt_was_built) {
+        cli::note("(cache hit — gBWT já estava persistido; bench mediu carga + rebuilds incrementais)");
+        cli::blank();
+        cli::section("Resumo");
+        cli::kv_count("Total de Caminhos", st.path_count);
+        cli::kv_size("Pico RSS Processo", peak_rss_kb * 1024);
+        cli::kv_time("TOTAL (load + rebuilds)", st.elapsed_total_s);
+        cli::blank();
+        cli::ok("Benchmark concluído com sucesso");
+        cli::blank();
+        return 0;
+    }
 
     cli::section("Tempos de Execução");
     cli::kv_time("Tempo Real (Wall-clock)", st.elapsed_gbwt_s);
@@ -132,18 +159,14 @@ int main(int argc, char* argv[]) {
     if (st.gbwt_peak_rss_kb > 0) {
         cli::kv_size("Pico RSS (Build Isolado)", static_cast<size_t>(st.gbwt_peak_rss_kb) * 1024);
     }
-    cli::kv_size("ΔRSS Processo (Total)",
-                 (rss_final > rss_initial ? (rss_final - rss_initial) * 1024 : 0));
+    cli::kv_size("Pico RSS Processo (peak)", peak_rss_kb * 1024);
     cli::kv_size("Tamanho do Índice", st.gbwt_index_size_b);
 
     cli::section("Throughput e Eficiência");
-    const double nodes_per_s = (st.elapsed_gbwt_s > 0)
-                                   ? static_cast<double>(st.gbwt_total_nodes) / st.elapsed_gbwt_s
-                                   : 0.0;
+    const double nodes_per_s =
+        static_cast<double>(st.gbwt_total_nodes) / st.elapsed_gbwt_s;
     const double bits_per_node =
-        (st.gbwt_total_nodes > 0)
-            ? static_cast<double>(st.gbwt_index_size_b) * 8.0 / st.gbwt_total_nodes
-            : 0.0;
+        static_cast<double>(st.gbwt_index_size_b) * 8.0 / st.gbwt_total_nodes;
 
     cli::kv_count("Total de Caminhos", st.path_count);
     cli::kv_count("Total de Nós (Símbolos)", st.gbwt_total_nodes);
