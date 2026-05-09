@@ -26,7 +26,6 @@ const char* malloc_conf = "dirty_decay_ms:100,muzzy_decay_ms:100";
 #include "ggql/storage/topology.hpp"
 
 #include "ggql/cli/console.hpp"
-#include "ggql/cli/progress_tracker.hpp"
 #include "ggql/util/memory_monitor.hpp"
 
 // Headers pesados — incluídos só aqui, não no .hpp público.
@@ -42,8 +41,7 @@ const char* malloc_conf = "dirty_decay_ms:100,muzzy_decay_ms:100";
 #include <filesystem>
 #include <fmt/core.h>
 #include <fstream>
-#include <future>
-#include <semaphore>  // std::counting_semaphore (C++20)
+#include <future>// std::counting_semaphore (C++20)
 #include <string>
 #include <unistd.h> // ::unlink
 
@@ -479,7 +477,7 @@ void GfaCsrTopology::save(const std::string& dir) const {
     // snarls.bin é pequeno (ou inexistente); manter sequencial após a barreira.
     save_snarls_only(dir);
 
-    cli::ok("índice salvo", dir);
+    cli::step_ok_end("índice salvo", dir);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -711,7 +709,7 @@ void GfaCsrTopology::load(const std::string& dir) {
         // Cache antigo: snarls_ permanece vazio.
     }
 
-    cli::step_ok("índice carregado", dir);
+    cli::step_info("índice carregado", dir);
 }
 
 } // namespace ggql

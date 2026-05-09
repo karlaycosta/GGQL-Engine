@@ -1202,6 +1202,9 @@ GfaIngestorMmapParallel::load_index(const std::string& dir, std::optional<uint64
     st.gbwt_node_width = static_cast<uint8_t>(n_width);
     st.elapsed_total_s = std::chrono::duration<double>(t_end - t_start).count();
 
+    // step_ok intermediário: o caller (try_cache_*) decide se o estado final
+    // é "cache hit completo" (step_ok_end fecha Fase 0) ou "cache parcial"
+    // (step_ok_end + nova fase 6 para complete_with_snarls / Pass2 gBWT).
     cli::step_ok("cache carregado", ggql::format_seconds(st.elapsed_total_s));
     return st;
 }
@@ -1223,6 +1226,9 @@ IngestStatsParallel GfaIngestorMmapParallel::complete_with_snarls(
     if (!res_.topology) {
         return stats; // proteção; caller já validou
     }
+    if (verbose) {
+        cli::phase(6, "Snarls (FIND BUBBLE) — completando cache");
+    }
     try {
         const auto t0 = clock::now();
         auto snarls = snarl_decomposition::find_all_snarls(*res_.topology, /*num_threads=*/1);
@@ -1230,11 +1236,14 @@ IngestStatsParallel GfaIngestorMmapParallel::complete_with_snarls(
         res_.topology->set_snarls(std::move(snarls));
         res_.topology->save_snarls_only(cache_dir);
         if (verbose) {
-            cli::step_ok_end("Snarls (FIND BUBBLE)",
-                             fmt::format("{} snarls em {}", cli::format_count(count),
+            cli::step_ok_end("FIND BUBBLE",
+                             fmt::format("{} snarls · {}", cli::format_count(count),
                                          ggql::format_seconds(sec(clock::now() - t0).count())));
         }
     } catch (const std::exception& e) {
+        if (verbose) {
+            cli::step_fail_end("FIND BUBBLE", e.what());
+        }
         fmt::print(stderr,
                    "  [snarls] AVISO: falha ao computar snarls — FIND BUBBLE indisponível: {}\n",
                    e.what());
@@ -1376,7 +1385,7 @@ std::optional<IngestStatsParallel> GfaIngestorMmapParallel::try_cache_fast(
     if (meta_ok && fm_ok && gbwt_ok && !snarls_ok && res_.topology) {
         out_complete_snarls_only = true;
         if (verbose) {
-            cli::step_info("cache parcial (só snarls falta) — completando incrementalmente");
+            cli::step_ok_end("cache parcial — completando snarls");
         }
         return *res;
     }
@@ -1387,7 +1396,7 @@ std::optional<IngestStatsParallel> GfaIngestorMmapParallel::try_cache_fast(
     if (meta_ok && fm_ok && !gbwt_ok && res_.topology && res_.mphf) {
         out_complete_gbwt_only = true;
         if (verbose) {
-            cli::step_info("cache parcial (só gBWT falta) — Pass2 paths-only");
+            cli::step_ok_end("cache parcial — Pass2 paths-only");
         }
         return std::nullopt;
     }
@@ -1431,7 +1440,7 @@ std::optional<IngestStatsParallel> GfaIngestorMmapParallel::try_cache_hash(
         res_.mmap.reset(); // Fase 1 não usa mmap
         out_complete_snarls_only = true;
         if (verbose) {
-            cli::step_info("cache parcial (só snarls falta) — completando incrementalmente");
+            cli::step_ok_end("cache parcial — completando snarls");
         }
         return *res;
     }
@@ -1439,7 +1448,7 @@ std::optional<IngestStatsParallel> GfaIngestorMmapParallel::try_cache_hash(
         // FASE 2: mmap permanece aberto para Pass2 paths-only.
         out_complete_gbwt_only = true;
         if (verbose) {
-            cli::step_info("cache parcial (só gBWT falta) — Pass2 paths-only");
+            cli::step_ok_end("cache parcial — Pass2 paths-only");
         }
         return std::nullopt;
     }
@@ -1468,6 +1477,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
 
     if (!skip_pass1) {
         if (verbose) {
+            // Fecha Fase 0 (cache miss confirmado — vamos ingerir do zero).
+            cli::phase_end();
             cli::phase(1, do_early_remap ? "Ingestão de IDs (Passada 1 + L-pairs)"
                                          : "Ingestão de IDs (Passada 1)");
         }
@@ -1626,10 +1637,10 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
         auto t_topo1 = clock::now();
         stats.elapsed_topology_s = sec(t_topo1 - t_topo0).count();
         if (verbose) {
-            cli::step_info_end("CSR topology",
-                               fmt::format("{} · {}",
-                                           ggql::format_seconds(stats.elapsed_topology_s),
-                                           ggql::format_size(res_.topology->memory_bytes())));
+            cli::step_ok_end("CSR topology",
+                             fmt::format("{} · {}",
+                                         ggql::format_size(res_.topology->memory_bytes()),
+                                         ggql::format_seconds(stats.elapsed_topology_s)));
         }
 
         GfaCsrTopology::RemapResult remap_res;
@@ -1815,12 +1826,20 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
             stats.gbwt_peak_rss_kb = gbwt_t.peak_rss_kb;
             stats.gbwt_index_size_b = gbwt_t.index_size_b;
             stats.path_count = res_.topology->path_count();
+            // Se Path stats vai rodar logo depois, "gBWT construído" é
+            // intermediário (step_ok); senão fecha a Fase 5 (step_ok_end).
+            // Mantém a regra "uma fase = um └─".
+            const bool will_emit_path_stats = (store_up != nullptr) && verbose;
             if (verbose) {
-                cli::step_ok_end("gBWT construído",
-                                 fmt::format("{} paths · {} · {}",
+                const auto rhs = fmt::format("{} paths · {} · {}",
                                              cli::format_count(stats.path_count),
                                              ggql::format_size(stats.gbwt_index_size_b),
-                                             ggql::format_seconds(stats.elapsed_gbwt_s)));
+                                             ggql::format_seconds(stats.elapsed_gbwt_s));
+                if (will_emit_path_stats) {
+                    cli::step_ok("gBWT construído", rhs);
+                } else {
+                    cli::step_ok_end("gBWT construído", rhs);
+                }
             }
 
             // Aplica path stats: pré-computado (RAM/disco) ou GBWT decompression
@@ -1867,29 +1886,41 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
         // at-cg/billi): construção iterativa do biedged graph + SESE, paridade
         // exata com o binário Billi. Single-thread por enquanto.
         if (build_snarls && res_.topology) {
+            if (verbose) {
+                cli::phase(6, "Snarls (FIND BUBBLE)");
+            }
             try {
                 auto t_snarls0 = clock::now();
                 auto snarls = snarl_decomposition::find_all_snarls(*res_.topology, num_threads);
                 const auto count = snarls.size();
                 res_.topology->set_snarls(std::move(snarls));
                 if (verbose) {
-                    cli::step_info(
-                        "Snarls (FIND BUBBLE)",
-                        fmt::format("{} snarls em {}", cli::format_count(count),
+                    cli::step_ok_end(
+                        "FIND BUBBLE",
+                        fmt::format("{} snarls · {}", cli::format_count(count),
                                     ggql::format_seconds(sec(clock::now() - t_snarls0).count())));
                 }
             } catch (const std::exception& e) {
+                if (verbose) {
+                    cli::step_fail_end("FIND BUBBLE", e.what());
+                }
                 fmt::print(
                     stderr,
                     "  [snarls] AVISO: falha ao computar snarls — FIND BUBBLE indisponível: {}\n",
                     e.what());
             }
         }
+        if (verbose && res_.topology) {
+            cli::phase(7, "Persistência do índice");
+        }
         try {
             if (res_.topology) {
-                res_.topology->save(cache_dir);
+                res_.topology->save(cache_dir);  // emite step_ok_end "índice salvo"
             }
         } catch (const std::exception& e) {
+            if (verbose) {
+                cli::step_fail_end("save", e.what());
+            }
             fmt::print(stderr, "  [cache] AVISO: falha ao salvar topologia: {}\n", e.what());
         }
         if (save_ok) {
@@ -1988,7 +2019,10 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
     }
     res_.mmap = std::make_unique<MmapFileParallel>(std::move(*mmap_res));
     if (verbose) {
-        cli::step_ok_end("Arquivo mapeado", ggql::format_size(res_.mmap->size));
+        // step_ok intermediário (não fecha Fase 0): logo abaixo, try_cache_hash
+        // pode emitir step_info "cache válido (hash)" + step_ok_end "cache
+        // carregado". A Fase 0 só fecha quando há decisão final (hit ou miss).
+        cli::step_ok("Arquivo mapeado", ggql::format_size(res_.mmap->size));
     }
 
     // FASE 2: try_cache_fast detectou só gBWT faltando — Pass2 paths-only.
