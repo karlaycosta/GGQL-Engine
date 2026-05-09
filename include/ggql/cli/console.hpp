@@ -18,6 +18,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <string>
 #include <string_view>
 
@@ -90,6 +91,43 @@ void note(std::string_view text);
 // "4.294.760" — separador de milhar (estilo pt-BR: ponto).
 [[nodiscard("string formatada deve ser usada (aloca)")]]
 std::string format_count(std::size_t n);
+
+// "a · b · c" — junta partes não vazias com " · " (espaço-bullet-espaço).
+// Padrão visual da árvore: {quantidade · tamanho · tempo}.
+// Partes vazias são puladas — facilita compor rhs condicional.
+[[nodiscard("string formatada deve ser usada (aloca)")]]
+std::string format_summary(std::initializer_list<std::string_view> parts);
+
+// ─── RAII para fases ─────────────────────────────────────────────────────────
+// Abre uma fase no ctor e fecha automaticamente no dtor (chama phase_end()).
+// Garante a regra "uma fase = um └─" mesmo em paths com early-return ou throw.
+//
+// Uso:
+//   {
+//       cli::PhaseBlock p(1, "Ingestão de IDs");
+//       cli::step_ok("Passada 1", "...");
+//       cli::step_ok_end("Union-Find + bin-packing", "...");
+//   }  // ← phase_end() automático aqui
+//
+// Se o último step da fase já foi um *_end (que emite └─), o phase_end()
+// do dtor é no-op visual — mas continua emitindo o evento PhaseEnd para
+// consumers FFI. Para suprimir explicitamente, use release().
+class PhaseBlock {
+  public:
+    PhaseBlock(int number, std::string_view title);
+    explicit PhaseBlock(std::string_view title);
+    ~PhaseBlock();
+    PhaseBlock(const PhaseBlock&)            = delete;
+    PhaseBlock& operator=(const PhaseBlock&) = delete;
+    PhaseBlock(PhaseBlock&&)                 = delete;
+    PhaseBlock& operator=(PhaseBlock&&)      = delete;
+    // Marca a fase como já fechada (algum step_*_end foi chamado pelo
+    // usuário). Suprime phase_end() no dtor para evitar dupla emissão.
+    void release() noexcept { released_ = true; }
+
+  private:
+    bool released_ = false;
+};
 
 // ─── Progresso dentro da fase atual ──────────────────────────────────────────
 // "│  … {phase}  {percent:5.1f}%  ETA {eta}s  {rate}"

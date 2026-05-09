@@ -1477,8 +1477,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
 
     if (!skip_pass1) {
         if (verbose) {
-            // Fecha Fase 0 (cache miss confirmado — vamos ingerir do zero).
-            cli::phase_end();
+            // phase() agora fecha automaticamente a Fase 0 anterior (idempotente).
             cli::phase(1, do_early_remap ? "Ingestão de IDs (Passada 1 + L-pairs)"
                                          : "Ingestão de IDs (Passada 1)");
         }
@@ -1831,10 +1830,10 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
             // Mantém a regra "uma fase = um └─".
             const bool will_emit_path_stats = (store_up != nullptr) && verbose;
             if (verbose) {
-                const auto rhs = fmt::format("{} paths · {} · {}",
-                                             cli::format_count(stats.path_count),
-                                             ggql::format_size(stats.gbwt_index_size_b),
-                                             ggql::format_seconds(stats.elapsed_gbwt_s));
+                const auto paths_str = cli::format_count(stats.path_count) + " paths";
+                const auto size_str = ggql::format_size(stats.gbwt_index_size_b);
+                const auto time_str = ggql::format_seconds(stats.elapsed_gbwt_s);
+                const auto rhs = cli::format_summary({paths_str, size_str, time_str});
                 if (will_emit_path_stats) {
                     cli::step_ok("gBWT construído", rhs);
                 } else {

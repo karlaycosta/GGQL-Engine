@@ -27,6 +27,11 @@ namespace {
 std::atomic<int>  g_color_state{-1}; // -1=uninit, 0=off, 1=on
 std::atomic<bool> g_quiet{false};
 std::atomic<bool> g_in_progress{false};
+// Flag: existe uma fase aberta (entre `phase()` e o primeiro `phase_end`/
+// `step_*_end`). Permite `phase_end()` virar no-op se a fase já fechou
+// via step_*_end — evita `└─` duplicado quando PhaseBlock RAII roda dtor
+// após um step_*_end explícito.
+std::atomic<bool> g_phase_open{false};
 std::atomic<bool> g_is_phase{false};
 std::atomic<bool> g_is_step{false};
 
@@ -415,6 +420,10 @@ void set_quiet(bool on) noexcept {
 // ─── Fases ───────────────────────────────────────────────────────────────────
 
 void phase(int number, std::string_view title) {
+    // Se já havia uma fase aberta sem step_*_end final, fecha-a primeiro
+    // (emite └─). Se já fechou, é no-op (idempotente).
+    phase_end();
+    g_phase_open.store(true, std::memory_order_release);
     if (is_quiet()) { dispatch(ev_phase(number, title)); return; }
     stop_spinner();
     maybe_end_progress();
@@ -434,6 +443,8 @@ void phase(int number, std::string_view title) {
 }
 
 void phase(std::string_view title) {
+    phase_end();  // idempotente — fecha fase anterior se aberta
+    g_phase_open.store(true, std::memory_order_release);
     if (is_quiet()) { dispatch(ev_phase(-1, title)); return; }
     stop_spinner();
     maybe_end_progress();
@@ -449,11 +460,16 @@ void phase(std::string_view title) {
 }
 
 void phase_end() {
+    // Idempotente: se fase já foi fechada (via step_*_end), vira no-op visual.
+    // Continua emitindo o evento PhaseEnd para consumers FFI.
+    const bool was_open = g_phase_open.exchange(false, std::memory_order_acq_rel);
     if (is_quiet()) { dispatch(ev_text(EventKind::PhaseEnd, {})); return; }
     stop_spinner();       // encerra thread + seta g_in_progress=false
     maybe_end_progress(); // emite \n se a linha de fase ainda estava aberta
-    fmt::print(stderr, styled(s_bar()), "{}", GLYPH_END);
-    emit_newline();
+    if (was_open) {
+        fmt::print(stderr, styled(s_bar()), "{}", GLYPH_END);
+        emit_newline();
+    }
     dispatch(ev_text(EventKind::PhaseEnd, {}));
 }
 
@@ -500,32 +516,43 @@ void step_info(std::string_view text, std::string_view rhs) {
     dispatch(ev_text(EventKind::StepInfo, text, rhs));
 }
 
+// Helper: marca fase fechada para que phase_end() (PhaseBlock dtor) seja no-op.
+static inline void mark_phase_closed() noexcept {
+    g_phase_open.store(false, std::memory_order_release);
+}
+
 void step_ok_end(std::string_view text) {
+    mark_phase_closed();
     if (is_quiet()) { dispatch(ev_text(EventKind::StepOk, text)); return; }
     write_end_step(GLYPH_OK, s_ok(), text);
     dispatch(ev_text(EventKind::StepOk, text));
 }
 void step_ok_end(std::string_view text, std::string_view rhs) {
+    mark_phase_closed();
     if (is_quiet()) { dispatch(ev_text(EventKind::StepOk, text, rhs)); return; }
     write_end_step(GLYPH_OK, s_ok(), text, rhs);
     dispatch(ev_text(EventKind::StepOk, text, rhs));
 }
 void step_fail_end(std::string_view text) {
+    mark_phase_closed();
     if (is_quiet()) { dispatch(ev_text(EventKind::StepFail, text)); return; }
     write_end_step(GLYPH_FAIL, s_fail(), text);
     dispatch(ev_text(EventKind::StepFail, text));
 }
 void step_fail_end(std::string_view text, std::string_view rhs) {
+    mark_phase_closed();
     if (is_quiet()) { dispatch(ev_text(EventKind::StepFail, text, rhs)); return; }
     write_end_step(GLYPH_FAIL, s_fail(), text, rhs);
     dispatch(ev_text(EventKind::StepFail, text, rhs));
 }
 void step_info_end(std::string_view text) {
+    mark_phase_closed();
     if (is_quiet()) { dispatch(ev_text(EventKind::StepInfo, text)); return; }
     write_end_step(GLYPH_DOT, s_dot(), text);
     dispatch(ev_text(EventKind::StepInfo, text));
 }
 void step_info_end(std::string_view text, std::string_view rhs) {
+    mark_phase_closed();
     if (is_quiet()) { dispatch(ev_text(EventKind::StepInfo, text, rhs)); return; }
     write_end_step(GLYPH_DOT, s_dot(), text, rhs);
     dispatch(ev_text(EventKind::StepInfo, text, rhs));
@@ -696,6 +723,38 @@ std::string format_count(std::size_t n) {
         out.append(raw, i, 3);
     }
     return out;
+}
+
+std::string format_summary(std::initializer_list<std::string_view> parts) {
+    std::string out;
+    bool first = true;
+    for (auto p : parts) {
+        if (p.empty()) {
+            continue;
+        }
+        if (!first) {
+            out.append(" · ");
+        }
+        out.append(p);
+        first = false;
+    }
+    return out;
+}
+
+// ─── PhaseBlock ──────────────────────────────────────────────────────────────
+
+PhaseBlock::PhaseBlock(int number, std::string_view title) {
+    phase(number, title);
+}
+
+PhaseBlock::PhaseBlock(std::string_view title) {
+    phase(title);
+}
+
+PhaseBlock::~PhaseBlock() {
+    if (!released_) {
+        phase_end();
+    }
 }
 
 } // namespace ggql::cli
