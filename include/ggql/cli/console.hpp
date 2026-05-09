@@ -98,6 +98,16 @@ std::string format_count(std::size_t n);
 [[nodiscard("string formatada deve ser usada (aloca)")]]
 std::string format_summary(std::initializer_list<std::string_view> parts);
 
+// Formata duração para uso visual (não-perf): tempos sub-ms viram "imediato"
+// para evitar falsa precisão em operações lógicas (ex: std::move, set_*).
+// Para hot path / benchmark, prefira ggql::format_seconds (sempre preciso).
+//   < 1 ms       → "imediato"
+//   1 ms .. 999  → "X ms"
+//   1 s .. 59 s  → "X,YZ s"
+//   ≥ 60 s       → "X,YZ min"
+[[nodiscard("string formatada deve ser usada (aloca)")]]
+std::string format_duration_loose(double seconds);
+
 // ─── RAII para fases ─────────────────────────────────────────────────────────
 // Abre uma fase no ctor e fecha automaticamente no dtor (chama phase_end()).
 // Garante a regra "uma fase = um └─" mesmo em paths com early-return ou throw.

@@ -1867,10 +1867,12 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                 auto t_ps1 = clock::now();
                 if (verbose) {
                     const double ps_s = sec(t_ps1 - t_ps0).count();
-                    const char* method = stats_from_ram ? "RAM+disco (pré-computado)"
-                                                        : "GBWT decompression (fallback)";
+                    const std::string_view method = stats_from_ram
+                        ? "RAM+disco (pré-computado)"
+                        : "GBWT decompression (fallback)";
                     cli::step_ok_end("Path stats",
-                                     fmt::format("{} · {}", method, ggql::format_seconds(ps_s)));
+                                     cli::format_summary({method,
+                                                          cli::format_duration_loose(ps_s)}));
                 }
                 store_up.reset();
             }

@@ -741,6 +741,32 @@ std::string format_summary(std::initializer_list<std::string_view> parts) {
     return out;
 }
 
+std::string format_duration_loose(double seconds) {
+    if (seconds < 1e-3) {
+        return "imediato";
+    }
+    if (seconds < 1.0) {
+        return fmt::format("{:.0f} ms", seconds * 1e3);
+    }
+    if (seconds < 60.0) {
+        // Vírgula como separador decimal (estilo pt-BR).
+        auto s = fmt::format("{:.2f} s", seconds);
+        for (auto& c : s) {
+            if (c == '.') {
+                c = ',';
+            }
+        }
+        return s;
+    }
+    auto s = fmt::format("{:.2f} min", seconds / 60.0);
+    for (auto& c : s) {
+        if (c == '.') {
+            c = ',';
+        }
+    }
+    return s;
+}
+
 // ─── PhaseBlock ──────────────────────────────────────────────────────────────
 
 PhaseBlock::PhaseBlock(int number, std::string_view title) {
