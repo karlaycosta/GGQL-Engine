@@ -11,7 +11,7 @@ dados do motor. A escolha correta reduz RAM, tempo de ingestão e tamanho do
 | ID | Estrutura | Flag | RAM típica (HPRC 85 M nós) |
 |----|-----------|------|---------------------------|
 | C1 | **MPHF** — mapeamento nome→ID de segmento | sempre | ~200 MB |
-| C2 | **MetadataStore** — lengths, nomes | `save_metadata` | ~350 MB |
+| C2 | **MetadataStore** — lengths, nomes, depth/cobertura | `save_metadata` | ~350 MB |
 | C3 | **FM-Index** — BWT + tabela Occ + SA sampling | `build_fm_index` | ~1 GB |
 | C4 | **CSR Topology** — grafo fwd+bwd (Elias-Fano) | `build_topology` | ~1 GB |
 | C5 | **Snarls** — algoritmo Billi (SESE bidirected) | `build_snarls` (requer C4) | dominado por biedged graph (2× num_nodes adj.); 24 B por snarl em disco |
@@ -232,6 +232,9 @@ divergentes entre espécies.
 ./build/bench_gbwt arquivo.gfa 8 --profile metagenomics --quiet
 ```
 
+Aliases curtos aceitos por `--profile`: `pan` (pangenome), `meta`
+(metagenomics), `asm` (assembly), `comp` (comparative).
+
 API C++:
 
 ```cpp
@@ -266,10 +269,11 @@ Subir um perfil entre execuções (ex: começou com `metagenomics` e agora quer
 - `assembly` → `comparative` (falta gBWT, downgrade snarls é noop em disco)
 
 A detecção é automática em `try_cache_fast` / `try_cache_hash` via
-verificação de `gbwts.bin` / `snarls.bin` no `.idx/`. Implementação:
-`complete_with_snarls()` e `complete_with_gbwt()` em `ingestor.cpp`;
-`save_snarls_only()` e `save_gbwt_only()` em `topology` para gravar
-incrementalmente sem reescrever CSR/EF/metadata.
+verificação de `path_stores.bin` / `gbwts.bin` (legacy) / `snarls.bin`
+no `.idx/`. Implementação: `complete_with_snarls()` e
+`complete_with_gbwt()` em `ingestor.cpp`; `save_snarls_only()` e
+`save_path_index_only()` em `topology` para gravar incrementalmente sem
+reescrever CSR/EF/metadata.
 
 ### Por que a Fase 2 força build serial do gBWT
 
@@ -314,10 +318,10 @@ o downgrade e **apaga os arquivos órfãos** automaticamente:
 
 | Flag rebaixado | Arquivos removidos |
 |----------------|--------------------|
-| `build_gbwt` true→false | `gbwts.bin`, `path_stats.bin` |
+| `build_gbwt` true→false | `path_stores.bin`, `gbwts.bin` (legacy), `path_stats.bin` |
 | `build_snarls` true→false | `snarls.bin` |
 | `build_fm_index` true→false | `fm_index.bin` |
-| `save_metadata` true→false | `metadata.bin`, `metadata_seqs.bin`, `metadata_strings.bin`, `length_index.bin` |
+| `save_metadata` true→false | `metadata.bin`, `metadata_seqs.bin`, `metadata_strings.bin`, `length_index.bin`, `depth_index.bin` |
 
 Sem esse trim, o `topology->load()` carregaria todas as estruturas em RAM
 mesmo quando o usuário pediu um perfil que não as usa — anulando a economia
