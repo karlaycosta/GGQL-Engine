@@ -1,19 +1,14 @@
-// run_queries.cpp — Utilitário de validação Tier A.
+// run_queries.cpp — Utilitário de validação Tier A / 1.bis.
 //
 // Carrega um .idx pré-existente (gerado por bench_gbwt) e imprime contagens
-// das queries canônicas em formato TSV "query\tcount" para diff fácil contra
-// ground truth. Sem REPL, sem FFI — usa API C++ direta.
+// das queries em formato TSV "query\tcount" para diff fácil contra ground
+// truth. Sem REPL, sem FFI — usa API C++ direta.
 //
 // Uso:
-//   run_queries <cache_dir.idx>
-//
-// Saída esperada (stdout, TSV):
-//   FIND_SEGMENT     <count>
-//   FIND_EDGE        <count>
-//   FIND_TIP         <count>
-//   FIND_REPEAT      <count>
-//   FIND_BUBBLE      <count>
-//   FIND_PATH        <count>
+//   run_queries <cache_dir.idx>                  → 6 queries canônicas (Tier A)
+//   run_queries <cache_dir.idx> "<query>"        → 1 query custom (Tier 1.bis)
+//   run_queries <cache_dir.idx> --batch          → lê queries de stdin
+//                                                  (uma por linha; comentários '#' OK)
 
 #include "ggql/query/grammar.hpp"
 #include "ggql/query/query_planner.hpp"
@@ -23,7 +18,9 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <iostream>
 #include <string>
+#include <string_view>
 
 using namespace ggql;
 
@@ -35,9 +32,27 @@ static size_t run_count(const QueryPlanner& planner, const std::string& q) {
     return res->total_hits;
 }
 
+// Aplica LIMIT default se a query não especificar — força total_hits global.
+static std::string ensure_limit(std::string q) {
+    constexpr std::string_view kHas = "LIMIT";
+    auto upper = q;
+    for (auto& c : upper) {
+        if (c >= 'a' && c <= 'z') { c = static_cast<char>(c - 32); }
+    }
+    if (upper.find(kHas) == std::string::npos) {
+        q += " LIMIT 100000000";
+    }
+    return q;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Uso: %s <cache_dir.idx>\n", argv[0]);
+        std::fprintf(stderr,
+            "Uso:\n"
+            "  %s <idx>                    # 6 queries canônicas\n"
+            "  %s <idx> \"<query>\"          # 1 query custom\n"
+            "  %s <idx> --batch            # lê queries de stdin (1 por linha)\n",
+            argv[0], argv[0], argv[0]);
         return 2;
     }
     const std::string idx = argv[1];
@@ -52,9 +67,29 @@ int main(int argc, char** argv) {
 
     QueryPlanner planner(topo_ok ? &topo : nullptr, &meta, fm_ok ? &fm : nullptr);
 
-    // LIMIT alto para forçar planner a contar TUDO (não só max)
-    constexpr const char* kBigLimit = "LIMIT 100000000";
+    // ── Modo batch: lê queries de stdin ───────────────────────────────────────
+    if (argc == 3 && std::string_view(argv[2]) == "--batch") {
+        std::string line;
+        while (std::getline(std::cin, line)) {
+            // pula vazias e comentários
+            auto first = line.find_first_not_of(" \t");
+            if (first == std::string::npos) { continue; }
+            if (line[first] == '#')         { continue; }
+            std::string q = ensure_limit(line.substr(first));
+            std::printf("%s\t%zu\n", line.c_str(), run_count(planner, q));
+        }
+        return 0;
+    }
 
+    // ── Modo single query: <idx> "<query>" ───────────────────────────────────
+    if (argc >= 3) {
+        std::string q = ensure_limit(argv[2]);
+        std::printf("%zu\n", run_count(planner, q));
+        return 0;
+    }
+
+    // ── Modo default: 6 queries canônicas em TSV ─────────────────────────────
+    constexpr const char* kBigLimit = "LIMIT 100000000";
     auto emit = [&](const char* name, const std::string& q) {
         std::printf("%s\t%zu\n", name, run_count(planner, q));
     };
