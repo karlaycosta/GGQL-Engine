@@ -462,6 +462,67 @@ Primeira execução: vg total = 2053, GGQL = 1516, Δ = −537. Discrepância in
 
 ---
 
+## 7.quinquies. ✅/⚠ Resultados Sprint 3 (2026-05-10) — Tier C (HPRC chm13_subset_100w)
+
+**Dataset**: `data/chm13_subset_100w.gfa` — 4.294.760 nós, 5.025.175 edges,
+100 walks (PanSN-spec sample#hap#contig:start-end). Re-ingerido com
+`bench_gbwt` em ~25 s.
+
+**Setup**: `tests/validation/run_tier_c.sh`. Ferramentas: `gfatools` + `awk`
+(rápidos a esta escala). `vg snarls` em 4,3M nós tomaria minutos —
+abandonado depois de descobrir bug B-V2 (ver abaixo).
+
+**Resultado**: 6/6 queries validáveis com paridade exata; 3 queries bloqueadas
+por bugs descobertos.
+
+| Query | GGQL | GT (awk) | Δ | Status |
+|---|---:|---:|:-:|:-:|
+| `FIND TIP` | 17.624 | 17.624 | 0 | ✅ |
+| `FIND REPEAT` | 667.756 | 667.756 | 0 | ✅ |
+| `FIND PATH` | 100 | 100 | 0 | ✅ |
+| `WHERE length > 1000` | 3.728 | 3.728 | 0 | ✅ |
+| `WHERE length > 100` | 747.213 | 747.213 | 0 | ✅ |
+| `WHERE length = 50` | 9.088 | 9.088 | 0 | ✅ |
+| `FIND SEGMENT` (global) | 1.000.001 | 4.294.760 | −3.294.759 | ❌ B-V1 |
+| `FIND EDGE` (global) | 1.000.001 | 5.025.175 | −4.025.174 | ❌ B-V1 |
+| `FIND BUBBLE` | 0 | ? (vg longo) | n/a | ❌ B-V2 |
+
+### Bugs descobertos via Sprint 3 (Tier C revelou — antes estava silencioso)
+
+**B-V1 — `kMaxTotalHitsCount = 1M` cap absoluto**
+
+| Aspecto | Valor |
+|---|---|
+| Local | `src/query/query_planner.cpp:32, 326` |
+| Constante | `static constexpr size_t kMaxTotalHitsCount = 1'000'000;` |
+| Comportamento | `Paginator::advance` retorna `Stop` quando `total_hits > 1M`, MESMO COM `LIMIT` explícito |
+| Impacto | Counts globais em datasets >1M (HPRC, qualquer pangenoma humano completo) ficam truncados em `1.000.001` (saturação) |
+| Testes Tier A/B passaram | porque os datasets têm <1M nós/edges |
+| Mitigação atual | usar filtros que reduzem o conjunto |
+| Fix proposto | aceitar `LIMIT N` acima do cap se especificado, ou expor via env var `GGQL_MAX_TOTAL_HITS` |
+
+**B-V2 — `find_all_snarls` aborta em grafos com componente sem tips**
+
+| Aspecto | Valor |
+|---|---|
+| Local | `src/storage/snarl_decomposition.cpp:1101-1109` |
+| Código | `if (cnt_zero != 0) { return {}; } // Billi também aborta nesse caso` |
+| Comportamento | Se QUALQUER componente conexo não tem nó com `in_degree=0 OR out_degree=0`, retorna `{}` (zero snarls) |
+| Impacto | Pangenomas "fechados" (HPRC walks são contigs internos sem tips) → 0 snarls reportados |
+| Testes Tier A/B passaram | porque tinham componentes com tips (toy graphs DAG-like, DRB1-3123 com 5 tips) |
+| Comentário no código | implementação literal de `run_decompose()` do Billi upstream — herda a limitação |
+| Fix proposto | adicionar nós sentinela tip artificiais nos componentes "fechados" antes de rodar SESE, OU usar algoritmo alternativo (ex: `vg snarls integrated`) para grafos cíclicos |
+
+### O que Sprint 3 confirma
+
+✅ **Performance e correção em escala** para queries que cabem no cap (filtros): paridade exata em ~750k segments, ~670k repeats, ~17k tips em 4,3M nós. GGQL escala corretamente.
+
+✅ **TIP/REPEAT em escala**: complexidade O(V+E) bem implementada, paridade com awk em counts > 100k.
+
+❌ **3 queries bloqueadas** por bugs específicos de escala — descobertos apenas em Tier C, exatamente o ponto de validação.
+
+---
+
 ## 8. Pendências e riscos
 
 - **Risco 1**: `vg snarls` define snarls com algoritmo Paten 2017; o GGQL declara paridade com Billi (port nativo do mesmo). Se houver discrepância, decidir se é bug do GGQL ou diferença legítima de definição (e.g., trivial snarls).
