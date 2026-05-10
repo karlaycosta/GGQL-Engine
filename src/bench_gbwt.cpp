@@ -188,6 +188,13 @@ int main(int argc, char* argv[]) {
     cli::kv_time("Fase 2 (Links/Paths)", st.elapsed_ingest_s);
     cli::kv_time("Fase 3 (FM-Index)", st.elapsed_fm_index_s);
     cli::kv_time("Fase 4 (CSR Topology)", st.elapsed_topology_s);
+    cli::kv_time("Fase 5 (gBWT)", st.elapsed_gbwt_s);
+    if (st.elapsed_snarls_s > 0.0) {
+        cli::kv_time("Fase 6 (Snarls)", st.elapsed_snarls_s);
+    }
+    if (st.elapsed_save_s > 0.0) {
+        cli::kv_time("Fase 7 (Persistência)", st.elapsed_save_s);
+    }
     cli::kv_time("TOTAL Pipeline", st.elapsed_total_s);
 
     cli::blank();

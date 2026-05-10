@@ -1234,11 +1234,15 @@ IngestStatsParallel GfaIngestorMmapParallel::complete_with_snarls(
         auto snarls = snarl_decomposition::find_all_snarls(*res_.topology, /*num_threads=*/1);
         const auto count = snarls.size();
         res_.topology->set_snarls(std::move(snarls));
+        const auto t_find_bubble = sec(clock::now() - t0).count();
+        stats.elapsed_snarls_s = t_find_bubble;
+        const auto t_save0 = clock::now();
         res_.topology->save_snarls_only(cache_dir);
+        stats.elapsed_save_s = sec(clock::now() - t_save0).count();
         if (verbose) {
             cli::step_ok_end("FIND BUBBLE",
                              fmt::format("{} snarls · {}", cli::format_count(count),
-                                         ggql::format_seconds(sec(clock::now() - t0).count())));
+                                         ggql::format_seconds(t_find_bubble)));
         }
     } catch (const std::exception& e) {
         if (verbose) {
@@ -1879,8 +1883,6 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
         }
     }
 
-    stats.elapsed_total_s = sec(clock::now() - t_start).count();
-
     if (!skip_pass1) {
         // Snarls (FIND BUBBLE): pré-computa antes de salvar a topologia.
         // Usa snarl_decomposition::find_all_snarls (port nativo otimizado de
@@ -1895,11 +1897,12 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                 auto snarls = snarl_decomposition::find_all_snarls(*res_.topology, num_threads);
                 const auto count = snarls.size();
                 res_.topology->set_snarls(std::move(snarls));
+                stats.elapsed_snarls_s = sec(clock::now() - t_snarls0).count();
                 if (verbose) {
                     cli::step_ok_end(
                         "FIND BUBBLE",
                         fmt::format("{} snarls · {}", cli::format_count(count),
-                                    ggql::format_seconds(sec(clock::now() - t_snarls0).count())));
+                                    ggql::format_seconds(stats.elapsed_snarls_s)));
                 }
             } catch (const std::exception& e) {
                 if (verbose) {
@@ -1914,6 +1917,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
         if (verbose && res_.topology) {
             cli::phase(7, "Persistência do índice");
         }
+        const auto t_save0 = clock::now();
         try {
             if (res_.topology) {
                 res_.topology->save(cache_dir);  // emite step_ok_end "índice salvo"
@@ -1929,7 +1933,15 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
             write_manifest_atomic(cache_dir, gfa_hash, file_sz, file_mtime_ns, node_width, stats,
                                   cf);
         }
+        // Inclui save() + write_manifest_atomic — ambos são parte da Fase 7.
+        stats.elapsed_save_s = sec(clock::now() - t_save0).count();
     }
+
+    // Captura final do tempo total: cobre Pass1/2 + FM-Index + topology +
+    // gBWT + snarls + persistência. Estava sendo lido cedo demais (antes
+    // de Phase 6/Snarls e Phase 7/save), subnotificando o usuário e o painel
+    // do bench_gbwt — escala HPRC, snarls/save somam dezenas de segundos.
+    stats.elapsed_total_s = sec(clock::now() - t_start).count();
 
     if (verbose) {
         cli::ok("Ingestão concluída", ggql::format_seconds(stats.elapsed_total_s));

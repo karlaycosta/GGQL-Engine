@@ -26,6 +26,7 @@ const char* malloc_conf = "dirty_decay_ms:100,muzzy_decay_ms:100";
 #include "ggql/storage/topology.hpp"
 
 #include "ggql/cli/console.hpp"
+#include "ggql/cli/progress_tracker.hpp"
 #include "ggql/util/memory_monitor.hpp"
 
 // Headers pesados — incluídos só aqui, não no .hpp público.
@@ -292,11 +293,12 @@ GfaCsrTopology::build_path_index_parallel(std::vector<GbwtGroup> groups,
         constexpr std::ptrdiff_t kMaxConcurrentCompress = 2;
         std::counting_semaphore<> compress_sem(kMaxConcurrentCompress);
 
-        cli::step_info(fmt::format(
-            "GbwtBackend build (paralelo+adaptive+compress_sem={}) · {} shards · "
-            "{} threads · batch_max={} simbolos · pico estimado dos buffers ~{:.2f} MB",
-            kMaxConcurrentCompress, N, omp_threads_gbwt, kMaxBatch,
-            est_pico_bytes / 1.0e6));
+        cli::step_info(fmt::format("{} threads · pico buffer ~{:.1f} MB",
+                                   omp_threads_gbwt, est_pico_bytes / 1.0e6));
+
+        // Progresso por shard (substitui flag-soup verboso). Throttle de 500 ms
+        // dentro do tracker → custo amortizado ~50 ns/shard (atomic + clock check).
+        ggql::ProgressTracker tracker(N, "gBWT shards", true, "shards/s", 1.0);
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic) num_threads(omp_threads_gbwt)
@@ -305,6 +307,7 @@ GfaCsrTopology::build_path_index_parallel(std::vector<GbwtGroup> groups,
             auto& g = groups[i];
             if (g.in_ram_seqs.empty() && g.tmp_path.empty()) {
                 path_stores_[i] = std::make_unique<GbwtBackend>();
+                tracker.add_progress(1);
                 continue;
             }
 
@@ -379,7 +382,9 @@ GfaCsrTopology::build_path_index_parallel(std::vector<GbwtGroup> groups,
 
             path_stores_[i] = std::make_unique<GbwtBackend>(std::move(gbwt_static));
             total_nodes_acc.fetch_add(local_syms, std::memory_order_relaxed);
+            tracker.add_progress(1);
         }
+        tracker.finish();
 
         // path_names em ordem de shard (serial — preserva ordem global).
         for (size_t i = 0; i < N; ++i) {

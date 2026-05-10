@@ -147,8 +147,10 @@ struct IngestStatsParallel {
     double elapsed_ingest_s = 0.0;
     double elapsed_metadata_s = 0.0;      // 0 se save_metadata=false
     double elapsed_topology_s = 0.0;      // 0 se build_topology=false
-    double elapsed_gbwt_s = 0.0;          // Tempo real total do gBWT (wall_s)
+    double elapsed_gbwt_s = 0.0;          // Fase 5 — wall do gBWT
     double elapsed_fm_index_s = 0.0;      // 0 se build_fm_index=false
+    double elapsed_snarls_s = 0.0;        // Fase 6 — FIND BUBBLE; 0 se build_snarls=false
+    double elapsed_save_s = 0.0;          // Fase 7 — save topology + manifest
     double gbwt_cpu_avg_s = 0.0;          // Média CPU/thread
     double gbwt_cpu_max_s = 0.0;          // Máximo CPU (thread mais lenta)
     uint64_t gbwt_total_nodes = 0;        // Total de nós processados no gBWT
