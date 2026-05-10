@@ -499,18 +499,55 @@ por bugs descobertos.
 | Validação | `GGQL_MAX_TOTAL_HITS=10000000 ./run_queries chm13_subset_100w.idx 'FIND SEGMENT'` retorna 4.294.760 (paridade exata com GT). Sem env var, retorna 1.000.001 (default mantido — backward compat) |
 | Regressão | 14/14 ctest passando |
 
-**B-V2 — `find_all_snarls` retorna 0 em pangenomas "fechados"** ⚠ **PARCIALMENTE INVESTIGADO 2026-05-10**
+**B-V2 — `find_all_snarls` retorna 0 em chm13_100w** 🎯 **DIAGNOSTICADO 2026-05-10 (sessão K)**
 
-| Aspecto | Valor |
-|---|---|
-| Sintoma | `FIND BUBBLE` retorna 0 em chm13_subset_100w (4,3M nós, 100 walks HPRC) apesar de Fase 6 levar ~10 s |
-| Local original suspeito | `src/storage/snarl_decomposition.cpp:1101-1109` (early-return quando `cnt_zero != 0`) |
-| Fix aplicado | Early-return removido + fallback `Start[it] = first_node[it]` quando `sese_minbracket` não encontra bracket válido |
-| Resultado do fix | **Não desbloqueou Tier C**. Sprint 1/2 mantêm counts (4, 3, 1516 — early-return não disparava lá), Sprint 3 ainda 0. |
-| Diagnóstico revisto | O early-return era guard defensivo que NÃO era atingido em chm13_100w (caso contrário o fix mudaria o resultado). Algo mais profundo no pipeline (SESE main → hairp → panbubble validation) filtra todos os snarls em pangenomas com tipologia específica |
-| Investigação pendente | Adicionar logs temporários por fase em `find_all_snarls` para identificar onde os snarls "evaporam"; ou usar dataset intermediário (~1k-100k nós com walks fechados) para reproduzir minimamente |
-| Mitigação atual | Aceitar `FIND BUBBLE` não-validável em HPRC até investigação profunda (estimativa revisada: 1-2 dias) |
-| Alternativa | Port do algoritmo `integrated` do vg (cactus-based, sem dependência de tips) — esforço maior (1+ semana) mas resolve a classe inteira de bugs |
+A causa NÃO está em `snarl_decomposition.cpp` — está em `build_csr` ou no
+remap multi-componente do ingest. Snarls "evaporam" porque o CSR não tem
+simetria fwd↔bwd em datasets com remap por múltiplos componentes.
+
+**Pipeline de descoberta** (logs adicionados em find_all_snarls via
+`GGQL_DEBUG_SNARLS=1`):
+
+| Fase | tiny.gfa | DRB1-3123 | chm13_100w |
+|---|---:|---:|---:|
+| `build_state: n` | 15 | 5581 | **4.294.760** |
+| `build_state: edges_count` | 20 | 7448 | **3 (!!! esperado: 5.025.175)** |
+| `build_state_from_topo: nodes_with_out` | 14 | 5524 | 4.285.327 |
+| `build_state_from_topo: total_out_iter` | 20 | 7448 | 5.025.175 |
+| `build_state_from_topo: resolve_ok` | 20 | 7448 | **3** |
+| `build_state_from_topo: resolve_fail` | 0 | 0 | **5.025.172 (~99.99%)** |
+| `cc_tip_id: components` | 1 | 1 | **4.294.757 (cada nó isolado)** |
+| `sese_main: canonical_sese` | 4 | 1516 | **0** |
+
+**Bug exato**: `resolve_link()` (linha ~736) verifica que `in_neighbors(v)`
+contém `u` quando `out_neighbors(u)` contém `v`. Em chm13_100w, **isso falha
+para 99.99% dos pares (u,v)**: o E_fwd diz que `u→v` mas o E_bwd não tem
+`u` em `in_neighbors(v)`.
+
+**Amostra confirmada empiricamente**:
+```
+out_neighbors(0)       = [1988113+, 143790+]    ← E_fwd diz: 0 → 1988113
+in_neighbors(1988113)  = [3848922+]             ← E_bwd não tem 0 entre predecessors
+```
+
+**Origem do bug** (não investigado até o fim):
+- `topology.hpp:127-134` constrói E_fwd com links originais, depois `lk = lk.reversed()` em todos, depois constrói E_bwd com os reversed
+- O bug aparece **apenas em datasets com múltiplos componentes** (chm13_100w tem 8). tiny.gfa (1 comp), DRB1-3123 (1 comp), MT.gfa (1 comp) passam todos
+- Suspeitas: (a) remap por componente reescreve IDs em momentos diferentes para fwd vs bwd; (b) ordem de processing em `build_csr` paralelo diverge entre fwd e bwd; (c) `radix_sort_by_from` tem race condition em casos específicos
+
+**Próximos passos para fix completo** (estimativa 4-8 horas):
+1. Repro mínimo: criar GFA artificial pequeno (~100 nós, 2 componentes desconexos) e verificar simetria E_fwd↔E_bwd via teste manual
+2. Adicionar test em `tests/test_storage_csr.cpp` que verifica simetria em multi-comp
+3. Bisect: tracear os 5.025.175 links pelo pipeline ingest → remap → build_csr
+
+**Mitigação atual**: validação Tier C de `FIND BUBBLE` permanece bloqueada
+até que o bug do CSR seja resolvido. As outras 8 queries em Tier C passam
+sem afetação (o CSR funciona corretamente para queries de nós/edges, só
+quebra na correspondência cruzada exigida pelo biedged graph).
+
+**Crédito da descoberta**: sessão K (2026-05-10) — logs `[snarls-dbg]`
+permanecem no código (gated por env var `GGQL_DEBUG_SNARLS=1`), úteis
+para futuras investigações.
 
 ### O que Sprint 3 confirma
 

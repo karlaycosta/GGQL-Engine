@@ -829,18 +829,26 @@ static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo, int
     // edges_count é incrementado atomicamente; has_self_loop write é race-OK
     // (idempotent set-to-true) mas usamos atomic_store para evitar UB strict.
     int local_edges = 0;
+    int dbg_nodes_with_out = 0;
+    int dbg_total_out_iter = 0;
+    int dbg_resolve_ok = 0;
+    int dbg_resolve_fail = 0;
 #ifdef _OPENMP
     #pragma omp parallel for schedule(dynamic, 4096) num_threads(num_threads)                      \
-        reduction(+ : local_edges)
+        reduction(+ : local_edges, dbg_nodes_with_out, dbg_total_out_iter, dbg_resolve_ok, dbg_resolve_fail)
 #endif
     for (int64_t u = 0; u < static_cast<int64_t>(N); ++u) {
         const size_t out_sz = topo.out_neighbors(u).size();
+        if (out_sz > 0) { ++dbg_nodes_with_out; }
+        dbg_total_out_iter += static_cast<int>(out_sz);
         for (size_t k = 0; k < out_sz; ++k) {
             int id1, id2, n1, n2;
             char s1, s2;
             if (!resolve_link(static_cast<uint64_t>(u), k, id1, id2, n1, n2, s1, s2)) {
+                ++dbg_resolve_fail;
                 continue;
             }
+            ++dbg_resolve_ok;
             const uint32_t pos1 = __atomic_fetch_add(&cursor[id1], 1u, __ATOMIC_RELAXED);
             s.g.ed[pos1] = id2;
             if (id1 != id2) {
@@ -854,7 +862,27 @@ static void build_state_from_topo(BilliState& s, const GfaCsrTopology& topo, int
         }
     }
     s.edges_count += local_edges;
+
+    if (const char* env = std::getenv("GGQL_DEBUG_SNARLS"); env && *env && *env != '0') {
+        std::fprintf(stderr,
+            "[snarls-dbg] build_state_from_topo: N=%lu  nodes_with_out=%d  total_out_iter=%d  "
+            "resolve_ok=%d  resolve_fail=%d\n",
+            (unsigned long)N, dbg_nodes_with_out, dbg_total_out_iter,
+            dbg_resolve_ok, dbg_resolve_fail);
+    }
     // cursor (= count buffer) descartado ao sair do escopo.
+}
+
+// B-V2 debug helper: imprime contadores por fase quando GGQL_DEBUG_SNARLS=1.
+// Custo zero em runs normais (uma única chamada a getenv cacheada estática).
+[[nodiscard]] static bool debug_snarls_enabled() {
+    static const bool enabled = []() -> bool {
+        if (const char* env = std::getenv("GGQL_DEBUG_SNARLS"); env && *env && *env != '0') {
+            return true;
+        }
+        return false;
+    }();
+    return enabled;
 }
 
 // Pipeline principal — port literal de run_decompose() do Billi.
@@ -864,7 +892,15 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo, i
     build_state_from_topo(s, topo, num_threads);
     GGQL_SNARL_TIMER_END(build_state);
 
+    if (debug_snarls_enabled()) {
+        std::fprintf(stderr, "[snarls-dbg] build_state: n=%d  edges_count=%d\n",
+                     s.n, s.edges_count);
+    }
+
     if (s.n == 0) {
+        if (debug_snarls_enabled()) {
+            std::fprintf(stderr, "[snarls-dbg] ABORT: s.n == 0\n");
+        }
         return {};
     }
 
@@ -1105,6 +1141,18 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo, i
     // o resultado inteiro — agora cada componente sem tips é processado pelo
     // fallback. Guard adicional contra Start[it] == -1 está logo abaixo.
 
+    if (debug_snarls_enabled()) {
+        int with_tips = 0, without_tips = 0;
+        size_t total_tips = 0;
+        for (int i = 0; i < s.component; ++i) {
+            if (s.tips[i].empty()) { without_tips++; }
+            else { with_tips++; total_tips += s.tips[i].size(); }
+        }
+        std::fprintf(stderr,
+            "[snarls-dbg] cc_tip_id: components=%d  with_tips=%d  without_tips=%d  total_tips=%zu\n",
+            s.component, with_tips, without_tips, total_tips);
+    }
+
     // Finding S node + adding extra gray edges for tips
     constexpr int maxv = INT32_MAX;
     s.tip_start.assign(s.component, -1);
@@ -1254,6 +1302,19 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo, i
     }
     GGQL_SNARL_TIMER_END(sese_main);
 
+    if (debug_snarls_enabled()) {
+        size_t total_canonical = 0, total_entries = 0;
+        for (const auto& cs : cstates) {
+            total_canonical += cs.canonical_sese.size();
+            for (const auto& kv : cs.canonical_sese) {
+                total_entries += kv.second.size();
+            }
+        }
+        std::fprintf(stderr,
+            "[snarls-dbg] sese_main: canonical_sese keys=%zu  total_entries=%zu\n",
+            total_canonical, total_entries);
+    }
+
     GGQL_SNARL_TIMER_BEGIN(hairp);
     // Phase 2: hairp per componente.
     std::fill(s.mark.begin(), s.mark.end(), false);
@@ -1401,6 +1462,13 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo, i
     cstates.clear();
     cstates.shrink_to_fit();
     GGQL_SNARL_TIMER_END(merge_output);
+
+    if (debug_snarls_enabled()) {
+        std::fprintf(stderr,
+            "[snarls-dbg] merge_output: panbubbles=%zu  hairpins=%zu  total=%zu\n",
+            s.valid_panbubbles.size(), s.valid_hairpins.size(),
+            s.valid_panbubbles.size() + s.valid_hairpins.size());
+    }
 
     // Converte para SnarlRecord (mapeia IDs Billi → IDs GFA originais)
     std::vector<SnarlRecord> out;
