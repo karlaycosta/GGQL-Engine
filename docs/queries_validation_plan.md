@@ -536,9 +536,14 @@ in_neighbors(1988113)  = [3848922+]             ← E_bwd não tem 0 entre prede
 - Suspeitas: (a) remap por componente reescreve IDs em momentos diferentes para fwd vs bwd; (b) ordem de processing em `build_csr` paralelo diverge entre fwd e bwd; (c) `radix_sort_by_from` tem race condition em casos específicos
 
 **Próximos passos para fix completo** (estimativa 4-8 horas):
-1. Repro mínimo: criar GFA artificial pequeno (~100 nós, 2 componentes desconexos) e verificar simetria E_fwd↔E_bwd via teste manual
-2. Adicionar test em `tests/test_storage_csr.cpp` que verifica simetria em multi-comp
-3. Bisect: tracear os 5.025.175 links pelo pipeline ingest → remap → build_csr
+1. ~~Repro mínimo~~ ✅ **APLICADO 2026-05-10** — `tests/validation/build_repro_multicomp.sh` cria GFA com 8 componentes × 100 nós (800 total), ingere via pipeline completo. **NÃO reproduz o bug**: simetria preservada (792/792 edges OK).
+2. ~~Adicionar test em `test_storage_csr.cpp`~~ ✅ **APLICADO 2026-05-10** — 5 casos de simetria E_fwd↔E_bwd: diamante (4 edges), 2 comp serial (98 edges), 2 comp paralelo (98 edges com 4 threads), 100 comp × 50 nós com 8 threads (4900 edges), orientações mistas. **TODOS passam** com simetria perfeita.
+3. **Conclusão refinada**: o bug NÃO está em `build_csr` direto nem em multi-comp simples. Aparece especificamente em chm13_100w por alguma combinação:
+   - **Walks que compartilham nós entre haplótipos** (HPRC) vs componentes genuinamente desconexos (meu repro)
+   - **Escala** (4,3M vs 800)
+   - **MPHF/remap** com node-name space PanSN-spec (`HG002#1#chr1:0-X`)
+   - Possível interação entre `repartition_groups_topological` (Pass1 Union-Find) e o coletor de links no Pass2 paralelo
+4. **Bisect próximo**: subset progressivo de chm13_100w (1k, 10k, 100k nós) até reproduzir; OU dump E_fwd/E_bwd completo em chm13_100w para localizar onde quebra (estimativa: 4-8h dedicadas)
 
 **Mitigação atual**: validação Tier C de `FIND BUBBLE` permanece bloqueada
 até que o bug do CSR seja resolvido. As outras 8 queries em Tier C passam
