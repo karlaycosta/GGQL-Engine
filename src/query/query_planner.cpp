@@ -17,6 +17,7 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>      // std::getenv, std::strtoull (kMaxTotalHitsCount env override)
 #include <format>
 #include <optional>
 #include <span>
@@ -29,7 +30,25 @@ namespace ggql {
 // kSafetyHardLimit: aborta queries sem LIMIT explícito antes de alocar memória ilimitada.
 // kMaxTotalHitsCount: para de incrementar total_hits para evitar varreduras de ~370ms no HPRC.
 static constexpr uint32_t kSafetyHardLimit = 100'000;
-static constexpr size_t kMaxTotalHitsCount = 1'000'000;
+static constexpr size_t kMaxTotalHitsCountDefault = 1'000'000;
+
+// Cap dinâmico: env var `GGQL_MAX_TOTAL_HITS` sobrescreve o default.
+// Útil para validação científica em datasets >1M (HPRC) onde o usuário
+// quer counts globais exatos. Valores não-numéricos ou ≤0 caem no default.
+// Avaliado uma vez por processo (function-local static) — caching trivial.
+[[nodiscard]] static size_t kMaxTotalHitsCount() {
+    static const size_t cap = []() -> size_t {
+        if (const char* env = std::getenv("GGQL_MAX_TOTAL_HITS"); env && *env) {
+            char* end = nullptr;
+            const unsigned long long v = std::strtoull(env, &end, 10);
+            if (end != env && v > 0) {
+                return static_cast<size_t>(v);
+            }
+        }
+        return kMaxTotalHitsCountDefault;
+    }();
+    return cap;
+}
 
 // ── helpers internos ─────────────────────────────────────────────────────────
 
@@ -323,7 +342,7 @@ struct Paginator {
 
     [[nodiscard]] Decision advance(QueryResult& result) noexcept {
         ++result.total_hits;
-        if (result.total_hits > kMaxTotalHitsCount) {
+        if (result.total_hits > kMaxTotalHitsCount()) {
             result.total_hits_truncated = true;
             return Decision::Stop;
         }
@@ -537,7 +556,7 @@ std::string QueryResult::format_table() const {
     } else if (total_hits_truncated) {
         out += std::format("({} de mais de {} resultados — contagem interrompida; "
                            "use WHERE mais seletivo ou LIMIT N)\n",
-                           format_num(row_count), format_num(kMaxTotalHitsCount));
+                           format_num(row_count), format_num(kMaxTotalHitsCount()));
     } else if (total_hits > row_count) {
         out += std::format("({} de {} linhas)\n", format_num(row_count), format_num(total_hits));
     } else {

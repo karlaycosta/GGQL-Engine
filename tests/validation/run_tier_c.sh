@@ -3,10 +3,10 @@
 #
 # IMPORTANTE: 2 bugs descobertos via esta validação (Δ não-zero é diagnóstico):
 #
-#   B-V1: kMaxTotalHitsCount = 1M cap absoluto (query_planner.cpp:32, 326)
-#         total_hits satura em 1M mesmo com LIMIT explícito. Counts globais
-#         de SEGMENT (4.3M) e EDGE (5M) em HPRC são truncados.
-#         → Mitigação: usar filtros que reduzam o conjunto a < 1M.
+#   B-V1: kMaxTotalHitsCount cap default em 1M (query_planner.cpp:32).
+#         RESOLVIDO 2026-05-10 — agora aceita override via env var
+#         GGQL_MAX_TOTAL_HITS. Este script usa GGQL_MAX_TOTAL_HITS=10M
+#         para validar counts globais em HPRC.
 #
 #   B-V2: find_all_snarls aborta em grafos com componentes sem tips
 #         (snarl_decomposition.cpp:1101-1109). HPRC pangenoma "fechado"
@@ -24,6 +24,10 @@ RUNQ=build/tests/run_queries
 [[ -x "$GFATOOLS" && -x "$RUNQ" ]] || { echo "FALTA tool ou build"; exit 1; }
 [[ -f "$GFA" ]] || { echo "FALTA: $GFA"; exit 1; }
 [[ -d "$IDX" ]] || build/bench_gbwt "$GFA" 8 --quiet >/dev/null
+
+# B-V1 fix: counts globais HPRC excedem o cap default de 1M. Override
+# via env var permite total_hits exato em SEGMENT (4.3M) e EDGE (5M).
+export GGQL_MAX_TOTAL_HITS=10000000
 
 # Ground truth via awk (rápido — escolhemos comparações que cabem no cap)
 echo "Computando ground truth via awk… (~17s)"
@@ -63,16 +67,19 @@ check "WHERE length > 1000"               "$ggql_l1000"        "$gt_l1000" "(awk
 check "WHERE length > 100"                "$ggql_l100"         "$gt_l100"  "(awk)"
 check "WHERE length = 50"                 "$ggql_l50"          "$gt_l50"   "(awk)"
 
+gt_seg=$(awk '$1=="S"' "$GFA" | wc -l)
+gt_edg=$(awk '$1=="L"' "$GFA" | wc -l)
+check "FIND SEGMENT (global)"             "${G[FIND_SEGMENT]}" "$gt_seg"   "(awk · GGQL_MAX_TOTAL_HITS=10M)"
+check "FIND EDGE (global)"                "${G[FIND_EDGE]}"    "$gt_edg"   "(awk · GGQL_MAX_TOTAL_HITS=10M)"
+
 echo
-echo "Não validados (bugs descobertos):"
-printf '  %-38s %10s %10s ❌ B-V1 (cap 1M)\n' "FIND SEGMENT (count global)" "${G[FIND_SEGMENT]}" "4294760"
-printf '  %-38s %10s %10s ❌ B-V1 (cap 1M)\n' "FIND EDGE (count global)"    "${G[FIND_EDGE]}"    "5025175"
+echo "Não validados (bugs ainda abertos):"
 printf '  %-38s %10s %10s ❌ B-V2 (algoritmo)\n' "FIND BUBBLE"               "${G[FIND_BUBBLE]}"  "?"
 
 echo
 if [[ $fail -eq 0 ]]; then
-    echo "✅ 6/6 queries validáveis em Tier C passaram"
-    echo "⚠ 3 queries bloqueadas por bugs B-V1 / B-V2 — ver cabeçalho"
+    echo "✅ 8/8 queries validáveis em Tier C passaram (B-V1 resolvido)"
+    echo "⚠ 1 query (BUBBLE) ainda bloqueada por B-V2"
     exit 0
 else
     echo "❌ $fail divergências"

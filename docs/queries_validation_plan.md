@@ -483,23 +483,21 @@ por bugs descobertos.
 | `WHERE length > 1000` | 3.728 | 3.728 | 0 | ✅ |
 | `WHERE length > 100` | 747.213 | 747.213 | 0 | ✅ |
 | `WHERE length = 50` | 9.088 | 9.088 | 0 | ✅ |
-| `FIND SEGMENT` (global) | 1.000.001 | 4.294.760 | −3.294.759 | ❌ B-V1 |
-| `FIND EDGE` (global) | 1.000.001 | 5.025.175 | −4.025.174 | ❌ B-V1 |
-| `FIND BUBBLE` | 0 | ? (vg longo) | n/a | ❌ B-V2 |
+| `FIND SEGMENT` (global, c/ env) | **4.294.760** | 4.294.760 | **0** | ✅ (após B-V1 fix) |
+| `FIND EDGE` (global, c/ env) | **5.025.175** | 5.025.175 | **0** | ✅ (após B-V1 fix) |
+| `FIND BUBBLE` | 0 | ? (vg longo) | n/a | ❌ B-V2 ainda aberto |
 
 ### Bugs descobertos via Sprint 3 (Tier C revelou — antes estava silencioso)
 
-**B-V1 — `kMaxTotalHitsCount = 1M` cap absoluto**
+**B-V1 — `kMaxTotalHitsCount = 1M` cap absoluto** ✅ **RESOLVIDO 2026-05-10**
 
 | Aspecto | Valor |
 |---|---|
-| Local | `src/query/query_planner.cpp:32, 326` |
-| Constante | `static constexpr size_t kMaxTotalHitsCount = 1'000'000;` |
-| Comportamento | `Paginator::advance` retorna `Stop` quando `total_hits > 1M`, MESMO COM `LIMIT` explícito |
-| Impacto | Counts globais em datasets >1M (HPRC, qualquer pangenoma humano completo) ficam truncados em `1.000.001` (saturação) |
-| Testes Tier A/B passaram | porque os datasets têm <1M nós/edges |
-| Mitigação atual | usar filtros que reduzem o conjunto |
-| Fix proposto | aceitar `LIMIT N` acima do cap se especificado, ou expor via env var `GGQL_MAX_TOTAL_HITS` |
+| Local | `src/query/query_planner.cpp` (default `kMaxTotalHitsCountDefault = 1'000'000`) |
+| Comportamento original | `Paginator::advance` retornava `Stop` quando `total_hits > 1M`, mesmo com `LIMIT` explícito |
+| Fix aplicado | constante `static constexpr` virou função `kMaxTotalHitsCount()` que lê env var `GGQL_MAX_TOTAL_HITS` no primeiro acesso (function-local static — caching trivial). Default preservado em 1M |
+| Validação | `GGQL_MAX_TOTAL_HITS=10000000 ./run_queries chm13_subset_100w.idx 'FIND SEGMENT'` retorna 4.294.760 (paridade exata com GT). Sem env var, retorna 1.000.001 (default mantido — backward compat) |
+| Regressão | 14/14 ctest passando |
 
 **B-V2 — `find_all_snarls` aborta em grafos com componente sem tips**
 
