@@ -113,6 +113,15 @@ set_tests_properties(test_query_planner_idx PROPERTIES
     ENVIRONMENT "GGQL_TEST_IDX=${CMAKE_SOURCE_DIR}/data/chm13_subset_100w.gfa.idx"
 )
 
+# ── Utilitário de validação Tier A — não roda em ctest, executado por scripts ─
+add_executable(run_queries validation/run_queries.cpp)
+target_compile_options(run_queries PRIVATE
+    -std=c++23 -march=native
+    $<$<CONFIG:Debug>:-O0 -g>
+    $<$<NOT:$<CONFIG:Debug>>:-O2>
+)
+target_link_libraries(run_queries PRIVATE ggql_query ggql_storage ggql_ingest)
+
 # ── Testes de integração FFI de query (dependem de ggql_ffi) ─────────────────
 add_executable(test_ffi_query test_ffi_query.cpp)
 target_compile_options(test_ffi_query PRIVATE
