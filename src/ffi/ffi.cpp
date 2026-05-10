@@ -24,7 +24,11 @@ namespace {
 struct GgqlEngineWrapper {
     GfaMetadataStore metadata;
     GfaSequenceIndex fm_index;
-    const GfaCsrTopology* topology = nullptr;  // não-proprietário; pode ser null
+    // Topology owned (preenchido em ggql_engine_load) OU referenciado externo
+    // (ggql_engine_create). topology aponta para o que estiver disponível;
+    // owned_topology vive enquanto o wrapper viver.
+    std::optional<GfaCsrTopology> owned_topology;
+    const GfaCsrTopology* topology = nullptr;  // pode ser null se ausente
     std::unique_ptr<QueryPlanner> planner;
     std::string last_error;
 };
@@ -283,13 +287,21 @@ GgqlEngineHandle ggql_engine_load(const char* cache_dir) {
     try {
         auto* w = new GgqlEngineWrapper();
         w->metadata.load(std::string(cache_dir));
+        // FM-Index opcional — perfis sem build_fm_index não terão arquivo.
         try {
             w->fm_index.load(std::string(cache_dir));
-        } catch (...) {
-            // FM-Index ausente é tolerado — queries de k-mer simplesmente falharão.
-        }
+        } catch (...) {}
+        // Topology opcional — perfis sem build_topology não terão E_*/ef_*.
+        // Se ausente, FIND TIP/EDGE/PATH/BUBBLE/REPEAT (e crosses no PATH)
+        // retornarão erro semântico via planner; SEGMENT/SEARCH KMER continuam.
+        try {
+            GfaCsrTopology topo;
+            topo.load(std::string(cache_dir));
+            w->owned_topology.emplace(std::move(topo));
+            w->topology = &*w->owned_topology;
+        } catch (...) {}
         w->planner = std::make_unique<QueryPlanner>(
-            nullptr,
+            w->topology,
             &w->metadata,
             w->fm_index.is_loaded() ? &w->fm_index : nullptr
         );

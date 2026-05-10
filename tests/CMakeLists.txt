@@ -59,6 +59,16 @@ target_compile_options(bench_boophf PRIVATE
 )
 target_link_options(bench_boophf PRIVATE -fopenmp)
 
+# ── Teste de gramática (parser puro — sem topology, instantâneo) ────────────
+add_executable(test_grammar test_grammar.cpp)
+target_compile_options(test_grammar PRIVATE
+    -std=c++23 -march=native
+    $<$<CONFIG:Debug>:-O0 -g>
+    $<$<NOT:$<CONFIG:Debug>>:-O2>
+)
+target_link_libraries(test_grammar PRIVATE ggql_query)
+add_test(NAME test_grammar COMMAND test_grammar)
+
 # ── Testes do query planner (dependem de ggql_query) ─────────────────────────
 add_executable(test_query_planner test_query_planner.cpp)
 target_compile_options(test_query_planner PRIVATE
@@ -68,6 +78,40 @@ target_compile_options(test_query_planner PRIVATE
 )
 target_link_libraries(test_query_planner PRIVATE ggql_query)
 add_test(NAME test_query_planner COMMAND test_query_planner)
+
+# ── Teste de crosses() — carrega .idx real, valida path-index lookup ─────────
+add_executable(test_query_crosses test_query_crosses.cpp)
+target_compile_options(test_query_crosses PRIVATE
+    -std=c++23 -march=native
+    $<$<CONFIG:Debug>:-O0 -g>
+    $<$<NOT:$<CONFIG:Debug>>:-O2>
+)
+target_link_libraries(test_query_crosses PRIVATE ggql_query ggql_storage ggql_ingest)
+add_test(
+    NAME test_query_crosses
+    COMMAND test_query_crosses
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(test_query_crosses PROPERTIES
+    ENVIRONMENT "GGQL_TEST_IDX=${CMAKE_SOURCE_DIR}/data/chm13_subset_100w.gfa.idx"
+)
+
+# ── Smoke tests do planner em índice real (B-4) ──────────────────────────────
+add_executable(test_query_planner_idx test_query_planner_idx.cpp)
+target_compile_options(test_query_planner_idx PRIVATE
+    -std=c++23 -march=native
+    $<$<CONFIG:Debug>:-O0 -g>
+    $<$<NOT:$<CONFIG:Debug>>:-O2>
+)
+target_link_libraries(test_query_planner_idx PRIVATE ggql_query ggql_storage ggql_ingest)
+add_test(
+    NAME test_query_planner_idx
+    COMMAND test_query_planner_idx
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(test_query_planner_idx PROPERTIES
+    ENVIRONMENT "GGQL_TEST_IDX=${CMAKE_SOURCE_DIR}/data/chm13_subset_100w.gfa.idx"
+)
 
 # ── Testes de integração FFI de query (dependem de ggql_ffi) ─────────────────
 add_executable(test_ffi_query test_ffi_query.cpp)
@@ -83,5 +127,5 @@ add_test(
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 set_tests_properties(test_ffi_query PROPERTIES
-    ENVIRONMENT "GGQL_TEST_IDX=${CMAKE_SOURCE_DIR}/data/chm13_subset_sm.gfa.idx"
+    ENVIRONMENT "GGQL_TEST_IDX=${CMAKE_SOURCE_DIR}/data/chm13_subset_100w.gfa.idx"
 )

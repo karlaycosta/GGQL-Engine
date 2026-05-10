@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <variant>
@@ -37,7 +38,22 @@ struct ContainsKmerCondition {
     std::string kmer;
 };
 
-using ConditionExpr = std::variant<CompareCondition, CrossesCondition, ContainsKmerCondition>;
+// Forward — referência circular: WhereClause contém ConditionExpr,
+// ConditionExpr (via GroupedExpr) contém WhereClause.
+struct WhereClause;
+
+/// (<sub-where>) — sub-expressão entre parênteses (B-5).
+/// Permite combinações como `(a OR b) AND c`. Precedência explícita —
+/// resolve a ambiguidade left-to-right de AND/OR documentada no evaluator.
+struct GroupedExpr {
+    /// shared_ptr (vs unique_ptr): mantém ConditionExpr copyable, preservando
+    /// a ergonomia de `execute(const GgqlQuery&)` em todo o pipeline. AST é
+    /// efetivamente imutável após parse — share não causa aliasing problemático.
+    std::shared_ptr<WhereClause> body;
+};
+
+using ConditionExpr =
+    std::variant<CompareCondition, CrossesCondition, ContainsKmerCondition, GroupedExpr>;
 
 // ─── Cláusula WHERE ───────────────────────────────────────────────────────────
 
@@ -65,16 +81,22 @@ struct WhereClause {
 struct FindQuery {
     EntityType entity = EntityType::SEGMENT;
     std::optional<WhereClause> where;
+    /// Lista explícita de colunas. Vazio + return_all=false → planner usa
+    /// default (mesmo conjunto que return_all=true). Vazio + return_all=true
+    /// → "RETURN *" explícito (semanticamente igual ao default mas registrado).
     std::vector<std::string> return_fields;
-    std::optional<uint32_t> limit;   // máximo de linhas em flat[]
-    std::optional<uint32_t> offset;  // linhas a pular antes de emitir
+    bool return_all = false;          // B-8: `RETURN *`
+    std::optional<uint32_t> limit;    // máximo de linhas em flat[]
+    std::optional<uint32_t> offset;   // linhas a pular antes de emitir
 };
 
-/// SEARCH KMER "<seq>" [RETURN ...] [LIMIT N]
+/// SEARCH KMER "<seq>" [RETURN ...] [LIMIT N [OFFSET M]]
 struct SearchKmerQuery {
     std::string kmer;
     std::vector<std::string> return_fields;
+    bool return_all = false;          // B-8
     std::optional<uint32_t> limit;
+    std::optional<uint32_t> offset;   // B-11: simétrico ao FindQuery
 };
 
 using GgqlQuery = std::variant<FindQuery, SearchKmerQuery>;

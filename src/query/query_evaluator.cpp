@@ -8,10 +8,12 @@
 
 #include "ggql/ingest/metadata_store.hpp"
 #include "ggql/storage/fm_index.hpp"
+#include "ggql/storage/topology.hpp"
 
 #include <charconv>
 #include <optional>
 #include <utility> // std::unreachable
+#include <vector>
 
 namespace ggql {
 
@@ -86,7 +88,8 @@ bool QueryPlanner::compare_values(const Value& lhs, Operator op, const Value& rh
 // ── eval_condition ────────────────────────────────────────────────────────────
 
 bool QueryPlanner::eval_condition(const ConditionExpr& cond, const RowFields& row,
-                                   const KmerCache* cache) const noexcept {
+                                   const KmerCache* kmer_cache,
+                                   const CrossesCache* crosses_cache) const noexcept {
     return std::visit(
         [&](const auto& c) -> bool {
             using T = std::decay_t<decltype(c)>;
@@ -96,12 +99,47 @@ bool QueryPlanner::eval_condition(const ConditionExpr& cond, const RowFields& ro
                 if (!v) { return false; }
                 return compare_values(*v, c.op, c.value);
 
+            } else if constexpr (std::is_same_v<T, GroupedExpr>) {
+                // B-5: sub-WhereClause aninhada — recursão direta.
+                if (!c.body) { return false; }
+                return eval_where(*c.body, row, kmer_cache, crosses_cache);
+
             } else if constexpr (std::is_same_v<T, CrossesCondition>) {
-                // TODO Phase 2: integrar PathIndex.
-                // Known limitation: queries com `crosses(<path>)` no WHERE
-                // sempre retornam zero hits até a integração com PathIndex
-                // ser implementada. A gramática aceita a sintaxe (parser
-                // produz CrossesCondition), mas a avaliação é stub.
+                // Pré-condição: cache pré-computado pelo plan_paths.
+                // Sem cache (caller que não construiu — ex: outras entidades) →
+                // semantic equivalente ao stub antigo (zero hits).
+                if (!crosses_cache || !topology_) { return false; }
+
+                const auto it = crosses_cache->find(c.path_name);
+                if (it == crosses_cache->end()) {
+                    // Path target inexistente OU não foi pré-cacheado.
+                    return false;
+                }
+                const auto& target_nodes = it->second;
+
+                // path_id do candidato (path da row atual).
+                const Value* id_val = row.find("id");
+                if (!id_val) { return false; }
+                const auto* id_int = std::get_if<int64_t>(id_val);
+                if (!id_int) { return false; }
+                const uint64_t candidate_pid = static_cast<uint64_t>(*id_int);
+
+                // Buffer thread_local reusado entre chamadas — evita alocação
+                // por candidato em loops com milhares de paths. path_nodes()
+                // pode lançar bad_alloc; convertemos em "false" para preservar
+                // noexcept no eval_condition.
+                thread_local std::vector<uint64_t> candidate_nodes;
+                candidate_nodes.clear();
+                try {
+                    topology_->path_nodes(candidate_pid, candidate_nodes);
+                } catch (...) {
+                    return false;
+                }
+
+                // Early exit no primeiro nó compartilhado.
+                for (const uint64_t nid : candidate_nodes) {
+                    if (target_nodes.contains(nid)) { return true; }
+                }
                 return false;
 
             } else {
@@ -116,9 +154,9 @@ bool QueryPlanner::eval_condition(const ConditionExpr& cond, const RowFields& ro
                 const uint64_t current_id = static_cast<uint64_t>(*id_int);
 
                 // Caminho rápido: cache pré-computado O(1)
-                if (cache) {
-                    auto it_cache = cache->find(c.kmer);
-                    if (it_cache == cache->end()) { return false; }
+                if (kmer_cache) {
+                    auto it_cache = kmer_cache->find(c.kmer);
+                    if (it_cache == kmer_cache->end()) { return false; }
                     return it_cache->second.contains(current_id);
                 }
 
@@ -146,19 +184,20 @@ bool QueryPlanner::eval_condition(const ConditionExpr& cond, const RowFields& ro
 // esquerda. Implementar precedência exigiria parser hierárquico (AST de
 // expressão) na grammar — fora do escopo atual.
 bool QueryPlanner::eval_where(const WhereClause& wc, const RowFields& row,
-                               const KmerCache* cache) const noexcept {
+                               const KmerCache* kmer_cache,
+                               const CrossesCache* crosses_cache) const noexcept {
     if (wc.conditions.empty()) { return true; }
 
-    bool result = eval_condition(wc.conditions[0], row, cache);
+    bool result = eval_condition(wc.conditions[0], row, kmer_cache, crosses_cache);
 
     // Avaliação esquerda-para-direita com short-circuit por operador.
     for (size_t i = 0; i < wc.connectors.size(); ++i) {
         if (wc.connectors[i] == LogicalOp::AND) {
             if (!result) { break; }               // false AND anything = false
-            result = eval_condition(wc.conditions[i + 1], row, cache);
+            result = eval_condition(wc.conditions[i + 1], row, kmer_cache, crosses_cache);
         } else {
             if (result)  { break; }               // true OR anything = true
-            result = eval_condition(wc.conditions[i + 1], row, cache);
+            result = eval_condition(wc.conditions[i + 1], row, kmer_cache, crosses_cache);
         }
     }
     return result;

@@ -416,6 +416,42 @@ map_path_cols(std::span<const std::string> cols) {
     return out;
 }
 
+// Pré-computa CrossesCache para todos os `crosses(<path>)` no WHERE.
+// Para cada path_name único, faz lookup linear em path_names_ e armazena o
+// conjunto de nodes desse path. Path names inexistentes não são inseridos —
+// eval_condition retorna false naturalmente. Custo:
+//   • lookup nome→pid:    O(P × L) onde P=#paths, L=avg len do nome (~bytes)
+//   • path_nodes(target): O(N) onde N=nodes do target (extract via gBWT)
+//   • set construction:   O(N)
+// Para HPRC (P~100, N~milhões): ~poucos ms — pago UMA vez por query.
+static void build_crosses_cache(const WhereClause& wc, const GfaCsrTopology& topo,
+                                CrossesCache& out) {
+    // Lookup linear nome→pid. Aceitável para HPRC (P~100); virar
+    // unordered_map<string,size_t> se P escalar para 10k+.
+    auto find_path_id = [&](std::string_view name) -> std::optional<size_t> {
+        const size_t n = topo.path_count();
+        for (size_t i = 0; i < n; ++i) {
+            if (topo.path_name(i) == name) { return i; }
+        }
+        return std::nullopt;
+    };
+
+    std::vector<uint64_t> nodes_buf;
+    for (const auto& cond : wc.conditions) {
+        const auto* cc = std::get_if<CrossesCondition>(&cond);
+        if (!cc) { continue; }
+        if (out.contains(cc->path_name)) { continue; } // dedup mesma cond repetida
+
+        const auto target_pid = find_path_id(cc->path_name);
+        if (!target_pid) { continue; } // path inexistente — não cacheia
+
+        nodes_buf.clear();
+        topo.path_nodes(*target_pid, nodes_buf);
+        out.emplace(cc->path_name,
+                    std::unordered_set<uint64_t>(nodes_buf.begin(), nodes_buf.end()));
+    }
+}
+
 } // namespace detail
 
 // ── Construtor ────────────────────────────────────────────────────────────────
@@ -1043,6 +1079,14 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_paths(const FindQuery
     result.columns = std::move(cols);
     result.flat.reserve(std::min(count, size_t{pag.take_n}) * ncols);
 
+    // CrossesCache — pré-computa path_name → set de nodes do target. Vazio
+    // se o WHERE não tiver `crosses(...)` (passa nullptr ao eval).
+    CrossesCache crosses_cache;
+    if (q.where) {
+        detail::build_crosses_cache(*q.where, *topology_, crosses_cache);
+    }
+    const CrossesCache* xc_ptr = crosses_cache.empty() ? nullptr : &crosses_cache;
+
     RowFields row;
 
     for (size_t pid = 0; pid < count; ++pid) {
@@ -1069,7 +1113,7 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_paths(const FindQuery
             row.insert("name", std::string(pname));
             row.insert("node_count", nc);
             row.insert("length", total_length);
-            if (!eval_where(*q.where, row)) {
+            if (!eval_where(*q.where, row, /*kmer*/ nullptr, xc_ptr)) {
                 continue;
             }
         }

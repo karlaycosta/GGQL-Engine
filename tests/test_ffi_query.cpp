@@ -131,6 +131,29 @@ int main() {
     // ── 8. result_free(NULL) não deve craShar ─────────────────────────────────
     ggql_result_free(nullptr);
 
+    // ── 8.bis. §3.bis — ggql_engine_load agora carrega topology ──────────────
+    //         Antes: FIND PATH retornava "FIND PATH requer GfaCsrTopology".
+    //         Depois: deve executar normalmente.
+    {
+        GgqlResultHandle r = ggql_engine_execute(
+            eng, "FIND PATH RETURN id, name", 3, 0);
+        check(r != nullptr,
+              "FIND PATH via FFI (§3.bis: topology carregado em ggql_engine_load)");
+        if (r) {
+            check(ggql_result_row_count(r) <= 3, "FIND PATH LIMIT 3 row_count");
+            ggql_result_free(r);
+        }
+    }
+
+    // ── 8.ter. case-insensitive end-to-end via FFI (B-7) ─────────────────────
+    {
+        GgqlResultHandle r = ggql_engine_execute(
+            eng, "find segment limit 1", 1, 0);
+        check(r != nullptr && ggql_result_row_count(r) == 1,
+              "case-insensitive 'find segment' via FFI (B-7)");
+        if (r) { ggql_result_free(r); }
+    }
+
     // ── 9. Destroi engine ──────────────────────────────────────────────────────
     ggql_engine_destroy(eng);
 

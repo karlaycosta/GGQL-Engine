@@ -68,6 +68,12 @@ struct RowFields {
 /// Cache pré-computado: kmer → conjunto de segment IDs que o contêm.
 using KmerCache = std::unordered_map<std::string, std::unordered_set<uint64_t>>;
 
+/// Cache pré-computado: path_name (target de `crosses(...)`) → conjunto de
+/// node IDs visitados por aquele path. Construído uma vez por query em
+/// plan_paths quando há CrossesCondition no WHERE; entradas com path_name
+/// inexistente não são inseridas (eval retorna false naturalmente).
+using CrossesCache = std::unordered_map<std::string, std::unordered_set<uint64_t>>;
+
 // Resultado de uma consulta em layout colunar row-major.
 // flat[row * columns.size() + col] dá o valor da célula (row, col).
 struct QueryResult {
@@ -113,9 +119,11 @@ class QueryPlanner {
     [[nodiscard]] std::expected<QueryResult, std::string> plan_paths(const FindQuery& q) const;
 
     [[nodiscard]] bool eval_condition(const ConditionExpr& cond, const RowFields& row,
-                                      const KmerCache* cache = nullptr) const noexcept;
+                                      const KmerCache* kmer_cache = nullptr,
+                                      const CrossesCache* crosses_cache = nullptr) const noexcept;
     [[nodiscard]] bool eval_where(const WhereClause& wc, const RowFields& row,
-                                  const KmerCache* cache = nullptr) const noexcept;
+                                  const KmerCache* kmer_cache = nullptr,
+                                  const CrossesCache* crosses_cache = nullptr) const noexcept;
 
     [[nodiscard]] static bool compare_values(const Value& lhs, Operator op,
                                              const Value& rhs) noexcept;

@@ -1,0 +1,171 @@
+// test_query_planner_idx.cpp — Smoke tests do planner em todas as entities
+// usando um índice .idx real. Complementa:
+//   - test_query_planner.cpp (TIP/REPEAT em grafo diamante in-memory)
+//   - test_query_crosses.cpp (crosses() end-to-end)
+//   - test_grammar.cpp       (parser puro)
+//
+// Cobre: FIND SEGMENT, FIND EDGE, FIND PATH, FIND BUBBLE, FIND TIP,
+//        FIND REPEAT, SEARCH KMER + RETURN * + LIMIT/OFFSET.
+
+#include "ggql/query/grammar.hpp"
+#include "ggql/query/query_planner.hpp"
+#include "ggql/storage/topology.hpp"
+#include "ggql/storage/fm_index.hpp"
+#include "ggql/ingest/metadata_store.hpp"
+
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <variant>
+
+using namespace ggql;
+
+static int n_pass = 0, n_fail = 0;
+
+static void check(bool cond, const char* msg) {
+    if (cond) { std::printf("[ OK ] %s\n", msg); ++n_pass; }
+    else      { std::printf("[FAIL] %s\n", msg); ++n_fail; }
+}
+
+static QueryResult run(const QueryPlanner& planner, const std::string& q_str) {
+    auto ast = grammar::parse_ggql(q_str);
+    if (!ast) {
+        std::printf("  [parse error] %s\n", ast.error().c_str());
+        return {};
+    }
+    auto res = planner.execute(*ast);
+    if (!res) {
+        std::printf("  [exec error] %s\n", res.error().c_str());
+        return {};
+    }
+    return std::move(*res);
+}
+
+int main() {
+    const char* idx = std::getenv("GGQL_TEST_IDX");
+    if (!idx) { idx = "../data/chm13_subset_100w.gfa.idx"; }
+
+    GfaCsrTopology topo;
+    GfaMetadataStore meta;
+    GfaSequenceIndex fm;
+    bool fm_loaded = false;
+    try {
+        topo.load(idx);
+        meta.load(idx);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "Falha carregando .idx (%s): %s\n", idx, e.what());
+        return 2;
+    }
+    try {
+        fm.load(idx);
+        fm_loaded = true;
+    } catch (...) {
+        // FM-Index ausente é tolerado — testes de SEARCH KMER pulam
+    }
+
+    std::printf("Loaded: %zu nodes · %zu paths · FM=%s (idx=%s)\n",
+                topo.num_nodes(), topo.path_count(),
+                fm_loaded ? "yes" : "no", idx);
+
+    QueryPlanner planner(&topo, &meta, fm_loaded ? &fm : nullptr);
+
+    // ── FIND SEGMENT ──────────────────────────────────────────────────────────
+    {
+        auto r = run(planner, "FIND SEGMENT LIMIT 5");
+        check(r.row_count == 5,                                  "FIND SEGMENT LIMIT 5 → 5 rows");
+        check(!r.columns.empty(),                                "FIND SEGMENT tem colunas default");
+    }
+    {
+        auto r = run(planner, "FIND SEGMENT WHERE length > 10000 LIMIT 3");
+        check(r.row_count <= 3,                                  "WHERE length > 10000 LIMIT 3");
+        check(r.total_hits >= r.row_count,                       "total_hits >= row_count");
+    }
+    {
+        auto r = run(planner, R"(FIND SEGMENT RETURN id, name, length LIMIT 1)");
+        check(r.columns.size() == 3 && r.columns[0] == "id" &&
+              r.columns[1] == "name" && r.columns[2] == "length",
+              "RETURN id, name, length seleciona 3 colunas");
+    }
+    {
+        auto r = run(planner, "FIND SEGMENT RETURN * LIMIT 1");
+        check(r.columns.size() >= 3 && r.row_count == 1,
+              "RETURN * (B-8) — todas as colunas em 1 row");
+    }
+
+    // ── FIND EDGE ─────────────────────────────────────────────────────────────
+    {
+        auto r = run(planner, "FIND EDGE LIMIT 10");
+        check(r.row_count == 10,                                 "FIND EDGE LIMIT 10");
+        // Colunas default: from_id, to_id, to_orient
+        check(r.columns.size() == 3,                             "FIND EDGE 3 cols default");
+    }
+
+    // ── FIND PATH ─────────────────────────────────────────────────────────────
+    {
+        auto r = run(planner, "FIND PATH RETURN id, name LIMIT 3");
+        check(r.row_count == 3,                                  "FIND PATH LIMIT 3");
+    }
+    {
+        auto r = run(planner, "FIND PATH WHERE node_count > 0 LIMIT 5");
+        check(r.row_count <= 5 && r.row_count > 0,               "WHERE node_count > 0");
+    }
+
+    // ── FIND BUBBLE (snarls) ──────────────────────────────────────────────────
+    {
+        // chm13_100w pode ter snarls.bin presente OU ausente (depende do
+        // ingest). Aceitar ambos: resultado válido ou erro bem-formado.
+        auto ast = grammar::parse_ggql("FIND BUBBLE LIMIT 5");
+        check(ast.has_value(),                                   "FIND BUBBLE parseia");
+        if (ast) {
+            auto exec = planner.execute(*ast);
+            const bool ok_exec    = exec.has_value() && exec->columns.size() >= 2;
+            const bool ok_missing = !exec.has_value() &&
+                                    exec.error().find("snarls.bin") != std::string::npos;
+            check(ok_exec || ok_missing,
+                  "FIND BUBBLE: executa OU reporta snarls.bin ausente");
+        }
+    }
+
+    // ── FIND TIP / FIND REPEAT (já cobertos in-memory; extra com idx real) ──
+    {
+        auto r = run(planner, "FIND TIP LIMIT 5");
+        check(r.columns.size() == 3,                             "FIND TIP cols=3 (id,in,out)");
+    }
+    {
+        auto r = run(planner, "FIND REPEAT LIMIT 5");
+        check(r.columns.size() == 3,                             "FIND REPEAT cols=3");
+    }
+
+    // ── SEARCH KMER ───────────────────────────────────────────────────────────
+    if (fm_loaded) {
+        // K-mer pequeno — provavelmente vai retornar vários hits
+        auto r = run(planner, R"(SEARCH KMER "ACGT" LIMIT 3)");
+        check(r.row_count <= 3,                                  "SEARCH KMER LIMIT 3");
+        // OFFSET (B-11) — apenas verifica que parseia e executa
+        auto r2 = run(planner, R"(SEARCH KMER "ACGT" LIMIT 3 OFFSET 1)");
+        check(r2.row_count <= 3,                                 "SEARCH KMER LIMIT 3 OFFSET 1 (B-11)");
+    } else {
+        std::printf("  skip SEARCH KMER (FM-Index ausente)\n");
+    }
+
+    // ── B-7: case-insensitive funciona end-to-end ────────────────────────────
+    {
+        auto r = run(planner, "find segment limit 2");
+        check(r.row_count == 2,                                  "find segment limit 2 (lowercase)");
+    }
+
+    // ── B-5: parens funciona end-to-end ──────────────────────────────────────
+    {
+        auto r = run(planner, "FIND SEGMENT WHERE (length > 1000 OR length < 10) AND length > 0 LIMIT 3");
+        check(r.row_count <= 3,                                  "(OR) AND simples — execução real");
+    }
+
+    // ── B-10: comentários ────────────────────────────────────────────────────
+    {
+        auto r = run(planner, "FIND SEGMENT -- limita\n LIMIT 2");
+        check(r.row_count == 2,                                  "comentário entre cláusulas");
+    }
+
+    std::printf("\n=== %d pass · %d fail ===\n", n_pass, n_fail);
+    return n_fail == 0 ? 0 : 1;
+}
