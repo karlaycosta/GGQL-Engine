@@ -499,17 +499,18 @@ por bugs descobertos.
 | Validação | `GGQL_MAX_TOTAL_HITS=10000000 ./run_queries chm13_subset_100w.idx 'FIND SEGMENT'` retorna 4.294.760 (paridade exata com GT). Sem env var, retorna 1.000.001 (default mantido — backward compat) |
 | Regressão | 14/14 ctest passando |
 
-**B-V2 — `find_all_snarls` aborta em grafos com componente sem tips**
+**B-V2 — `find_all_snarls` retorna 0 em pangenomas "fechados"** ⚠ **PARCIALMENTE INVESTIGADO 2026-05-10**
 
 | Aspecto | Valor |
 |---|---|
-| Local | `src/storage/snarl_decomposition.cpp:1101-1109` |
-| Código | `if (cnt_zero != 0) { return {}; } // Billi também aborta nesse caso` |
-| Comportamento | Se QUALQUER componente conexo não tem nó com `in_degree=0 OR out_degree=0`, retorna `{}` (zero snarls) |
-| Impacto | Pangenomas "fechados" (HPRC walks são contigs internos sem tips) → 0 snarls reportados |
-| Testes Tier A/B passaram | porque tinham componentes com tips (toy graphs DAG-like, DRB1-3123 com 5 tips) |
-| Comentário no código | implementação literal de `run_decompose()` do Billi upstream — herda a limitação |
-| Fix proposto | adicionar nós sentinela tip artificiais nos componentes "fechados" antes de rodar SESE, OU usar algoritmo alternativo (ex: `vg snarls integrated`) para grafos cíclicos |
+| Sintoma | `FIND BUBBLE` retorna 0 em chm13_subset_100w (4,3M nós, 100 walks HPRC) apesar de Fase 6 levar ~10 s |
+| Local original suspeito | `src/storage/snarl_decomposition.cpp:1101-1109` (early-return quando `cnt_zero != 0`) |
+| Fix aplicado | Early-return removido + fallback `Start[it] = first_node[it]` quando `sese_minbracket` não encontra bracket válido |
+| Resultado do fix | **Não desbloqueou Tier C**. Sprint 1/2 mantêm counts (4, 3, 1516 — early-return não disparava lá), Sprint 3 ainda 0. |
+| Diagnóstico revisto | O early-return era guard defensivo que NÃO era atingido em chm13_100w (caso contrário o fix mudaria o resultado). Algo mais profundo no pipeline (SESE main → hairp → panbubble validation) filtra todos os snarls em pangenomas com tipologia específica |
+| Investigação pendente | Adicionar logs temporários por fase em `find_all_snarls` para identificar onde os snarls "evaporam"; ou usar dataset intermediário (~1k-100k nós com walks fechados) para reproduzir minimamente |
+| Mitigação atual | Aceitar `FIND BUBBLE` não-validável em HPRC até investigação profunda (estimativa revisada: 1-2 dias) |
+| Alternativa | Port do algoritmo `integrated` do vg (cactus-based, sem dependência de tips) — esforço maior (1+ semana) mas resolve a classe inteira de bugs |
 
 ### O que Sprint 3 confirma
 

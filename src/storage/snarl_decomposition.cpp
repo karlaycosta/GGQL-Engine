@@ -200,6 +200,10 @@ struct BilliState {
     // ── Output (final, populado via merge das ComponentStates) ───────
     std::vector<pii> valid_panbubbles, valid_hairpins;
 
+    // Scratch reutilizado entre chamadas SEQUENCIAIS de sese_minbracket.
+    // clear() preserva chunks ja alocados — proxima call reusa.
+    std::deque<BracketList> sese_minbracket_pool_;
+
     int offset = 1; // heuristic mode (=1); -e flag aumenta para INT32_MAX/10
 
     // ─────────────────────────────────────────────────────────────────
@@ -298,12 +302,14 @@ struct BilliState {
     }
 
     // Iterativo com post-order via child_idx tracking.
-    // Pool local — BracketList* viram dangling depois da função, mas isso é
-    // OK porque bl[] é reassignado antes do SESE main (que usa pools per-
-    // componente nos ComponentStates).
+    // BracketList* viram dangling depois da função, mas isso é OK porque
+    // bl[] é reassignado antes do SESE main (que usa pools per-componente
+    // nos ComponentStates).
     void sese_minbracket(int root, int& x, int& val) {
-        std::deque<BracketList> local_pool;
-        auto local_alloc = [&]() -> BracketList* { return &local_pool.emplace_back(); };
+        sese_minbracket_pool_.clear();
+        auto local_alloc = [this]() -> BracketList* {
+            return &sese_minbracket_pool_.emplace_back();
+        };
         struct Frame {
             int u, parent;
             size_t ci;
@@ -1092,15 +1098,12 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo, i
         }
     }
 
-    int cnt_zero = 0;
-    for (int i = 0; i < s.component; ++i) {
-        if (s.tips[i].empty()) {
-            cnt_zero++;
-        }
-    }
-    if (cnt_zero != 0) {
-        return {};
-    } // Billi também aborta nesse caso
+    // B-V2 fix (2026-05-10): early-return removido. Billi upstream aborta em
+    // componentes sem tips, mas o port C++ implementou caminho alternativo via
+    // sese_minbracket(first_node[it], ...) abaixo na linha 1121. Em pangenomas
+    // "fechados" (HPRC walks são contigs internos sem tips), abortar zerava
+    // o resultado inteiro — agora cada componente sem tips é processado pelo
+    // fallback. Guard adicional contra Start[it] == -1 está logo abaixo.
 
     // Finding S node + adding extra gray edges for tips
     constexpr int maxv = INT32_MAX;
@@ -1115,6 +1118,13 @@ static std::vector<SnarlRecord> run_billi_pipeline(const GfaCsrTopology& topo, i
         if (s.tips[it].empty()) {
             int val = s.edges_count;
             s.sese_minbracket(s.first_node[it], s.Start[it], val);
+            // Fallback B-V2: componentes patológicos onde nenhum nó tem
+            // bracket válido (raro: self-loops dominantes, dedup agressivo).
+            // first_node é garantido não-vazio pelo filtro em cc_tip_id
+            // (g_compacted[i].empty() pulado).
+            if (s.Start[it] == -1) [[unlikely]] {
+                s.Start[it] = s.first_node[it];
+            }
         } else {
             s.Start[it] = s.tips[it][0];
             int u = s.Start[it];
