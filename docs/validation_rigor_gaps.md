@@ -203,19 +203,19 @@ Generalização para "pangenoma humano" frágil com N=1.
 
 | # | Item | Esforço | Status |
 |---|---|---|:-:|
-| **R1** | **Determinismo**: rodar `bench_gbwt` 2× e diffar SHA256 dos `.bin` | ~1h | 🟡 pendente |
-| **R2** | **Perf rigoroso**: 5 warmup + 10 medidas, mediana ± IQR via `hyperfine` ou loop manual | ~2h | 🟡 pendente |
-| **R3** | **Conteúdo de RETURN**: estender `test_query_planner_idx.cpp` com checks de valor para 5+ queries | ~2h | 🟡 pendente |
-| **R4** | **Paginação determinística**: teste que verifica `OFFSET N` cobre todos os hits sem overlap | ~1h | 🟡 pendente |
+| **R1** | **Determinismo**: rodar `bench_gbwt` 2× e diffar SHA256 dos `.bin` | ~1h | ✅ feito |
+| **R2** | **Perf rigoroso**: 5 warmup + 10 medidas, mediana ± IQR via `hyperfine` ou loop manual | ~2h | ✅ feito |
+| **R3** | **Conteúdo de RETURN**: estender `test_query_planner_idx.cpp` com checks de valor para 5+ queries | ~2h | ✅ feito |
+| **R4** | **Paginação determinística**: teste que verifica `OFFSET N` cobre todos os hits sem overlap | ~1h | ✅ feito |
 
 ### D.2 — Médio impacto (1-2 dias)
 
 | # | Item | Esforço | Status |
 |---|---|---|:-:|
-| **R5** | **Compositional queries**: 5-10 casos AND/OR/parens em DRB1 + chm13 com GT Python | ~3h | 🟡 pendente |
-| **R6** | **Code coverage**: `gcov` + `lcov` HTML report. Identificar branches < 80% | ~4h | 🟡 pendente |
-| **R7** | **Garrison 2018 paper counts**: cross-check DRB1 contra Tabela 2 do paper | ~1h | 🟡 pendente |
-| **R8** | **Robustez negativa**: 5-10 GFAs malformados, esperar erros bem-formados | ~3h | 🟡 pendente |
+| **R5** | **Compositional queries**: 5-10 casos AND/OR/parens em DRB1 + chm13 com GT Python | ~3h | ✅ feito (bug fixado!) |
+| **R6** | **Code coverage**: `gcov` + `lcov` HTML report. Identificar branches < 80% | ~4h | ✅ feito (66.8% lines) |
+| **R7** | **Garrison 2018 paper counts**: cross-check DRB1 contra Tabela 2 do paper | ~1h | 🟡 parcial (sem PDF) |
+| **R8** | **Robustez negativa**: 5-10 GFAs malformados, esperar erros bem-formados | ~3h | ✅ feito (10/10) |
 
 ### D.3 — Alto impacto (sessão dedicada)
 
@@ -236,30 +236,72 @@ Generalização para "pangenoma humano" frágil com N=1.
 
 ---
 
-## §E. Checklist de mitigação (atualizado em tempo real)
+## §E. Checklist de mitigação (atualizado em 2026-05-11)
 
-### Quick wins (D.1)
-- [ ] R1 — Determinismo de ingest verificado via SHA256
-- [ ] R2 — Performance com mediana ± IQR (10 runs após warmup)
-- [ ] R3 — Conteúdo de RETURN validado em 5+ queries
-- [ ] R4 — Paginação determinística (OFFSET cobre tudo)
+### Quick wins (D.1) — 4/4 ✅
+- [x] **R1** — Determinismo verificado via SHA256 (bug detectado e fixado em Pass2)
+- [x] **R2** — Performance com mediana ± IQR (FIND BUBBLE 77× faster than vg, σ=2%)
+- [x] **R3** — Conteúdo de RETURN validado (6/6 em DRB1, modo `--rows`)
+- [x] **R4** — Paginação determinística (11/11: idem + cobertura + disjunção)
 
-### Médio impacto (D.2)
-- [ ] R5 — Compositional queries (5+ casos)
-- [ ] R6 — Coverage report `gcov`/`lcov`
-- [ ] R7 — Cross-check Garrison 2018
-- [ ] R8 — Robustez negativa (GFAs malformados)
+### Médio impacto (D.2) — 3/4 ✅ + 1/4 🟡
+- [x] **R5** — Compositional queries (14 casos, **bug crítico fixado**: precedência SQL)
+- [x] **R6** — Coverage report 66.8% lines, 78.0% funcs (lacunas identificadas)
+- [🟡] **R7** — Garrison 2018 (parcial: 6 counts batem com vg oficial, sem PDF)
+- [x] **R8** — Robustez negativa 10/10 (zero crashes em GFAs malformados)
 
-### Alto impacto (D.3)
-- [ ] R9 — Tier D dataset não-humano
-- [ ] R10 — HPRC full (88M nós)
-- [ ] R11 — Profiles non-pangenome
-- [ ] R12 — CI público + Docker
+### Alto impacto (D.3) — 1/4 ✅
+- [ ] **R9** — Tier D dataset não-humano (E. coli PGGB ou yeast)
+  - Requer download externo (~50-500 MB), sessão dedicada
+- [ ] **R10** — HPRC full (88M nós, ~85k snarls Liao 2023)
+  - Requer ~40 GB disk + 32 GB RAM, ingest ~1h, sessão dedicada
+- [ ] **R11** — Profiles non-pangenome (metagenomics, assembly, comparative)
+  - Requer datasets desses domínios + ground truth, dias
+- [x] **R12** — CI público + Docker
+  - `Dockerfile` multi-stage (build + validation)
+  - `.github/workflows/ci.yml` com 3 jobs (build/test, validation, coverage)
+  - Datasets grandes ficam fora do CI (manual via workflow_dispatch)
 
-### Gold standard (D.4)
-- [ ] R13 — Mutation testing
-- [ ] R14 — Cross-compiler/platform
-- [ ] R15 — Property-based testing
+### Gold standard (D.4) — 0/3 (sessões dedicadas)
+- [ ] **R13** — Mutation testing (mutate-cpp)
+- [ ] **R14** — Cross-compiler/platform (clang + ARM)
+- [ ] **R15** — Property-based testing (rapidcheck)
+
+## §G. Progresso (atualizado em 2026-05-11)
+
+**8 de 15 R-items completos** (1 parcial). Trabalho aplicado:
+
+### Bugs descobertos e corrigidos durante a campanha
+
+1. **R1**: não-determinismo de ingest paralelo
+   - `src/ingest/ingestor.cpp` Pass2 — `bin_gbwt_bufs` mutex causava ordem
+     não-determinística entre threads. Substituído por per-thread bufs.
+   - Trade-off: path_stores.bin 62MB → 94MB, mas reprodutibilidade total.
+
+2. **R5**: precedência operadora incorreta em WHERE
+   - `src/query/query_evaluator.cpp:216` short-circuit AND descartava OR
+     subsequente. `len>30 AND len<32 OR len=1` retornava 5 em vez de 3508.
+   - Fix: redução AND→OR em dois passos (precedência SQL-padrão).
+
+### Métricas científicas geradas (paper-ready)
+
+- **Performance**: 13 ops medidas, FIND BUBBLE = **77× faster than vg snarls**
+  ± 5.5 (mediana 824 ms vs 63604 ms, σ=2%)
+- **Reprodutibilidade**: byte-exact em 3 datasets (tiny → DRB1 → chm13_100w)
+- **Coverage**: 66.8% lines / 78.0% funcs auditada via gcov-14 + gcovr 8.6
+- **Conteúdo**: 6/6 RETURN values batem com awk GT (não só counts)
+- **Paginação**: 11/11 propriedades verificadas (idem + cobertura + disjunção)
+- **Compositional**: 14 casos AND/OR/parens com 5 índices/caches distintos
+- **Robustez**: 10/10 GFAs malformados sem crashes
+
+### Critério de "publicável"
+
+| Tier | Item | Status |
+|---|---|:-:|
+| Mínimo aceitável para peer review | R1+R2+R3+R4+R6 | ✅ |
+| Forte para peer review            | + R5+R8        | ✅ |
+| Top-tier (publicação Nature/Bio)  | + R9+R10+R12   | 🟡 |
+| Gold standard                     | + R13+R14+R15  | 🟡 |
 
 ---
 
@@ -282,3 +324,4 @@ Gold standard para top-tier journal (3-4 semanas):
 ## Histórico
 
 - **2026-05-10**: documento criado após reanálise crítica do `queries_validation_plan.md`. Identificadas 4 categorias de lacunas (técnicas, metodológicas, plano, FM-Index features) e mapeados 15 itens de mitigação priorizados em 4 tiers.
+- **2026-05-11**: campanha de mitigação R1-R8 executada. 7 R-items completos + 1 parcial. 2 bugs críticos descobertos e fixados (não-determinismo de ingest, precedência operadora em WHERE). Critério "forte para peer review" atendido.

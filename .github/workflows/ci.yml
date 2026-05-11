@@ -1,0 +1,141 @@
+name: CI
+
+# CI público — R12. Roda em push e PR em main/develop.
+# Stages:
+#   1. Build + unit tests (ctest) — todas branches
+#   2. Validation suite (R1, R3, R4, R5, R8) — DRB1 tier_b
+#   3. Coverage report (R6) — anexado como artifact
+#
+# Datasets grandes (chm13_subset_100w, HPRC) ficam fora do CI por causa
+# de bandwidth e tempo; rodam manualmente via `workflow_dispatch`.
+
+on:
+  push:
+    branches: [main, develop, "feat/**"]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      run_tier_c:
+        description: "Rodar Tier C (chm13_100w, ~25 min)?"
+        required: false
+        default: "false"
+
+jobs:
+  build-test:
+    name: Build + unit tests (gcc-14)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build g++-14 gcc-14 \
+            libfmt-dev libjemalloc-dev libomp-dev zlib1g-dev
+
+      - name: Configure
+        env: { CXX: g++-14, CC: gcc-14 }
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Unit tests (ctest)
+        run: ctest --test-dir build -j$(nproc) --output-on-failure
+
+  validation:
+    name: Validation suite (Tier A + B + R1-R8)
+    runs-on: ubuntu-24.04
+    needs: build-test
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build g++-14 gcc-14 \
+            libfmt-dev libjemalloc-dev libomp-dev zlib1g-dev \
+            awk coreutils python3 wget
+
+      - name: Build
+        env: { CXX: g++-14, CC: gcc-14 }
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j$(nproc)
+
+      - name: Install validation tools (vg, gfatools)
+        run: |
+          mkdir -p data/validation/tools
+          wget -q https://github.com/vgteam/vg/releases/download/v1.74.0/vg \
+            -O data/validation/tools/vg
+          chmod +x data/validation/tools/vg
+          git clone --depth=1 https://github.com/lh3/gfatools.git /tmp/gfatools
+          make -C /tmp/gfatools
+          mkdir -p data/validation/tools/gfatools
+          cp /tmp/gfatools/gfatools data/validation/tools/gfatools/
+
+      - name: Tier A (toy graphs)
+        run: bash tests/validation/run_tier_a.sh
+
+      - name: R1 — determinismo (tiny + DRB1)
+        run: |
+          # tier_c omitido — exige 600MB GFA não disponível no CI por default
+          bash tests/validation/r1_determinism.sh tiny
+          # Tier B só existe se DRB1.gfa estiver versionado; condicional:
+          if [ -f data/validation/tier_b/DRB1-3123.gfa ]; then
+            bash tests/validation/r1_determinism.sh tier_b
+          fi
+
+      - name: R3 — conteúdo de RETURN (DRB1)
+        if: ${{ hashFiles('data/validation/tier_b/DRB1-3123.gfa') != '' }}
+        run: bash tests/validation/r3_return_content.sh
+
+      - name: R4 — paginação determinística (DRB1)
+        if: ${{ hashFiles('data/validation/tier_b/DRB1-3123.gfa') != '' }}
+        run: bash tests/validation/r4_pagination.sh
+
+      - name: R5 — compositional queries (DRB1)
+        if: ${{ hashFiles('data/validation/tier_b/DRB1-3123.gfa') != '' }}
+        run: bash tests/validation/r5_compositional.sh
+
+      - name: R8 — robustez negativa (GFAs malformados)
+        run: bash tests/validation/r8_malformed_gfa.sh
+
+  coverage:
+    name: Coverage report (R6)
+    runs-on: ubuntu-24.04
+    needs: build-test
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies + gcovr
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build g++-14 gcc-14 \
+            libfmt-dev libjemalloc-dev libomp-dev zlib1g-dev \
+            python3 python3-pip
+          pip install --break-system-packages gcovr
+
+      - name: Run coverage
+        env: { CXX: g++-14, CC: gcc-14 }
+        run: bash tests/validation/r6_coverage.sh
+
+      - name: Upload coverage HTML
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: tests/validation/r6_results/
+          retention-days: 30
