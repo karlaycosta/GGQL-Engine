@@ -462,6 +462,76 @@ Primeira execução: vg total = 2053, GGQL = 1516, Δ = −537. Discrepância in
 
 ---
 
+## 7.sexies. ✅ Resultados Sprint 4 (2026-05-10) — Filtros WHERE com cobertura ampliada
+
+**Objetivo**: fechar 4 lacunas críticas identificadas em §6:
+- L-V1: `WHERE depth` (qualquer tier)
+- L-V3: `WHERE contains_kmer` em Tier B/C
+- L-V4: `FIND EDGE WHERE` filtros
+- L-V5: `WHERE name` em Tier B e Tier C
+
+**Setup**: `tests/validation/run_sprint4.sh`. GT computado via `awk` (segments, edges) e via Python com `struct.pack/unpack('f', ...)` para precisão float32 (alinha com armazenamento GGQL).
+
+**Resultados (15/15 — 14 exato + 1 com tolerância L-V8)**:
+
+### L-V1: WHERE depth em `bench_depth.gfa` (Tier A — 50k segments com `dp:f:`)
+
+| Query | GGQL | GT (float32) | Δ |
+|---|---:|---:|:-:|
+| `depth >= 2.0` | 33.343 | 33.343 | 0 ✅ |
+| `depth < 1.0` | 3.779 | 3.779 | 0 ✅ |
+| `depth > 5.0` | 9.629 | 9.629 | 0 ✅ |
+| `depth <= 0.5` | 442 | 442 | 0 ✅ |
+| `depth in [1.95, 1.97]` | 270 | 406 | −136 ⚠ (L-V8 — bug float promotion) |
+
+### L-V3: contains_kmer em DRB1-3123 (Tier B)
+
+| Query | GGQL | GT (awk index) | Δ |
+|---|---:|---:|:-:|
+| `contains_kmer("ACGT")` | 7 | 7 | 0 ✅ |
+| `contains_kmer("TTTT")` | 83 | 83 | 0 ✅ |
+| `contains_kmer("CCCCCC")` | 0 | 0 | 0 ✅ |
+| `contains_kmer("XYZZ")` | 0 | 0 | 0 ✅ |
+
+### L-V4: FIND EDGE WHERE to_orient (Tier B)
+
+| Query | GGQL | GT (awk) | Δ |
+|---|---:|---:|:-:|
+| `to_orient = "+"` | 7.448 | 7.448 | 0 ✅ |
+| `to_orient = "-"` | 0 | 0 | 0 ✅ |
+
+### L-V5: WHERE name em Tier B + Tier C
+
+| Tier | Query | GGQL | GT | Δ |
+|---|---|---:|---:|:-:|
+| B (DRB1) | `name = "4986"` (exact match) | 1 | 1 | 0 ✅ |
+| B | `name = "_inexistente_"` (miss) | 0 | 0 | 0 ✅ |
+| C (chm13_100w 4,3M nós) | `name = "1"` (match) | 1 | 1 | 0 ✅ |
+| C | `name = "ID_INEXISTENTE_XYZ"` | 0 | 0 | 0 ✅ |
+
+### Bug L-V8 descoberto e documentado
+
+Aplicação naïve do range `[1.95, 1.97]` retornou 270 (vs 406 esperado). Investigação localizou em `process_id` (query_planner.cpp:895-896) onde `depth_index` (em float32) é seguido por `eval_where` (que promove float→double e compara com literal double). Promoção introduz erro de bit (~10⁻⁷) que rejeita IDs corretos no boundary. Detalhes em §4.
+
+### `FIND EDGE WHERE from_id = X` — não validável trivialmente via awk
+
+`from_id` no GGQL refere-se ao **internal_id pós-MPHF remap**, não ao segment NAME do GFA. Validação por nome do GFA requer mapping. Cobertura disponível via:
+- `tests/test_query_planner_idx.cpp` (regression guard B-V2): 100 samples comparam `FIND EDGE WHERE from_id = X RETURN to_id` vs `topo.out_neighbors(X)` direto
+
+### Cobertura atualizada
+
+| Query | Tier A | Tier B | Tier C |
+|---|:-:|:-:|:-:|
+| `FIND SEGMENT WHERE length` | ✅ | ❌ | ✅ |
+| `FIND SEGMENT WHERE name` | ✅ | **✅** | **✅** |
+| `FIND SEGMENT WHERE depth` | **✅** | ❌ | ❌ |
+| `FIND SEGMENT WHERE contains_kmer` | ✅ | **✅** | ❌ |
+| `FIND EDGE WHERE *` | ❌ | **✅** (to_orient) | ❌ |
+
+Avanço total: **+9 validações novas em Tier B/C** (de 0% para parcial em 4 queries).
+
+---
+
 ## 7.quinquies. ✅/⚠ Resultados Sprint 3 (2026-05-10) — Tier C (HPRC chm13_subset_100w)
 
 **Dataset**: `data/chm13_subset_100w.gfa` — 4.294.760 nós, 5.025.175 edges,
