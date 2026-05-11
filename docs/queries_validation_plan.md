@@ -472,7 +472,7 @@ Primeira execução: vg total = 2053, GGQL = 1516, Δ = −537. Discrepância in
 
 **Setup**: `tests/validation/run_sprint4.sh`. GT computado via `awk` (segments, edges) e via Python com `struct.pack/unpack('f', ...)` para precisão float32 (alinha com armazenamento GGQL).
 
-**Resultados (15/15 — 14 exato + 1 com tolerância L-V8)**:
+**Resultados (16/16 — todos exatos após fix L-V8)**:
 
 ### L-V1: WHERE depth em `bench_depth.gfa` (Tier A — 50k segments com `dp:f:`)
 
@@ -482,7 +482,8 @@ Primeira execução: vg total = 2053, GGQL = 1516, Δ = −537. Discrepância in
 | `depth < 1.0` | 3.779 | 3.779 | 0 ✅ |
 | `depth > 5.0` | 9.629 | 9.629 | 0 ✅ |
 | `depth <= 0.5` | 442 | 442 | 0 ✅ |
-| `depth in [1.95, 1.97]` | 270 | 406 | −136 ⚠ (L-V8 — bug float promotion) |
+| `depth in [1.95, 1.97]` | 406 | 406 | 0 ✅ (após fix L-V8) |
+| `depth = 1.96` (igualdade exata) | 127 | 127 | 0 ✅ (regression guard L-V8) |
 
 ### L-V3: contains_kmer em DRB1-3123 (Tier B)
 
@@ -509,9 +510,31 @@ Primeira execução: vg total = 2053, GGQL = 1516, Δ = −537. Discrepância in
 | C (chm13_100w 4,3M nós) | `name = "1"` (match) | 1 | 1 | 0 ✅ |
 | C | `name = "ID_INEXISTENTE_XYZ"` | 0 | 0 | 0 ✅ |
 
-### Bug L-V8 descoberto e documentado
+### Bug L-V8 descoberto e RESOLVIDO
 
-Aplicação naïve do range `[1.95, 1.97]` retornou 270 (vs 406 esperado). Investigação localizou em `process_id` (query_planner.cpp:895-896) onde `depth_index` (em float32) é seguido por `eval_where` (que promove float→double e compara com literal double). Promoção introduz erro de bit (~10⁻⁷) que rejeita IDs corretos no boundary. Detalhes em §4.
+**Descoberto via Sprint 4**: aplicação naïve do range `[1.95, 1.97]` retornou 270 (vs 406 esperado). Investigação localizou em `process_id` (query_planner.cpp:895-896) onde `depth_index` (em float32) é seguido por `eval_where` (que promove float→double e compara com literal double). Promoção introduz erro de bit (~10⁻⁷) que rejeita IDs corretos no boundary.
+
+**Fix aplicado** (commit `8d9fa18`, opção B do plano de discussão): `eval_condition` em `query_evaluator.cpp` detecta `c.field == "depth"` e compara em float-precision direto, sem promoção implícita:
+
+```cpp
+if (c.field == "depth") {
+    const auto* sd = std::get_if<double>(v);
+    const auto* ld = std::get_if<double>(&c.value);
+    if (sd && ld) {
+        const float fl_sd = static_cast<float>(*sd);
+        const float fl_ld = static_cast<float>(*ld);
+        switch (c.op) {
+            case Operator::EQ:  return fl_sd == fl_ld;
+            // ... demais ops em float
+        }
+    }
+}
+```
+
+**Resultados pós-fix**:
+- `WHERE depth = 1.96`: era 0 → agora **127** ✅
+- `WHERE depth in [1.95, 1.97]`: era 270 → agora **406** ✅
+- ctest 14/14, zero regressão em queries que não tocam depth
 
 ### `FIND EDGE WHERE from_id = X` — não validável trivialmente via awk
 
