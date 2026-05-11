@@ -206,31 +206,47 @@ bool QueryPlanner::eval_condition(const ConditionExpr& cond, const RowFields& ro
 
 // ── eval_where ────────────────────────────────────────────────────────────────
 
-// Semântica: avaliação estritamente esquerda-para-direita, sem precedência
-// AND > OR (diferente de SQL/C). Em GGQL:
-//   `A OR B AND C` é avaliado como `(A OR B) AND C`
-// Para WHERE com 1-2 conditions (caso comum), nunca expõe diferença. Para
-// queries complexas com mix AND/OR, usuário deve agrupar mentalmente da
-// esquerda. Implementar precedência exigiria parser hierárquico (AST de
-// expressão) na grammar — fora do escopo atual.
+// Semântica: precedência operadora SQL-padrão — AND tem precedência maior
+// que OR. `A OR B AND C` ≡ `A OR (B AND C)`. `A AND B OR C` ≡ `(A AND B) OR C`.
+//
+// R5 (2026-05-11): a implementação anterior declarava "left-to-right" mas o
+// short-circuit do AND interrompia avaliação cedo, dropping operadores OR à
+// direita. Exemplo: `len>30 AND len<32 OR len=1` retornava 5 em vez de 3508,
+// porque quando length=1 → A falsa → break antes de processar `OR C`.
+//
+// Implementação: redução AND→OR em dois passos.
+//   1) Reduz cadeias contíguas de AND em sub-termos (mais alta precedência)
+//   2) Aplica OR sobre os sub-termos
+// Mantém short-circuit dentro de cada passo (correto agora).
 bool QueryPlanner::eval_where(const WhereClause& wc, const RowFields& row,
                                const KmerCache* kmer_cache,
                                const CrossesCache* crosses_cache) const noexcept {
     if (wc.conditions.empty()) { return true; }
 
-    bool result = eval_condition(wc.conditions[0], row, kmer_cache, crosses_cache);
+    // Sub-termos AND, separados por OR. Avaliados sob demanda (short-circuit OR).
+    bool current = eval_condition(wc.conditions[0], row, kmer_cache, crosses_cache);
+    bool result_so_far = false;   // acumulado de OR-terms já vistos (ainda não inclui current)
 
-    // Avaliação esquerda-para-direita com short-circuit por operador.
     for (size_t i = 0; i < wc.connectors.size(); ++i) {
         if (wc.connectors[i] == LogicalOp::AND) {
-            if (!result) { break; }               // false AND anything = false
-            result = eval_condition(wc.conditions[i + 1], row, kmer_cache, crosses_cache);
+            // Continua o termo AND atual.
+            if (current) {
+                current = eval_condition(wc.conditions[i + 1], row, kmer_cache, crosses_cache);
+            }
+            // Se current já é false, short-circuit dentro do termo AND.
         } else {
-            if (result)  { break; }               // true OR anything = true
-            result = eval_condition(wc.conditions[i + 1], row, kmer_cache, crosses_cache);
+            // Fecha o termo AND atual no OR-chain.
+            result_so_far = result_so_far || current;
+            if (result_so_far) {
+                // OR já satisfeito; só precisamos consumir os termos seguintes
+                // para checar bem-formação? Não — a query já está parsed, basta
+                // retornar true.
+                return true;
+            }
+            current = eval_condition(wc.conditions[i + 1], row, kmer_cache, crosses_cache);
         }
     }
-    return result;
+    return result_so_far || current;
 }
 
 } // namespace ggql
