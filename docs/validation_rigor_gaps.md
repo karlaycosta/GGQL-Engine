@@ -230,7 +230,7 @@ Generalização para "pangenoma humano" frágil com N=1.
 
 | # | Item | Esforço | Status |
 |---|---|---|:-:|
-| **R13** | **Mutation testing** (`mutate-cpp`) | 1 semana | 🟡 pendente |
+| **R13** | **Mutation testing** (`mutate-cpp`) | 1 semana | ✅ feito (12% score, plano para 70%) |
 | **R14** | **Cross-compiler/platform** (clang + ARM) | 1 semana | 🟡 pendente |
 | **R15** | **Property-based testing** com GFAs aleatórios (rapidcheck) | 1 semana | 🟡 pendente |
 
@@ -275,8 +275,17 @@ Generalização para "pangenoma humano" frágil com N=1.
   - `.github/workflows/ci.yml` com 3 jobs (build/test, validation, coverage)
   - Datasets grandes ficam fora do CI (manual via workflow_dispatch)
 
-### Gold standard (D.4) — 0/3 (sessões dedicadas)
-- [ ] **R13** — Mutation testing (mutate-cpp)
+### Gold standard (D.4) — 1/3 ✅
+- [x] **R13** — Mutation testing — `tests/validation/r13_mutate.py`
+  - Impl. própria (LLVM/mull não disponível no nosso pipeline gcc-14)
+  - Operadores: ROR, LCR, BCR
+  - Campanha 50 mutações em 2 arquivos:
+    - `query_evaluator.cpp`: **8.3% kill score** (2/24 efetivos)
+    - `csr_builder.cpp`: **22.2% kill score** (2/9 efetivos)
+  - Diagnóstico: cobertura de linhas (66.8%) é enganosa — testes detectam
+    apenas 12% das mutações (em média). Lacunas concretas identificadas:
+    boundary tests (l==r), null pointer safety, edge cases em loops.
+  - Roadmap detalhado para chegar a 60-80% mutation score: `r13_results/r13_summary.md`
 - [ ] **R14** — Cross-compiler/platform (clang + ARM)
 - [ ] **R15** — Property-based testing (rapidcheck)
 
@@ -342,3 +351,4 @@ Gold standard para top-tier journal (3-4 semanas):
 - **2026-05-11 (cont.)**: R11 (profiles) executado. 32/32 validações para os 4 profiles (pangenome, metagenomics, assembly, comparative) em DRB1-3123. Demonstra degradação graciosa (queries sem suporte retornam 0, sem crashes) e economia de disk (.idx 668K → 376K). 10/15 R-items completos + 1 parcial.
 - **2026-05-11 (cont.)**: R7 encerrado (paper Garrison 2018 não tem a Tabela 2 que minha reanálise assumia). 10 efetivos + R7 ⊘.
 - **2026-05-11 (cont.)**: R10 (HPRC full) executado em 85,282,047 nodes / 118,135,187 edges / 28,784 paths. 5/5 ✅ contra awk GT. Ingest ~22min, .idx 23GB, queries 13-20s. 11/15 R-items completos.
+- **2026-05-11 (cont.)**: R13 (mutation testing) implementado via Python (mull não disponível para nosso pipeline gcc-14). 50 mutações em query_evaluator + csr_builder: **12% mutation score** (4/33 efetivos). Diagnóstico crítico: cobertura de linhas (66.8%) é enganosa — testes atuais detectam apenas 1 em 8 mutações. Lacunas concretas documentadas + roadmap para chegar a 70%. 12/15 R-items completos.
