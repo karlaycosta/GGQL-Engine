@@ -72,23 +72,29 @@ gt_edg=$(awk '$1=="L"' "$GFA" | wc -l)
 check "FIND SEGMENT (global)"             "${G[FIND_SEGMENT]}" "$gt_seg"   "(awk · GGQL_MAX_TOTAL_HITS=10M)"
 check "FIND EDGE (global)"                "${G[FIND_EDGE]}"    "$gt_edg"   "(awk · GGQL_MAX_TOTAL_HITS=10M)"
 
-# B-V2 resolvido: FIND BUBBLE agora retorna count válido. Validação contra
-# vg snarls fica pendente (tempo de execução de vg em 4,3M nós: ~5-10 min);
-# aceita aqui como "executou sem zero" — paridade exata vira sessão futura.
+# B-V2 resolvido. FIND BUBBLE compara contra vg snarls (Net-Graph > 2,
+# semântica alinhada com GGQL/Billi — exclui snarls "vazios" sem conteúdo
+# interno). Tolerância Δ ≤ 100 absolutos (≈ 0.02% em HPRC) — diferença
+# algorítmica entre Billi/SESE e integrated do vg, mesma natureza que
+# Tier B (DRB1 Δ=−2). Cache /tmp/chm13_100w.pg para evitar conversão
+# repetida (vg convert em 4,3M nós leva ~30 s).
 ggql_bub=${G[FIND_BUBBLE]}
-if [[ "$ggql_bub" -gt 0 ]]; then
-    printf '  %-38s %10s %10s ✅ executou (B-V2 resolvido)\n' \
-        "FIND BUBBLE (smoke)" "$ggql_bub" ">0"
+[[ -f /tmp/chm13_100w.pg ]] || "$VG" convert -g "$GFA" -p > /tmp/chm13_100w.pg 2>/dev/null
+bub_inner=$("$VG" stats -R /tmp/chm13_100w.pg 2>/dev/null | tail -n +2 | awk '$17>2' | wc -l)
+delta=$((ggql_bub - bub_inner))
+delta_abs=${delta#-}
+if [[ "$delta_abs" -le 100 ]]; then
+    printf '  %-38s %10s %10s ≈ Δ=%-5s (≤100 ok, vg-Billi)\n' \
+        "FIND BUBBLE" "$ggql_bub" "$bub_inner" "$delta"
 else
-    printf '  %-38s %10s %10s ❌ ainda zero — B-V2 regrediu?\n' \
-        "FIND BUBBLE (smoke)" "$ggql_bub" ">0"
+    printf '  %-38s %10s %10s ❌ Δ=%-5s (excede tolerância)\n' \
+        "FIND BUBBLE" "$ggql_bub" "$bub_inner" "$delta"
     fail=$((fail+1))
 fi
 
 echo
 if [[ $fail -eq 0 ]]; then
-    echo "✅ 9/9 queries validáveis em Tier C passaram"
-    echo "ℹ️  FIND BUBBLE smoke-validado (>0). Comparação numérica com vg snarls é trabalho futuro (~5-10 min em HPRC)."
+    echo "✅ 9/9 queries Tier C com paridade (BUBBLE com tolerância Δ≤100)"
     exit 0
 else
     echo "❌ $fail divergências"
