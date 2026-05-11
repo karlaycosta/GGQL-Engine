@@ -7,6 +7,140 @@
 
 ---
 
+## 2026-05-10 — Branch `feat/path-backend-coexistence`: backlog do parser + 2 bugs críticos em escala
+
+### Adicionado
+
+**Query language backlog completo** (B-1..B-11):
+
+- `RETURN *` para selecionar todas as colunas (B-8)
+- Parens em `WHERE` com aninhamento arbitrário — `(a OR b) AND c` (B-5)
+- Comentários `--` SQL-style e `/* */` C-style (B-10)
+- Inteiros e floats negativos (B-6)
+- Keywords case-insensitive — `find segment` vale (B-7)
+- `SEARCH KMER` aceita `OFFSET` (B-11)
+- Overflow numérico vira `parse_error` em vez de saturação silenciosa (B-9)
+- `crosses("HG002#1#chr1")` com string entre aspas — paths PanSN-spec (B-2)
+- `crosses(<path>)` real via `CrossesCache` (B-1, antes era stub que retornava 0)
+
+**FFI**: `ggql_engine_load(cache_dir)` agora carrega `GfaCsrTopology` automaticamente — destrava `FIND TIP/EDGE/PATH/BUBBLE/REPEAT` via FFI (§3.bis).
+
+**Infraestrutura de validação científica**:
+
+- `docs/queries_validation_plan.md` (~500 linhas) — plano por query, 3 tiers de datasets, 9 referências de paper
+- `tests/validation/run_tier_{a,b,c}.sh` + `run_tier_a_filters.sh` — reprodução end-to-end
+- `tests/validation/run_queries.cpp` — utility de count via TSV
+- `tests/validation/check_csr_symmetry.cpp` — verificador de simetria E_fwd↔E_bwd com histograma
+- `tests/validation/bisect_bv2.sh` — bisect de bugs em build_csr por escala
+
+**44 comparações validadas** contra `gfatools` / `vg snarls` / `awk`:
+- 42 paridade exata
+- 2 com tolerância documentada (DRB1 Δ=−2 e HPRC Δ=−44 — Billi/SESE vs vg integrated)
+
+**Testes novos**:
+- `tests/test_grammar.cpp` (94 asserts em 16 categorias)
+- `tests/test_query_crosses.cpp` (6 casos end-to-end)
+- `tests/test_query_planner_idx.cpp` (20 casos em índice real, incluindo regression guard B-V2)
+- 5 testes de simetria E_fwd↔E_bwd em `test_storage_csr.cpp`
+- `test_symmetry_at_threshold_65536` e `_65537` (regression guards B-V2)
+
+**Tier E** (Phase 5 enxuta): `ProgressTracker` para gBWT shards.
+
+**Tier F** (timings completos): `elapsed_snarls_s` + `elapsed_save_s`; bench panel mostra Fases 5/6/7.
+
+### Corrigido
+
+#### 🔴 B-V2 — `radix_sort_by_from` corrompia CSR em datasets ≥ 65.537 nós
+
+**Severidade**: **CRÍTICA**. Bug no LSD radix sort de `csr_builder.cpp:122`. Para `num_nodes - 1 ≥ 2^16`, o algoritmo executava 3 passes (bytes 0, 1, 2) mais um **pad pass** com `shift = 0` para manter `src == links.data()` no fim. **Voltar ao byte LSB após ordenar pelo MSB DESTRÓI a ordenação total** — propriedade fundamental do LSD radix.
+
+**Sintomas observáveis em datasets afetados (≥ 65.537 nós)**:
+
+| Severidade | Sintoma |
+|---|---|
+| Crítico | `FIND BUBBLE` retorna `0 snarls` (trivial de notar) |
+| Crítico **silencioso** | `FIND EDGE RETURN from_id, to_id` emite pares errados (count correto, conteúdo errado) |
+| Crítico **silencioso** | `find_bubbles` (super-bubble) retorna lixo |
+| Médio | `make_component_remap` produz componentes errados se chamado |
+| **Zero** | `FIND TIP`, `FIND REPEAT`, `out_degree`, `in_degree` (só usam counts) |
+
+**Funcionalidades NÃO afetadas** (~70% das queries):
+
+- `FIND SEGMENT WHERE length/depth/name` — `MetadataStore`, fora da topology
+- `FIND PATH` (count) — `path_stats.bin`
+- `FIND PATH WHERE crosses()` — gBWT direto
+- `SEARCH KMER` / `WHERE contains_kmer` — FM-Index
+- Pass1 Union-Find (`num_components` no manifest) — pares brutos, não E_fwd
+
+**Datasets do projeto afetados**:
+
+| Dataset | Nós |
+|---|---:|
+| `data/bench_1M.gfa` | 1.000.000 |
+| `data/chm13_subset_10w.gfa` | 3.196.132 |
+| `data/chm13_subset_100w.gfa` | 4.294.760 |
+| HPRC full (88M) | 88.000.000 |
+
+**Fix** (`csr_builder.cpp:122-128`): substitui pad pass por `std::copy` condicional final.
+
+```cpp
+const int n_passes_total = n_passes_real;   // sem pad bugado
+// ... loop original ...
+if (src != links.data()) {
+    std::copy(std::execution::par_unseq, src, src + n, links.data());
+}
+```
+
+**Validação pós-fix**:
+
+| Dataset | Antes | Depois |
+|---|---|---|
+| chm13_subset_10w | `FIND BUBBLE 0` | `FIND BUBBLE 146.848` |
+| chm13_subset_100w | `FIND BUBBLE 0` (Fase 6 = 10,67 s) | `FIND BUBBLE 581.739` (Fase 6 = 6,60 s) |
+| Simetria N=65537 em test_storage_csr | 100% quebrada | 100% perfeita |
+| `vg snarls` Net-Graph > 2 vs GGQL FIND BUBBLE em chm13_100w | n/a | **Δ = −44 / 581.783 (0.0076%)** |
+
+**Pipeline de descoberta** (sessão K):
+
+1. Sprint 3 (HPRC) revelou sintoma — `FIND BUBBLE = 0` em 4,3M nós
+2. Logs `[snarls-dbg]` por fase localizaram quebra em `build_state_from_topo` (resolve_link falha em 99.99%)
+3. Testes de simetria em `test_storage_csr` passaram em datasets pequenos
+4. `bisect_bv2.sh` testou N = 1k → 1M e localizou threshold exato em **N=65537**
+5. Inspeção do código identificou pad pass com `shift=0` como culpado
+
+#### 🟡 B-V1 — `kMaxTotalHitsCount` cap absoluto
+
+`Paginator::advance` retornava `Stop` quando `total_hits > 1M` mesmo com `LIMIT` explícito acima desse valor. Counts globais em datasets >1M (HPRC) saturavam em `1.000.001`.
+
+**Fix**: env var `GGQL_MAX_TOTAL_HITS` permite override do default (mantido em 1M para backward compat).
+
+#### 🟢 `elapsed_total_s` capturado antes de Phase 6/7 (Tier F)
+
+`stats.elapsed_total_s` era atribuído antes das fases de Snarls e Persistência, subnotificando ~6–8 s no painel `bench_gbwt`, REPL, e FFI. Snapshot movido para depois de Phase 7.
+
+### Notas para usuários
+
+**Você usou o GGQL em um dataset com ≥ 65.537 nós antes desta release? Re-ingestão é recomendada.** Os índices `.idx` produzidos antes do fix têm `E_fwd_/E_bwd_` corrompidos.
+
+Como verificar se seu `.idx` está afetado:
+
+```bash
+./build/tests/check_csr_symmetry <cache_dir.idx>
+# Esperado: "asymmetric: 0  (0.0000%)"
+# Se reportar > 0, re-ingerir:
+rm -rf <cache_dir.idx>
+./build/bench_gbwt <gfa> <threads>
+```
+
+Datasets do repo já re-ingeridos no commit `b9f467b`:
+- `data/validation/tier_a/{tiny,MT}.gfa.idx` ✅
+- `data/validation/tier_b/DRB1-3123.gfa.idx` ✅
+- `data/chm13_subset_10w.gfa.idx` ✅
+- `data/chm13_subset_100w.gfa.idx` ✅
+- `data/bench_1M.gfa.idx` ✅
+
+---
+
 ## Visão Geral do Projeto
 
 O GGQL Engine é um motor de consulta para grafos de pangenoma no formato GFA 
