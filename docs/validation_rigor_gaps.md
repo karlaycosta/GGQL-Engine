@@ -221,7 +221,7 @@ Generalização para "pangenoma humano" frágil com N=1.
 
 | # | Item | Esforço | Status |
 |---|---|---|:-:|
-| **R9** | **Tier D**: ≥1 dataset não-humano (E. coli PGGB ou yeast Sce-pan) | 1-2 dias | 🟡 pendente |
+| **R9** | **Tier D**: ≥1 dataset não-humano (E. coli PGGB ou yeast Sce-pan) | 1-2 dias | ✅ feito (15/15) |
 | **R10** | **HPRC full** (88M nós) cross-check ~85k snarls publicados | 1 dia + RAM | 🟡 pendente |
 | **R11** | **Profile coverage**: validar metagenomics, assembly, comparative | 2-3 dias | 🟡 pendente |
 | **R12** | **CI público + Docker**: GitHub Actions rodando os 9 sprints | 1-2 dias | 🟡 pendente |
@@ -250,9 +250,12 @@ Generalização para "pangenoma humano" frágil com N=1.
 - [🟡] **R7** — Garrison 2018 (parcial: 6 counts batem com vg oficial, sem PDF)
 - [x] **R8** — Robustez negativa 10/10 (zero crashes em GFAs malformados)
 
-### Alto impacto (D.3) — 1/4 ✅
-- [ ] **R9** — Tier D dataset não-humano (E. coli PGGB ou yeast)
-  - Requer download externo (~50-500 MB), sessão dedicada
+### Alto impacto (D.3) — 2/4 ✅
+- [x] **R9** — Tier D dataset não-humano (**15/15** validações)
+  - D-1 MT_primate (real, multi-primata): 5/5
+  - D-2 ecoli_synth (sintético, 4 haplotypes): 6/6
+  - D-2.bis crosses() em E. coli: 4/4
+  - L/S ratio similar entre primata (1.38), E. coli (1.34), humano DRB1 (1.33)
 - [ ] **R10** — HPRC full (88M nós, ~85k snarls Liao 2023)
   - Requer ~40 GB disk + 32 GB RAM, ingest ~1h, sessão dedicada
 - [ ] **R11** — Profiles non-pangenome (metagenomics, assembly, comparative)
@@ -325,3 +328,4 @@ Gold standard para top-tier journal (3-4 semanas):
 
 - **2026-05-10**: documento criado após reanálise crítica do `queries_validation_plan.md`. Identificadas 4 categorias de lacunas (técnicas, metodológicas, plano, FM-Index features) e mapeados 15 itens de mitigação priorizados em 4 tiers.
 - **2026-05-11**: campanha de mitigação R1-R8 executada. 7 R-items completos + 1 parcial. 2 bugs críticos descobertos e fixados (não-determinismo de ingest, precedência operadora em WHERE). Critério "forte para peer review" atendido.
+- **2026-05-11 (cont.)**: R12 (CI/Docker) e R9 (Tier D não-humano) adicionados. 9 R-items completos + 1 parcial. Tier D usa MT_primate (gfatools real) + ecoli_synth (4 haplotypes sintéticos): 15/15 validações, todas em paridade com awk + vg.
