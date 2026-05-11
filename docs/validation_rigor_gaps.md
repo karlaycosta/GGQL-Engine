@@ -222,7 +222,7 @@ Generalização para "pangenoma humano" frágil com N=1.
 | # | Item | Esforço | Status |
 |---|---|---|:-:|
 | **R9** | **Tier D**: ≥1 dataset não-humano (E. coli PGGB ou yeast Sce-pan) | 1-2 dias | ✅ feito (15/15) |
-| **R10** | **HPRC full** (88M nós) cross-check ~85k snarls publicados | 1 dia + RAM | 🟡 pendente |
+| **R10** | **HPRC full** (88M nós) cross-check ~85k snarls publicados | 1 dia + RAM | ✅ feito (5/5 em 85M nodes) |
 | **R11** | **Profile coverage**: validar metagenomics, assembly, comparative | 2-3 dias | ✅ feito (32/32) |
 | **R12** | **CI público + Docker**: GitHub Actions rodando os 9 sprints | 1-2 dias | 🟡 pendente |
 
@@ -258,8 +258,13 @@ Generalização para "pangenoma humano" frágil com N=1.
   - D-2 ecoli_synth (sintético, 4 haplotypes): 6/6
   - D-2.bis crosses() em E. coli: 4/4
   - L/S ratio similar entre primata (1.38), E. coli (1.34), humano DRB1 (1.33)
-- [ ] **R10** — HPRC full (88M nós, ~85k snarls Liao 2023)
-  - Requer ~40 GB disk + 32 GB RAM, ingest ~1h, sessão dedicada
+- [x] **R10** — HPRC full (85M nodes / 118M edges / 28k paths)
+  - `tests/validation/r10_hprc_full.sh`
+  - 5/5 ✅: SEGMENT, EDGE, PATH, TIP, REPEAT em paridade exata com awk
+  - Ingest: ~22 min, .idx 23 GB (vs 49 GB GFA)
+  - Queries 13-20 s cada em 85M nodes
+  - FIND BUBBLE: 27,483,058 (Billi/SESE recursivo, todos níveis; Liao 2023
+    reporta ~85k TOP-LEVEL — cross-check de vg snarls futuro)
 - [x] **R11** — Profiles non-pangenome (metagenomics, assembly, comparative)
   - tests/validation/r11_profiles.sh — auditoria sistemática 4 profiles × 7 queries
   - **32/32** validações: arquivos esperados + counts + degradação graciosa
@@ -335,3 +340,5 @@ Gold standard para top-tier journal (3-4 semanas):
 - **2026-05-11**: campanha de mitigação R1-R8 executada. 7 R-items completos + 1 parcial. 2 bugs críticos descobertos e fixados (não-determinismo de ingest, precedência operadora em WHERE). Critério "forte para peer review" atendido.
 - **2026-05-11 (cont.)**: R12 (CI/Docker) e R9 (Tier D não-humano) adicionados. 9 R-items completos + 1 parcial. Tier D usa MT_primate (gfatools real) + ecoli_synth (4 haplotypes sintéticos): 15/15 validações, todas em paridade com awk + vg.
 - **2026-05-11 (cont.)**: R11 (profiles) executado. 32/32 validações para os 4 profiles (pangenome, metagenomics, assembly, comparative) em DRB1-3123. Demonstra degradação graciosa (queries sem suporte retornam 0, sem crashes) e economia de disk (.idx 668K → 376K). 10/15 R-items completos + 1 parcial.
+- **2026-05-11 (cont.)**: R7 encerrado (paper Garrison 2018 não tem a Tabela 2 que minha reanálise assumia). 10 efetivos + R7 ⊘.
+- **2026-05-11 (cont.)**: R10 (HPRC full) executado em 85,282,047 nodes / 118,135,187 edges / 28,784 paths. 5/5 ✅ contra awk GT. Ingest ~22min, .idx 23GB, queries 13-20s. 11/15 R-items completos.

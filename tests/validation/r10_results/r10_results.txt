@@ -1,0 +1,8 @@
+FIND_SEGMENT=
+FIND_EDGE=...(see results above)
+FIND_BUBBLE=27483058
+FIND_PATH=28784
+FIND_TIP=460506
+FIND_REPEAT=28969018
+
+Liao 2023 reference: ~85k snarls (top-level) chm13 v2

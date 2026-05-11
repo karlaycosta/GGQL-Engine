@@ -1,0 +1,33 @@
+=== Hardware/SW context ===
+CPU(s):                                    12
+               total       usada       livre    compart.  buff/cache  disponível
+Mem.:           62Gi       8,4Gi        22Gi       347Mi        32Gi        54Gi
+Swap:          4,0Gi       3,7Gi       270Mi
+/dev/nvme1n1p2  439G  313G  104G  76% /
+Linux Avell-G1555-MUV-A62-MUV 6.8.0-111-generic #111-Ubuntu SMP PREEMPT_DYNAMIC Sat Apr 11 23:16:02 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+g++-14 (Ubuntu 14.2.0-4ubuntu2~24.04.1) 14.2.0
+=== Dataset ===
+-rw-rw-r-- 1 karlay karlay 49049813381 set 29  2022 /home/karlay/Downloads/hprc-v1.0-mc-chm13.gfa
+
+/home/karlay/Downloads/hprc-v1.0-mc-chm13.gfa.idx:
+total 23216244
+drwxrwxr-x 2 karlay karlay        4096 mai 11 10:13 .
+drwxr-xr-x 7 karlay karlay        4096 mai 11 09:58 ..
+-rw-rw-r-- 1 karlay karlay   472540764 mai 11 10:13 E_bwd.bin
+-rw-rw-r-- 1 karlay karlay    32957990 mai 11 10:13 ef_bwd.sdsl
+-rw-rw-r-- 1 karlay karlay    32957990 mai 11 10:13 ef_fwd.sdsl
+-rw-rw-r-- 1 karlay karlay   472540764 mai 11 10:13 E_fwd.bin
+-rw-rw-r-- 1 karlay karlay 12169486257 mai 11 10:03 fm_index.bin
+-rw-rw-r-- 1 karlay karlay   682256384 mai 11 10:01 length_index.bin
+-rw-rw-r-- 1 karlay karlay         350 mai 11 10:13 manifest.txt
+-rw-rw-r-- 1 karlay karlay  1023384572 mai 11 10:01 metadata.bin
+-rw-rw-r-- 1 karlay karlay  4092196193 mai 11 10:01 metadata_seqs.bin
+-rw-rw-r-- 1 karlay karlay  1353401665 mai 11 10:01 metadata_strings.bin
+-rw-rw-r-- 1 karlay karlay    39546644 mai 11 09:58 mphf.bin
+-rw-rw-r-- 1 karlay karlay      345416 mai 11 10:13 path_stats.bin
+-rw-rw-r-- 1 karlay karlay  2058528314 mai 11 10:13 path_stores.bin
+-rw-rw-r-- 1 karlay karlay   682256392 mai 11 09:58 remap.bin
+-rw-rw-r-- 1 karlay karlay   659593400 mai 11 10:13 snarls.bin
+-rw-rw-r-- 1 karlay karlay     1352786 mai 11 10:13 topology.bin
+Date: 2026-05-11T10:32:28-03:00
+Commit: 7e08899
