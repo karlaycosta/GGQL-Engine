@@ -66,16 +66,9 @@ for case in '>= 2.0' '< 1.0' '> 5.0' '<= 0.5'; do
     check "depth $op $val" "$ggql" "$gt" "(float32)"
 done
 
-# Bug L-V8 (descoberto via Sprint 4): WHERE depth com range fechado
-# subnotifica em boundary porque process_id em plan_segments aplica DUPLA
-# filtragem: (1) depth_index range em float32, (2) eval_where promovendo
-# float→double e comparando com literal double — promoção introduz erro
-# de bit (~10^-7) que rejeita IDs no boundary. Documentado em
-# queries_validation_plan.md como L-V8 / nova armadilha float.
-#
-# Tier de tolerância documentada: até ~0.04% (136 em 5M para Δ=−136 sobre
-# range [1.95, 1.97]). Esta entrada faz "smoke check" — não falha em
-# Δ pequeno, mas não usa "check" strict.
+# L-V8 RESOLVIDO (commit pós-Sprint 4): eval_condition agora compara
+# depth em float-precision (em vez de double-promoted). Range fechado
+# e igualdade direta funcionam exatamente.
 ggql=$("$RUNQ" "$IDX" 'FIND SEGMENT WHERE depth >= 1.95 AND depth <= 1.97' 2>/dev/null | tail -1)
 gt=$(python3 -c "
 import struct, re
@@ -90,18 +83,22 @@ with open('$GFA') as fh:
                 if lo <= d <= hi: c += 1
 print(c)
 ")
-# Smoke check com tolerância documentada (L-V8 — bug conhecido)
-delta=$((ggql - gt))
-abs_delta=${delta#-}
-if [[ "$abs_delta" -le 200 ]]; then
-    printf '  %-58s %10s ≈ %-10s ≈ Δ=%-5s ⚠ L-V8 (float promotion, dentro tolerância)\n' \
-        "depth in [1.95, 1.97] (range, L-V8 known issue)" "$ggql" "$gt" "$delta"
-    pass=$((pass+1))
-else
-    printf '  %-58s %10s != %-10s ❌ Δ=%-5s (L-V8 excedeu tolerância)\n' \
-        "depth in [1.95, 1.97] (range)" "$ggql" "$gt" "$delta"
-    fail=$((fail+1))
-fi
+check "depth in [1.95, 1.97] (range)" "$ggql" "$gt" "(float32 strict)"
+
+# Igualdade direta (antes do fix L-V8 retornava 0)
+ggql=$("$RUNQ" "$IDX" 'FIND SEGMENT WHERE depth = 1.96' 2>/dev/null | tail -1)
+gt=$(python3 -c "
+import struct, re
+def f32(d): return struct.unpack('f', struct.pack('f', d))[0]
+v = f32(1.96); c = 0
+with open('$GFA') as fh:
+    for line in fh:
+        if line.startswith('S\t'):
+            m = re.search(r'dp:f:(\S+)', line)
+            if m and f32(float(m.group(1))) == v: c += 1
+print(c)
+")
+check "depth = 1.96 (igualdade exata, regression guard L-V8)" "$ggql" "$gt" "(L-V8 fixed)"
 
 # ════════════════════════════════════════════════════════════════════════════
 # L-V3, L-V4, L-V5: filtros em DRB1-3123 (Tier B)

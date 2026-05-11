@@ -97,6 +97,36 @@ bool QueryPlanner::eval_condition(const ConditionExpr& cond, const RowFields& ro
             if constexpr (std::is_same_v<T, CompareCondition>) {
                 const Value* v = row.find(c.field);
                 if (!v) { return false; }
+
+                // L-V8 fix: depth é armazenado como float32 (MetadataStore),
+                // mas chega aqui como double (Value{double(dp_raw)} em
+                // process_id, query_planner.cpp:895-896). O literal vem do
+                // parser como double exato (e.g., 1.96d = 1.96000000000028).
+                // Float promotion produz 1.95999999... vs literal 1.96000... —
+                // comparação falha em boundary (`WHERE depth = 1.96` retorna 0).
+                // Comparamos diretamente em float-precision (matching o
+                // depth_index pré-filtro que usa float32 nativamente).
+                // NOTA: não usar `compare_values(Value{static_cast<float>(...)})`
+                // porque Value é variant<int64_t, double, string> — float
+                // promove implicitamente para double, reintroduzindo o bug.
+                if (c.field == "depth") {
+                    const auto* sd = std::get_if<double>(v);
+                    const auto* ld = std::get_if<double>(&c.value);
+                    if (sd && ld) {
+                        const float fl_sd = static_cast<float>(*sd);
+                        const float fl_ld = static_cast<float>(*ld);
+                        switch (c.op) {
+                            case Operator::EQ:  return fl_sd == fl_ld;
+                            case Operator::NEQ: return fl_sd != fl_ld;
+                            case Operator::GT:  return fl_sd >  fl_ld;
+                            case Operator::LT:  return fl_sd <  fl_ld;
+                            case Operator::GEQ: return fl_sd >= fl_ld;
+                            case Operator::LEQ: return fl_sd <= fl_ld;
+                        }
+                        std::unreachable();
+                    }
+                }
+
                 return compare_values(*v, c.op, c.value);
 
             } else if constexpr (std::is_same_v<T, GroupedExpr>) {
