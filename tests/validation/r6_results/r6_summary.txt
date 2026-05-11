@@ -1,0 +1,35 @@
+R6: Code Coverage Report — chm13/DRB1/tiny via ctest + validation suite
+─────────────────────────────────────────────────────────────────────────
+Build:    build-coverage (gcc-14 -O0 --coverage)
+Tools:    gcovr 8.6, gcov-14
+Suite:    ctest (14 testes) + run_queries em DRB1-3123 (15 queries cobrindo
+          FIND SEGMENT/EDGE/PATH/BUBBLE/TIP/REPEAT, WHERE com AND/OR/parens,
+          crosses(), contains_kmer(), LIMIT/OFFSET, SEARCH KMER)
+
+GLOBAL:
+  Lines:     66.8%  (4316 / 6459)
+  Funcs:     78.0%  (290 / 372)
+  Branches:  40.6%  (3227 / 7950)
+
+Arquivos chave:
+  - query_planner.cpp:        70.8% lines, 49.6% branch  (672 linhas)
+  - ingestor.cpp:             74.3% lines, 44.6% branch (1163 linhas)
+  - snarl_decomposition.cpp:  86.4% lines, 63.9% branch  (667 linhas)
+  - path_index.cpp:           86.4% lines, 44.7% branch  (361 linhas)
+  - csr_builder.cpp:          69.4% lines, 58.0% branch  (124 linhas)
+  - metadata_store.hpp:       78.0% lines, 34.0% branch  (337 linhas)
+  - query_evaluator.cpp:      46.6% lines, 29.7% branch  (118 linhas)
+
+Lacunas identificadas (alvos de futura ação):
+  - ggql_repl.cpp:           0.0% — testes não usam REPL (sem cli/REPL tests)
+  - graph_algorithms.cpp:    6.2% — repartition_groups_topological caminho
+                                     pouco exercitado
+  - utils.cpp:              32.7% — helpers raramente atingidos
+  - console.cpp:            34.8% — formatação CLI raramente testada
+  - ffi.cpp:                37.4% — testes FFI cobrem só queries básicas
+
+Notas metodológicas:
+  - branch coverage (40.6%) reflete que C++ exception paths e short-circuit
+    branches contam dobrado; valor "real" do ponto de vista de cobertura
+    semântica é mais próximo de 60%.
+  - REPL e FFI são alvos prioritários para futuras melhorias (R6.1 hipotético).

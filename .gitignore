@@ -75,3 +75,8 @@ gui/
 *.profdata
 gmon.out
 callgrind.out.*
+
+# Coverage build (R6)
+build-coverage/
+tests/validation/r6_results/*.html
+tests/validation/r6_results/*.css
