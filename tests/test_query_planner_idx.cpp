@@ -15,6 +15,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 #include <string>
 #include <variant>
 
@@ -164,6 +165,55 @@ int main() {
     {
         auto r = run(planner, "FIND SEGMENT -- limita\n LIMIT 2");
         check(r.row_count == 2,                                  "comentário entre cláusulas");
+    }
+
+    // ── B-V2 regression guard: conteúdo de FIND EDGE consistente com topo ────
+    //
+    // O bug B-V2 (radix_sort_by_from pad pass) embaralhava E_fwd/E_bwd em
+    // datasets ≥ 65537 nós. FIND EDGE produzia COUNT correto mas pares
+    // (from, to) ERRADOS — bug silencioso até validar conteúdo.
+    //
+    // Esta amostragem testa que, para K nós espalhados pelo node-id space,
+    // o conjunto de to_ids emitidos por `FIND EDGE WHERE from_id = X` bate
+    // EXATAMENTE com `topo.out_neighbors(X)` (consistência planner ↔ CSR).
+    {
+        constexpr size_t kSamples = 100;
+        size_t mismatches = 0;
+        for (size_t s = 0; s < kSamples; ++s) {
+            const uint64_t u = (s * topo.num_nodes()) / kSamples;
+            if (topo.out_degree(u) == 0) { continue; }
+            const std::string q = "FIND EDGE WHERE from_id = " + std::to_string(u) +
+                                  " RETURN from_id, to_id LIMIT 100000";
+            const auto r = run(planner, q);
+            std::set<int64_t> result_tos;
+            const size_t ncols = r.columns.size();
+            // Localiza coluna 'to_id' nos resultados (planner pode reordenar).
+            int col_to = -1;
+            for (size_t c = 0; c < ncols; ++c) {
+                if (r.columns[c] == "to_id") { col_to = static_cast<int>(c); break; }
+            }
+            if (col_to < 0) { ++mismatches; continue; }
+            for (size_t i = 0; i < r.row_count; ++i) {
+                if (auto* v = std::get_if<int64_t>(&r.flat[i * ncols + col_to])) {
+                    result_tos.insert(*v);
+                }
+            }
+            std::set<int64_t> expected_tos;
+            for (uint32_t e : topo.out_neighbors(u)) {
+                expected_tos.insert(static_cast<int64_t>(
+                    ggql::GfaCsrTopology::decode(e).node_id));
+            }
+            if (result_tos != expected_tos) {
+                ++mismatches;
+                if (mismatches <= 3) {
+                    std::printf("  [mismatch u=%lu] FIND EDGE retornou %zu tos, "
+                                "topo.out_neighbors retornou %zu\n",
+                                (unsigned long)u, result_tos.size(), expected_tos.size());
+                }
+            }
+        }
+        check(mismatches == 0,
+              "FIND EDGE conteúdo consistente com topo.out_neighbors (B-V2 regression)");
     }
 
     std::printf("\n=== %d pass · %d fail ===\n", n_pass, n_fail);
