@@ -429,13 +429,9 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
                                 : static_cast<size_t>(num_threads);
 
     std::atomic<size_t> paths_written_global{0};
-    std::vector<std::string> bin_gbwt_paths(collect_paths ? num_bins : 0);
-    std::vector<std::vector<std::string>> bin_path_names(collect_paths ? num_bins : 0);
-    std::vector<std::unique_ptr<::gbwt::text_buffer_type>> bin_gbwt_bufs;
 
     constexpr uint64_t IN_RAM_SIGMA_THRESHOLD = 10'000;
     std::vector<bool> bin_use_in_ram(collect_paths ? num_bins : 0, false);
-    std::vector<std::vector<::gbwt::vector_type>> bin_in_ram_seqs(collect_paths ? num_bins : 0);
 
     constexpr size_t SMALL_FILE_THRESHOLD = size_t(64) << 20;
     if (collect_paths) {
@@ -463,42 +459,62 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
             return std::move(path);
         }
     };
-    std::vector<TmpFileGuard> tmp_guards(collect_paths ? num_bins : 0);
-
     if (collect_paths) {
         const uint64_t nkeys = res_.mphf->nbKeys();
         node_width_out = calc_node_width(nkeys);
-
-        bin_gbwt_bufs.resize(num_bins);
-        for (size_t t = 0; t < num_bins; ++t) {
-            if (bin_use_in_ram[t]) {
-                continue;
-            }
-            std::string tpl = "/tmp/ggql_gbwt_XXXXXX";
-            int tfd = ::mkstemp(tpl.data());
-            if (tfd < 0) {
-                collect_paths = false;
-                break;
-            }
-            ::close(tfd);
-            tmp_guards[t].path = tpl;
-            bin_gbwt_paths[t] = tpl;
-            bin_gbwt_bufs[t] = std::make_unique<::gbwt::text_buffer_type>(
-                tpl, std::ios::out, /*buffer_size=*/1024 * 1024, node_width_out);
-        }
     }
 
     const size_t chunk_size_p2 = total_size / static_cast<size_t>(num_threads);
 
-    // Per-thread accumulators para bins em RAM — sem mutex no loop paralelo.
-    // Bins em disco continuam usando disk_mutexes (I/O é o gargalo, não a contenção).
-    std::vector<std::mutex> disk_mutexes(collect_paths ? num_bins : 0);
+    // Per-thread accumulators — sem mutex no loop paralelo.
+    //
+    // R1 determinismo (2026-05-11): bin_gbwt_bufs[b] single-per-bin com mutex
+    // produzia ordem não-determinística de paths no GBWT do shard (race entre
+    // threads pelo lock). Substituído por thr_gbwt_bufs[t][b] (per-thread,
+    // per-bin) sem mutex. No merge serial, gbwt_groups são emitidos em ordem
+    // (b, t) → ordem total reproduzível run-a-run.
     using SeqVec = std::vector<::gbwt::vector_type>;
     using NameVec = std::vector<std::string>;
     std::vector<std::vector<SeqVec>> thr_in_ram(num_threads,
                                                 std::vector<SeqVec>(collect_paths ? num_bins : 0));
     std::vector<std::vector<NameVec>> thr_names(num_threads,
                                                 std::vector<NameVec>(collect_paths ? num_bins : 0));
+    using BufPtr = std::unique_ptr<::gbwt::text_buffer_type>;
+    std::vector<std::vector<BufPtr>> thr_gbwt_bufs(num_threads);
+    std::vector<std::vector<std::string>> thr_gbwt_paths(num_threads);
+    if (collect_paths) {
+        for (int t = 0; t < num_threads; ++t) {
+            thr_gbwt_bufs[t].resize(num_bins);
+            thr_gbwt_paths[t].resize(num_bins);
+        }
+    }
+    std::vector<TmpFileGuard> thr_tmp_guards(
+        static_cast<size_t>(num_threads) * (collect_paths ? num_bins : 0));
+
+    if (collect_paths) {
+        for (int t = 0; t < num_threads; ++t) {
+            for (size_t b = 0; b < num_bins; ++b) {
+                if (bin_use_in_ram[b]) {
+                    continue;
+                }
+                std::string tpl = "/tmp/ggql_gbwt_XXXXXX";
+                int tfd = ::mkstemp(tpl.data());
+                if (tfd < 0) {
+                    collect_paths = false;
+                    break;
+                }
+                ::close(tfd);
+                const size_t guard_idx =
+                    static_cast<size_t>(t) * num_bins + b;
+                thr_tmp_guards[guard_idx].path = tpl;
+                thr_gbwt_paths[t][b] = tpl;
+                thr_gbwt_bufs[t][b] = std::make_unique<::gbwt::text_buffer_type>(
+                    tpl, std::ios::out, /*buffer_size=*/1024 * 1024,
+                    node_width_out);
+            }
+            if (!collect_paths) break;
+        }
+    }
 
 #pragma omp parallel num_threads(num_threads)
     {
@@ -641,13 +657,17 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
                             thr_in_ram[static_cast<size_t>(tid)][target].push_back(std::move(seq));
                             thr_names[static_cast<size_t>(tid)][target].push_back(
                                 std::move(path_name));
-                        } else if (bin_gbwt_bufs[target]) {
-                            std::lock_guard<std::mutex> lk(disk_mutexes[target]);
+                        } else if (thr_gbwt_bufs[static_cast<size_t>(tid)][target]) {
+                            // R1 (2026-05-11): per-thread buf, sem mutex →
+                            // ordem dentro do (tid, bin) = ordem do chunk
+                            // (determinística).
+                            auto& buf = *thr_gbwt_bufs[static_cast<size_t>(tid)][target];
                             for (uint64_t v : seq) {
-                                bin_gbwt_bufs[target]->push_back(v);
+                                buf.push_back(v);
                             }
-                            bin_gbwt_bufs[target]->push_back(::gbwt::ENDMARKER);
-                            bin_path_names[target].push_back(std::move(path_name));
+                            buf.push_back(::gbwt::ENDMARKER);
+                            thr_names[static_cast<size_t>(tid)][target].push_back(
+                                std::move(path_name));
                         }
                     }
                 }
@@ -668,19 +688,9 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
         }
     }
 
-    // Merge paralelo dos acumuladores por thread (cada bin é independente).
-    if (collect_paths) {
-#pragma omp parallel for schedule(static) num_threads(num_threads)
-        for (size_t b = 0; b < num_bins; ++b) {
-            for (int t = 0; t < num_threads; ++t) {
-                auto& src_seqs = thr_in_ram[static_cast<size_t>(t)][b];
-                auto& src_names = thr_names[static_cast<size_t>(t)][b];
-                std::move(src_seqs.begin(), src_seqs.end(), std::back_inserter(bin_in_ram_seqs[b]));
-                std::move(src_names.begin(), src_names.end(),
-                          std::back_inserter(bin_path_names[b]));
-            }
-        }
-    }
+    // R1 (2026-05-11): merge dos acumuladores per-thread movido para o passo
+    // de geração de gbwt_groups abaixo. Cada (b, t) vira um GbwtGroup
+    // independente — ordem (b, t) determina ordem dos paths no GBWT final.
 
     tracker.finish();
 
@@ -723,32 +733,55 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
         }
     }
 
-    // Merge serial dos paths
+    // Merge serial dos paths — ordem determinística (b, t).
+    //
+    // R1 (2026-05-11): em vez de um GbwtGroup por bin com todas as threads
+    // mescladas (não-determinístico quando bin usa disco com mutex), emitimos
+    // um GbwtGroup por (b, t) preservando a ordem do chunk de cada thread.
+    // Bins in-RAM e em disco têm comportamento idêntico desde o ponto de
+    // vista do consumer.
     std::vector<PassadaDoisResult::GbwtGroup> gbwt_groups;
     if (collect_paths) {
-        size_t total_paths = 0;
-        for (size_t t = 0; t < num_bins; ++t) {
-            if (bin_gbwt_bufs.size() > t && bin_gbwt_bufs[t]) {
-                bin_gbwt_bufs[t]->close();
-                bin_gbwt_bufs[t].reset();
+        // Fecha bufs em disco antes de capturar tmp_path.
+        for (int t = 0; t < num_threads; ++t) {
+            for (size_t b = 0; b < num_bins; ++b) {
+                if (thr_gbwt_bufs[t][b]) {
+                    thr_gbwt_bufs[t][b]->close();
+                    thr_gbwt_bufs[t][b].reset();
+                }
             }
-            total_paths += bin_path_names[t].size();
+        }
+        // Conta total para stats.
+        size_t total_paths = 0;
+        for (int t = 0; t < num_threads; ++t) {
+            for (size_t b = 0; b < num_bins; ++b) {
+                total_paths += thr_names[t][b].size();
+            }
         }
         stats.path_count = total_paths;
 
-        gbwt_groups.reserve(num_bins);
-        for (size_t t = 0; t < num_bins; ++t) {
-            if (!bin_path_names[t].empty()) {
+        gbwt_groups.reserve(static_cast<size_t>(num_threads) * num_bins);
+        for (size_t b = 0; b < num_bins; ++b) {
+            for (int t = 0; t < num_threads; ++t) {
+                auto& names = thr_names[static_cast<size_t>(t)][b];
+                if (names.empty()) continue;
                 PassadaDoisResult::GbwtGroup g;
-                if (bin_use_in_ram[t]) {
-                    g.in_ram_seqs = std::move(bin_in_ram_seqs[t]);
+                if (bin_use_in_ram[b]) {
+                    g.in_ram_seqs =
+                        std::move(thr_in_ram[static_cast<size_t>(t)][b]);
                 } else {
-                    g.tmp_path = (t < tmp_guards.size()) ? tmp_guards[t].release()
-                                                         : std::move(bin_gbwt_paths[t]);
+                    const size_t guard_idx =
+                        static_cast<size_t>(t) * num_bins + b;
+                    if (guard_idx < thr_tmp_guards.size()) {
+                        g.tmp_path = thr_tmp_guards[guard_idx].release();
+                    } else {
+                        g.tmp_path =
+                            std::move(thr_gbwt_paths[static_cast<size_t>(t)][b]);
+                    }
                 }
-                g.path_names = std::move(bin_path_names[t]);
-                if (has_remap && t < bin_sigma_.size()) {
-                    g.sigma = bin_sigma_[t];
+                g.path_names = std::move(names);
+                if (has_remap && b < bin_sigma_.size()) {
+                    g.sigma = bin_sigma_[b];
                 }
                 gbwt_groups.push_back(std::move(g));
             }
