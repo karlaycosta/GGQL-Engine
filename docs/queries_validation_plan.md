@@ -595,6 +595,59 @@ Avanço total nesta sessão (Sprints 4+5): **+16 validações** em queries com f
 
 ---
 
+## 7.octies. ✅ Resultados Sprint 6 (2026-05-10) — L-V6 SEARCH KMER em Tier B + Tier C
+
+**Objetivo**: validar `SEARCH KMER` em escala (era apenas Tier A — toy graphs).
+
+**Setup**: `tests/validation/run_sprint6.sh`. GT via `awk -v k="..." '$1=="S" && index($3,k)>0 {c++}'`. K-mers escolhidos cobrindo diferentes frequências esperadas (raros, comuns, repetitivos).
+
+**Lembrança da semântica** (Sprint 1.bis): GGQL `SEARCH KMER` retorna count de **segments distintos** que contêm o k-mer (deduplicação por `segment_id` via `std::unique` em `query_planner.cpp:606`). Equivale a `WHERE contains_kmer(...)`. Diferente de `vg find -k` que reporta occurrences.
+
+**Paridade obtida (16/16 todos exatos)**:
+
+### Tier B — DRB1-3123 (5581 segs, 21k bp)
+
+| K-mer | GGQL | GT (awk) | Δ | Observação |
+|---|---:|---:|:-:|---|
+| `ACGT` (4-mer) | 7 | 7 | 0 ✅ | comum mas só em alguns |
+| `AAAA` (4-mer homopol) | 111 | 111 | 0 ✅ | repetitivo |
+| `TTTT` (4-mer homopol) | 83 | 83 | 0 ✅ | repetitivo |
+| `GCGC` (4-mer CG-rich) | 4 | 4 | 0 ✅ | raro |
+| `AAAAAA` (6-mer) | 17 | 17 | 0 ✅ | menos comum |
+| `GCGCGCGC` (8-mer CG) | 0 | 0 | 0 ✅ | ausente |
+| `NNNNNN` (6-mer N) | 35 | 35 | 0 ✅ | regiões com Ns |
+| `ZZZZ` (chars não-DNA) | 0 | 0 | 0 ✅ | edge case |
+
+### Tier C — chm13_subset_100w (4,3M segs, 231M bp)
+
+| K-mer | GGQL | GT (awk) | Δ | Observação biológica |
+|---|---:|---:|:-:|---|
+| `ACGTACGT` (8-mer) | 76 | 76 | 0 ✅ | k-mer pseudo-aleatório |
+| `AAAAAAAA` (8-mer homopol) | **67.775** | 67.775 | 0 ✅ | homopolímero comum em DNA |
+| `GCGCGCGC` (8-mer CG) | 651 | 651 | 0 ✅ | dinucleotide repeat |
+| `TTTTTTTTTT` (10-mer homopol) | **35.588** | 35.588 | 0 ✅ | região AT-rich |
+| `CGATCGATCG` (10-mer) | 2 | 2 | 0 ✅ | extremamente raro |
+| `NNNNNNNN` (8-mer N) | 2 | 2 | 0 ✅ | gaps poucos |
+| `ACGTACGTACGTACGT` (16-mer) | 0 | 0 | 0 ✅ | ausente — padrão muito específico |
+| `ZZZZZZZZ` | 0 | 0 | 0 ✅ | edge case |
+
+**Performance observada**: GGQL via FM-Index responde em **microsegundos** mesmo para `AAAAAAAA` que retorna ~68k segments. GT em awk leva **5-15s** por k-mer em 4,3M segments — FM-Index é ~10⁵-10⁶ × mais rápido que scan linear.
+
+**Validação cruzada**:
+- Sprint 1.bis testou em tiny.gfa (4 casos): paridade exata
+- Sprint 4 testou contains_kmer em DRB1: paridade exata (mesma semântica)
+- Sprint 6 testou em escala HPRC: paridade exata
+
+Implementação do FM-Index + `search_kmer` + deduplicação `unique` (`query_planner.cpp:600-606`) está **completamente correta em todas as escalas testadas**.
+
+### Cobertura atualizada (pós Sprint 6)
+
+| Query | Tier A | Tier B | Tier C |
+|---|:-:|:-:|:-:|
+| `SEARCH KMER` | ✅ | **✅ NOVO** (8 casos) | **✅ NOVO** (8 casos, até 68k hits) |
+
+---
+
 ## 7.quinquies. ✅/⚠ Resultados Sprint 3 (2026-05-10) — Tier C (HPRC chm13_subset_100w)
 
 **Dataset**: `data/chm13_subset_100w.gfa` — 4.294.760 nós, 5.025.175 edges,
