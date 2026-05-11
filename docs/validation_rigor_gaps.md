@@ -279,13 +279,17 @@ Generalização para "pangenoma humano" frágil com N=1.
 - [x] **R13** — Mutation testing — `tests/validation/r13_mutate.py`
   - Impl. própria (LLVM/mull não disponível no nosso pipeline gcc-14)
   - Operadores: ROR, LCR, BCR
-  - Campanha 50 mutações em 2 arquivos:
+  - Campanha 1 (baseline): 50 mutações em 2 arquivos:
     - `query_evaluator.cpp`: **8.3% kill score** (2/24 efetivos)
     - `csr_builder.cpp`: **22.2% kill score** (2/9 efetivos)
   - Diagnóstico: cobertura de linhas (66.8%) é enganosa — testes detectam
-    apenas 12% das mutações (em média). Lacunas concretas identificadas:
-    boundary tests (l==r), null pointer safety, edge cases em loops.
-  - Roadmap detalhado para chegar a 60-80% mutation score: `r13_results/r13_summary.md`
+    apenas 12% das mutações (em média).
+  - **R13.A executado** (boundary tests `l==r`):
+    - +8 invariantes em `test_query_planner_idx.cpp` (length int + depth float)
+    - `query_evaluator.cpp`: **8.3% → 20.8% (+12.5pp, 2.5×)**
+    - 3 mutações de `case LEQ/GEQ/NEQ` killed que sobreviviam antes
+    - Bug candidato L-V8.2 detectado: `depth !=` pode tratar NaN/inf inconsistente
+  - Detalhes completos: `r13_results/r13_summary.md`
 - [ ] **R14** — Cross-compiler/platform (clang + ARM)
 - [ ] **R15** — Property-based testing (rapidcheck)
 
@@ -352,3 +356,4 @@ Gold standard para top-tier journal (3-4 semanas):
 - **2026-05-11 (cont.)**: R7 encerrado (paper Garrison 2018 não tem a Tabela 2 que minha reanálise assumia). 10 efetivos + R7 ⊘.
 - **2026-05-11 (cont.)**: R10 (HPRC full) executado em 85,282,047 nodes / 118,135,187 edges / 28,784 paths. 5/5 ✅ contra awk GT. Ingest ~22min, .idx 23GB, queries 13-20s. 11/15 R-items completos.
 - **2026-05-11 (cont.)**: R13 (mutation testing) implementado via Python (mull não disponível para nosso pipeline gcc-14). 50 mutações em query_evaluator + csr_builder: **12% mutation score** (4/33 efetivos). Diagnóstico crítico: cobertura de linhas (66.8%) é enganosa — testes atuais detectam apenas 1 em 8 mutações. Lacunas concretas documentadas + roadmap para chegar a 70%. 12/15 R-items completos.
+- **2026-05-11 (cont.)**: R13.A executado — boundary tests `l==r` adicionados em test_query_planner_idx.cpp (8 invariantes para length int + depth float). Mutation score query_evaluator: **8.3% → 20.8% (+12.5pp, 2.5×)**. Detectado bug candidato (não-confirmado) em `depth !=` que pode tratar NaN/inf inconsistente — documentado como L-V8.2 para investigação futura.
