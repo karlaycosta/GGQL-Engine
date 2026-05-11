@@ -32,6 +32,48 @@ static size_t run_count(const QueryPlanner& planner, const std::string& q) {
     return res->total_hits;
 }
 
+// R3 (2026-05-11): formata as linhas retornadas em TSV (uma linha por row,
+// colunas separadas por \t). Imprime header com nomes das colunas em '#'.
+// Útil para validar CONTEÚDO de RETURN, não só counts.
+static int run_rows(const QueryPlanner& planner, const std::string& q) {
+    auto ast = grammar::parse_ggql(q);
+    if (!ast) {
+        std::fprintf(stderr, "parse error\n");
+        return 1;
+    }
+    auto res = planner.execute(*ast);
+    if (!res) {
+        std::fprintf(stderr, "exec error: %s\n", res.error().c_str());
+        return 1;
+    }
+    const auto& r = *res;
+    if (!r.columns.empty()) {
+        std::printf("#");
+        for (size_t i = 0; i < r.columns.size(); ++i) {
+            std::printf("%s%s", i ? "\t" : "", r.columns[i].c_str());
+        }
+        std::printf("\n");
+    }
+    for (size_t row = 0; row < r.row_count; ++row) {
+        for (size_t col = 0; col < r.columns.size(); ++col) {
+            const auto& v = r.flat[row * r.columns.size() + col];
+            std::printf("%s", col ? "\t" : "");
+            std::visit([](const auto& val) {
+                using T = std::decay_t<decltype(val)>;
+                if constexpr (std::is_same_v<T, std::string>) {
+                    std::printf("%s", val.c_str());
+                } else if constexpr (std::is_same_v<T, double>) {
+                    std::printf("%.6g", val);
+                } else if constexpr (std::is_same_v<T, int64_t>) {
+                    std::printf("%lld", static_cast<long long>(val));
+                }
+            }, v);
+        }
+        std::printf("\n");
+    }
+    return 0;
+}
+
 // Aplica LIMIT default se a query não especificar — força total_hits global.
 static std::string ensure_limit(std::string q) {
     constexpr std::string_view kHas = "LIMIT";
@@ -50,9 +92,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
             "Uso:\n"
             "  %s <idx>                    # 6 queries canônicas\n"
-            "  %s <idx> \"<query>\"          # 1 query custom\n"
-            "  %s <idx> --batch            # lê queries de stdin (1 por linha)\n",
-            argv[0], argv[0], argv[0]);
+            "  %s <idx> \"<query>\"          # 1 query custom (só count)\n"
+            "  %s <idx> --batch            # lê queries de stdin (1 por linha)\n"
+            "  %s <idx> --rows \"<query>\"   # imprime linhas em TSV (R3)\n",
+            argv[0], argv[0], argv[0], argv[0]);
         return 2;
     }
     const std::string idx = argv[1];
@@ -79,6 +122,12 @@ int main(int argc, char** argv) {
             std::printf("%s\t%zu\n", line.c_str(), run_count(planner, q));
         }
         return 0;
+    }
+
+    // ── Modo --rows: <idx> --rows "<query>" ──────────────────────────────────
+    if (argc == 4 && std::string_view(argv[2]) == "--rows") {
+        std::string q = ensure_limit(argv[3]);
+        return run_rows(planner, q);
     }
 
     // ── Modo single query: <idx> "<query>" ───────────────────────────────────
