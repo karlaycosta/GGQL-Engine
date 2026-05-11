@@ -122,6 +122,15 @@ target_compile_options(run_queries PRIVATE
 )
 target_link_libraries(run_queries PRIVATE ggql_query ggql_storage ggql_ingest)
 
+# ── Bisect B-V2: verifica simetria E_fwd↔E_bwd em um .idx carregado ──────────
+add_executable(check_csr_symmetry validation/check_csr_symmetry.cpp)
+target_compile_options(check_csr_symmetry PRIVATE
+    -std=c++23 -march=native
+    $<$<CONFIG:Debug>:-O0 -g>
+    $<$<NOT:$<CONFIG:Debug>>:-O2>
+)
+target_link_libraries(check_csr_symmetry PRIVATE ggql_storage)
+
 # ── Testes de integração FFI de query (dependem de ggql_ffi) ─────────────────
 add_executable(test_ffi_query test_ffi_query.cpp)
 target_compile_options(test_ffi_query PRIVATE

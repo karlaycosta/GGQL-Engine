@@ -118,8 +118,13 @@ void GfaCsrTopology::radix_sort_by_from(std::vector<LinkRecord>& links, uint64_t
         n_passes_real = 1;
     }
 
-    // Pad para par — ver comentário "Otimização 3" acima.
-    const int n_passes_total = (n_passes_real % 2 == 0) ? n_passes_real : n_passes_real + 1;
+    // BUG FIX (sessão K, 2026-05-10): pad para par estava BUGADO. O pad pass
+    // executava sort por shift=0 (byte LSB) DEPOIS de já ter ordenado por
+    // bytes mais significativos — LSD radix exige terminar no MSB; voltar
+    // ao LSB destrói a ordenação total. Manifestava em N >= 65537 onde
+    // n_passes_real=3 disparava o pad → 100% asimetria E_fwd↔E_bwd.
+    // Fix: usar n_passes_real direto e fazer std::copy final se ímpar.
+    const int n_passes_total = n_passes_real;
 
     std::vector<LinkRecord> buf(n);
     LinkRecord* src = links.data();
@@ -192,6 +197,14 @@ void GfaCsrTopology::radix_sort_by_from(std::vector<LinkRecord>& links, uint64_t
         }
 
         std::swap(src, dst);
+    }
+
+    // Garantia src == links.data() ao retornar (substitui o pad pass bugado).
+    // Custo: até 1 copy de m * 16 bytes (~80 MB em HPRC) quando n_passes_real
+    // é ímpar. Equivalente à alternativa "pad pass extra" mas correto.
+    if (src != links.data()) {
+        std::copy(std::execution::par_unseq,
+                  src, src + n, links.data());
     }
     // n_passes_total par → src == links.data() ao retornar.
 }

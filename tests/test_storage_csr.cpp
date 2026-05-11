@@ -241,6 +241,43 @@ static void test_symmetry_many_components() {
     assert(asym == 0 && "100 componentes (8 threads) deve ter simetria perfeita");
 }
 
+// ── Caso 6: threshold do bug B-V2 — N ≥ 2^16 + 1 (= 65537) ───────────────
+//
+// Bisect revelou que o bug aparece exatamente em N=65537. Para N ≤ 65536,
+// radix_sort_by_from faz 2 passes; para N ≥ 65537, faz 3 passes (+ pad
+// para 4). Algo na transição 2→3 passes quebra a simetria E_fwd↔E_bwd.
+//
+// Estes testes chamam topo.build() DIRETAMENTE (sem pipeline ingest).
+// Se passarem, o bug está no upstream (ingest). Se falharem, o bug é
+// no build_csr/radix_sort.
+static void test_symmetry_at_threshold_65536() {
+    using LR = ggql::LinkRecord;
+    constexpr uint64_t N = 65536;
+    std::vector<LR> links;
+    links.reserve(N - 1);
+    for (uint64_t i = 0; i + 1 < N; ++i) {
+        links.push_back(LR::make(i, '+', i + 1, '+'));
+    }
+    ggql::GfaCsrTopology topo;
+    topo.build(N, std::move(links), 8);
+    const size_t asym = check_symmetry(topo, "N=65536 (2 passes)");
+    assert(asym == 0 && "N=65536 (radix 2 passes) deve ter simetria perfeita");
+}
+
+static void test_symmetry_at_threshold_65537() {
+    using LR = ggql::LinkRecord;
+    constexpr uint64_t N = 65537;
+    std::vector<LR> links;
+    links.reserve(N - 1);
+    for (uint64_t i = 0; i + 1 < N; ++i) {
+        links.push_back(LR::make(i, '+', i + 1, '+'));
+    }
+    ggql::GfaCsrTopology topo;
+    topo.build(N, std::move(links), 8);
+    const size_t asym = check_symmetry(topo, "N=65537 (3 passes)");
+    assert(asym == 0 && "N=65537 (radix 3 passes) deve ter simetria perfeita");
+}
+
 // ── Caso 5: orientações mistas (+/-/-/-) ──────────────────────────────────
 //          Reprodução de pangenoma com walks invertidos (HPRC tem orient='-').
 static void test_symmetry_mixed_orientations() {
@@ -277,6 +314,8 @@ int main() {
     test_symmetry_two_components_serial();
     test_symmetry_two_components_parallel();
     test_symmetry_many_components();
+    test_symmetry_at_threshold_65536();
+    test_symmetry_at_threshold_65537();
     test_symmetry_mixed_orientations();
     return EXIT_SUCCESS;
 }

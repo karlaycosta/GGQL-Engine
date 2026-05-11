@@ -499,7 +499,33 @@ por bugs descobertos.
 | Validação | `GGQL_MAX_TOTAL_HITS=10000000 ./run_queries chm13_subset_100w.idx 'FIND SEGMENT'` retorna 4.294.760 (paridade exata com GT). Sem env var, retorna 1.000.001 (default mantido — backward compat) |
 | Regressão | 14/14 ctest passando |
 
-**B-V2 — `find_all_snarls` retorna 0 em chm13_100w** 🎯 **DIAGNOSTICADO 2026-05-10 (sessão K)**
+**B-V2 — `find_all_snarls` retorna 0 em chm13_100w** ✅ **RESOLVIDO 2026-05-10 (sessões K + bisect)**
+
+**Root cause**: bug em `radix_sort_by_from` (csr_builder.cpp:122) — para
+`num_nodes ≥ 65537` (≥ 2^16 + 1), `n_passes_real = 3` disparava um pad
+pass extra com `shift = 0` (byte LSB). LSD radix exige terminar no MSB;
+voltar ao LSB destrói a ordenação total. Consequência: 99.99% das edges
+em E_fwd/E_bwd ficavam desincronizadas (sintoma original do bug).
+
+**Fix aplicado** (`csr_builder.cpp:122-128`):
+```cpp
+const int n_passes_total = n_passes_real;          // sem pad
+// após loop:
+if (src != links.data()) {
+    std::copy(std::execution::par_unseq, src, src + n, links.data());
+}
+```
+Custo do copy: até 1 cópia de `m × 16 B` (~80 MB em HPRC) quando
+`n_passes_real` ímpar — mesma ordem do pad pass original que ele
+substitui, mas correto.
+
+**Validação em chm13_subset_100w** (4,3M nós, 5M edges, 100 walks):
+- Antes: `FIND BUBBLE 0 snarls · 10,67 s` + simetria 99.9999% quebrada
+- Depois: `FIND BUBBLE 581.739 snarls · 6,60 s` + simetria **100% perfeita**
+
+**Pipeline de descoberta (sessão K + bisect)**:
+
+
 
 A causa NÃO está em `snarl_decomposition.cpp` — está em `build_csr` ou no
 remap multi-componente do ingest. Snarls "evaporam" porque o CSR não tem
