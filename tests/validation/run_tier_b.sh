@@ -72,6 +72,40 @@ check FIND_REPEAT  "$rep_gt" "(awk)"
 check FIND_BUBBLE  "$bub_inner" "Δ≤2 ok"
 check FIND_PATH    "$pat_gt" "(P-lines)"
 
+# ── L-V7: WHERE length em Tier B (DRB1, max length=32, mostly <10 bp) ──
+RUNQ=build/tests/run_queries
+check_length() {
+    local op=$1 val=$2 label=$3
+    local g=$("$RUNQ" "$IDX" "FIND SEGMENT WHERE length $op $val" 2>/dev/null | tail -1)
+    local awk_op
+    case "$op" in
+        '=')  awk_op="==";; '>')  awk_op=">";;  '<')  awk_op="<";;
+        '>=') awk_op=">=";; '<=') awk_op="<=";; '!=') awk_op="!=";;
+    esac
+    local gt=$(awk -v v="$val" -v op="$awk_op" '
+        $1=="S" {
+            l = length($3)
+            if (op == "==" && l == v) c++
+            else if (op == ">"  && l >  v) c++
+            else if (op == "<"  && l <  v) c++
+            else if (op == ">=" && l >= v) c++
+            else if (op == "<=" && l <= v) c++
+            else if (op == "!=" && l != v) c++
+        }
+        END { print c+0 }' "$GFA")
+    if [[ "$g" == "$gt" ]]; then
+        printf '%-15s %8s %12s ✅ %s\n' "WHERE_length" "$g" "$gt" "$label"
+    else
+        printf '%-15s %8s %12s ❌ Δ=%-3s %s\n' "WHERE_length" "$g" "$gt" "$((g-gt))" "$label"
+        fail=$((fail+1))
+    fi
+}
+check_length '=' 1   "(= 1 bp — bases substitutions)"
+check_length '>' 10  "(> 10 bp — segments longer)"
+check_length '>=' 20 "(>= 20 bp)"
+check_length '<' 5   "(< 5 bp — short)"
+check_length '!=' 1  "(!= 1 — multi-base)"
+
 echo
 echo "Notas:"
 echo "  - vg snarls total = $bub_total | com conteúdo interno = $bub_inner"
