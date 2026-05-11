@@ -223,7 +223,7 @@ Generalização para "pangenoma humano" frágil com N=1.
 |---|---|---|:-:|
 | **R9** | **Tier D**: ≥1 dataset não-humano (E. coli PGGB ou yeast Sce-pan) | 1-2 dias | ✅ feito (15/15) |
 | **R10** | **HPRC full** (88M nós) cross-check ~85k snarls publicados | 1 dia + RAM | 🟡 pendente |
-| **R11** | **Profile coverage**: validar metagenomics, assembly, comparative | 2-3 dias | 🟡 pendente |
+| **R11** | **Profile coverage**: validar metagenomics, assembly, comparative | 2-3 dias | ✅ feito (32/32) |
 | **R12** | **CI público + Docker**: GitHub Actions rodando os 9 sprints | 1-2 dias | 🟡 pendente |
 
 ### D.4 — Gold standard (semanas)
@@ -258,8 +258,11 @@ Generalização para "pangenoma humano" frágil com N=1.
   - L/S ratio similar entre primata (1.38), E. coli (1.34), humano DRB1 (1.33)
 - [ ] **R10** — HPRC full (88M nós, ~85k snarls Liao 2023)
   - Requer ~40 GB disk + 32 GB RAM, ingest ~1h, sessão dedicada
-- [ ] **R11** — Profiles non-pangenome (metagenomics, assembly, comparative)
-  - Requer datasets desses domínios + ground truth, dias
+- [x] **R11** — Profiles non-pangenome (metagenomics, assembly, comparative)
+  - tests/validation/r11_profiles.sh — auditoria sistemática 4 profiles × 7 queries
+  - **32/32** validações: arquivos esperados + counts + degradação graciosa
+  - Pangenome 668K → Assembly 376K (.idx 44% menor)
+  - DRB1-3123 usado como dataset comum; topology-only queries idênticas em todos profiles
 - [x] **R12** — CI público + Docker
   - `Dockerfile` multi-stage (build + validation)
   - `.github/workflows/ci.yml` com 3 jobs (build/test, validation, coverage)
@@ -329,3 +332,4 @@ Gold standard para top-tier journal (3-4 semanas):
 - **2026-05-10**: documento criado após reanálise crítica do `queries_validation_plan.md`. Identificadas 4 categorias de lacunas (técnicas, metodológicas, plano, FM-Index features) e mapeados 15 itens de mitigação priorizados em 4 tiers.
 - **2026-05-11**: campanha de mitigação R1-R8 executada. 7 R-items completos + 1 parcial. 2 bugs críticos descobertos e fixados (não-determinismo de ingest, precedência operadora em WHERE). Critério "forte para peer review" atendido.
 - **2026-05-11 (cont.)**: R12 (CI/Docker) e R9 (Tier D não-humano) adicionados. 9 R-items completos + 1 parcial. Tier D usa MT_primate (gfatools real) + ecoli_synth (4 haplotypes sintéticos): 15/15 validações, todas em paridade com awk + vg.
+- **2026-05-11 (cont.)**: R11 (profiles) executado. 32/32 validações para os 4 profiles (pangenome, metagenomics, assembly, comparative) em DRB1-3123. Demonstra degradação graciosa (queries sem suporte retornam 0, sem crashes) e economia de disk (.idx 668K → 376K). 10/15 R-items completos + 1 parcial.
