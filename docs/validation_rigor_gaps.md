@@ -214,7 +214,7 @@ Generalização para "pangenoma humano" frágil com N=1.
 |---|---|---|:-:|
 | **R5** | **Compositional queries**: 5-10 casos AND/OR/parens em DRB1 + chm13 com GT Python | ~3h | ✅ feito (bug fixado!) |
 | **R6** | **Code coverage**: `gcov` + `lcov` HTML report. Identificar branches < 80% | ~4h | ✅ feito (66.8% lines) |
-| **R7** | **Garrison 2018 paper counts**: cross-check DRB1 contra Tabela 2 do paper | ~1h | 🟡 parcial (sem PDF) |
+| **R7** | **Garrison 2018 paper counts**: cross-check DRB1 contra Tabela 2 do paper | ~1h | ⊘ encerrado (paper não tem essa tabela; redirecionado para R10) |
 | **R8** | **Robustez negativa**: 5-10 GFAs malformados, esperar erros bem-formados | ~3h | ✅ feito (10/10) |
 
 ### D.3 — Alto impacto (sessão dedicada)
@@ -244,10 +244,12 @@ Generalização para "pangenoma humano" frágil com N=1.
 - [x] **R3** — Conteúdo de RETURN validado (6/6 em DRB1, modo `--rows`)
 - [x] **R4** — Paginação determinística (11/11: idem + cobertura + disjunção)
 
-### Médio impacto (D.2) — 3/4 ✅ + 1/4 🟡
+### Médio impacto (D.2) — 3/4 ✅ + 1/4 ⊘
 - [x] **R5** — Compositional queries (14 casos, **bug crítico fixado**: precedência SQL)
 - [x] **R6** — Coverage report 66.8% lines, 78.0% funcs (lacunas identificadas)
-- [🟡] **R7** — Garrison 2018 (parcial: 6 counts batem com vg oficial, sem PDF)
+- [⊘] **R7** — Garrison 2018: ENCERRADO (auditoria do PDF mostrou que paper
+       não tem Tabela 2 com counts. Premissa incorreta. Cross-check com paper
+       redirecionado para R10/Liao 2023. Detalhes: `r7_garrison2018.md`)
 - [x] **R8** — Robustez negativa 10/10 (zero crashes em GFAs malformados)
 
 ### Alto impacto (D.3) — 2/4 ✅

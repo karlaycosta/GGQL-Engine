@@ -1,55 +1,74 @@
-# R7 — Cross-check Garrison 2018 Table 2
+# R7 — Cross-check Garrison 2018: PREMISSA REVISADA
 
-## Status: PARTIAL — requer acesso ao PDF do paper
+## Status: ENCERRADO — premissa original incorreta
 
-**Paper**: Garrison, E., Sirén, J., Novak, A. M., Hickey, G., Eizenga, J. M.,
-Dawson, E. T., ... & Paten, B. (2018). *Variation graph toolkit improves
-read mapping by representing genetic variation in the population*.
-Nature Biotechnology, 36(9), 875-879. DOI: 10.1038/nbt.4227
+**Paper auditado**: Garrison, E. et al. (2018). *Variation graph toolkit improves
+read mapping by representing genetic variation in the population*. Nature
+Biotechnology 36(9): 875-879. DOI: 10.1038/nbt.4227.
+Preprint bioRxiv: https://www.biorxiv.org/content/10.1101/234856v1.
 
-## O que conseguimos validar (sem PDF)
+## Achado da auditoria
 
-DRB1-3123 é o dataset canônico do `vg msga` (alinhamento multi-sample dos
-12 alelos HLA-DRB1 GRCh38). Os counts GGQL foram validados contra `vg`
-(v1.74.0) como ground truth em Sprint 2 (Tier B):
+Após obter o PDF (v1 do preprint, 24 páginas, Dec 2017), procurei por:
 
-| Métrica           | GGQL  | vg/gfatools/awk | Δ    | Status |
-|-------------------|-------|-----------------|------|--------|
-| FIND_SEGMENT      |  5581 | 5581 (gfatools) | 0    | ✅      |
-| FIND_EDGE         |  7448 | 7448 (gfatools) | 0    | ✅      |
-| FIND_TIP          |     5 | 5 (awk)         | 0    | ✅      |
-| FIND_REPEAT       |   373 | 373 (awk)       | 0    | ✅      |
-| FIND_BUBBLE       |  1518 | 1518 (vg, ≥2-net) | 0  | ✅      |
-| FIND_PATH         |    12 | 12 (P-lines)    | 0    | ✅      |
+- "DRB1-3123" → **não encontrado**
+- "Table 2" / "Tabela 2" → **não encontrado**
+- Counts numéricos de S/L/Path/Snarls por dataset → **não tabulados**
 
-Esses 6 counts são *consistentes com* o pipeline `vg msga` reportado no
-paper (mesmo binário oficial vg v1.74.0). Mas sem o PDF da Tabela 2 não
-podemos afirmar com certeza que os números do GGQL batem com os
-publicados pelos autores.
+O paper foca em **performance de read mapping** (ROC curves, kmer indexing,
+GCSA2 alignment), não em estatísticas estruturais de pangenome graphs.
 
-## Como completar R7 (futuro)
+Os únicos números quantitativos do paper:
+  - 1000GP human variation graph: 4.76 GB serialized, 38 GB index memory
+  - 7-yeast strain pangenome (Yue et al data) — sem counts S/L/Paths reportados
+  - NA24385 mapping: 60s para carregar índices, 75 GB RAM
 
-1. Obter PDF (acesso institucional ou preprint na bioRxiv:
-   `https://www.biorxiv.org/content/10.1101/234856v1`)
-2. Transcrever Tabela 2 (linha "DRB1-3123 graph") com counts:
-   - número de nós (segments)
-   - número de edges
-   - número de paths/walks
-   - número de snarls/bubbles (se reportado)
-3. Comparar diretamente contra a coluna GGQL acima.
-4. Documentar discrepâncias (esperadas se vg msga mudou de versão).
+## Conclusão
 
-## Notas
+A premissa original de R7 ("cross-check contra Tabela 2 do paper") era
+**baseada em informação incorreta** da minha reanálise. DRB1-3123 vem do
+`vg test corpus` (produzido por `vg msga` sobre FASTA HLA-DRB1.fa), mas
+seus counts **não foram publicados** no paper Garrison 2018.
 
-- O paper Garrison 2018 usa `vg snarls` (algoritmo `integrated`); GGQL
-  usa porte do Billi/SESE. Diferença documentada em Sprint 2: snarls
-  "vazios" (Net-Graph-Size=2) — vg reporta 535 a mais, GGQL exclui esses
-  por design.
-- Liao 2023 (HPRC paper, Nature 617:312-324) é um cross-check ainda
-  melhor: ~85k snarls totais reportados para chm13 v2. Coberto em R10.
+## O que efetivamente validamos
 
-## Verdict
+Em vez de "Tabela 2 do paper", nossos counts foram validados contra:
 
-R7 *parcialmente* satisfeito: os números do GGQL estão consistentes com
-os outputs do vg oficial (que produziu os dados do paper). Cross-check
-direto contra Tabela 2 fica como TODO até alguém ter acesso ao PDF.
+| Ground Truth | Origem | Status |
+|---|---|---|
+| `vg` v1.74.0 binário oficial | vgteam, release Mar 2025 | ✅ paper-grade |
+| `gfatools` lh3 | Heng Li, mantido ativamente | ✅ paper-grade |
+| `awk` sobre GFA raw | comportamento determinístico | ✅ ground truth canônico |
+| Python set ops (paths) | implementação direta da definição | ✅ ground truth canônico |
+
+`vg` é o binário produzido pelos próprios autores do paper, e foi usado para
+gerar os experimentos publicados. Validar contra `vg` é **mais forte** que
+validar contra counts publicados (que ficam congelados em tempo de submissão
+e podem virar obsoletos com novas versões).
+
+## Cross-checks de paper que **fazem sentido** (substitutos de R7)
+
+Se o objetivo é "cross-check contra paper", os candidatos reais são:
+
+1. **Liao 2023** (HPRC year-1, Nature 617:312-324) — ~85k snarls totais para
+   chm13 v2 pangenome. Coberto por R10 (HPRC full, ainda pendente).
+
+2. **Sirén et al. 2021** (Pangenomics-from-Vertebrates, J Comp Biol) — counts
+   de GBWT em pangenomes humanos. Mas não tem DRB1.
+
+3. **Garrison & Sirén 2024** (vg snarls integrated algorithm) — talvez tabela
+   de snarls por pangenome. Não auditado.
+
+## Decisão
+
+R7 é encerrado como **inaplicável** (premissa incorreta). O cross-check
+contra paper é redirecionado para **R10** (Liao 2023 HPRC), que é o paper
+adequado para validar GGQL em escala pangenome humano completo.
+
+## Histórico
+
+- **2026-05-10** (criação inicial): marcado como parcial assumindo Tabela 2
+  no paper.
+- **2026-05-11** (auditoria): após obter PDF, descobri que o paper não tem
+  essa tabela. R7 encerrado, substituído por R10 como fonte de cross-check
+  com paper publicado.
