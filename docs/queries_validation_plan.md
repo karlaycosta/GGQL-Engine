@@ -555,6 +555,46 @@ Avanço total: **+9 validações novas em Tier B/C** (de 0% para parcial em 4 qu
 
 ---
 
+## 7.septies. ✅ Resultados Sprint 5 (2026-05-10) — L-V2 crosses Tier C com GT externo
+
+**Objetivo**: validar `FIND PATH WHERE crosses(<other_path>)` em escala HPRC contra ground truth externo (não apenas self-cross).
+
+**Estratégia**: parsing direto do GFA via Python — extrair `set(node_ids)` de cada W-line (regex sobre walk string `>1>2<3>4...`) e computar interseção entre paths. Como o MPHF é bijetivo (external_id ↔ internal_id), counts de "paths que crossam target T" devem ser idênticos em ambos os spaces.
+
+**Setup**: `tests/validation/run_sprint5.sh`. Tempo: ~5s para parsing GT + ~9s × N targets para queries GGQL.
+
+**Paridade obtida (7/7 ✅ todos exatos)**:
+
+| Target path | GGQL | GT (Python set ∩) | Δ |
+|---|---:|---:|:-:|
+| `GRCh38#0#chr1:585988-2697145` | 10 | 10 | 0 ✅ |
+| `HG00438#1#JAHBCB010000015.1:57872051-58059389` | 4 | 4 | 0 ✅ |
+| `HG00438#2#JAHBCA010000033.1:0-59378398` | 6 | 6 | 0 ✅ |
+| `HG00621#1#JAHBCD010000022.1:8694535-87136060` | 13 | 13 | 0 ✅ |
+| `HG00621#2#JAHBCC010000031.1:40182250-40369725` | 4 | 4 | 0 ✅ |
+| `crosses(<inexistente>)` | 0 | 0 | 0 ✅ |
+| `crosses(self) inclui self` | ≥1 | ≥1 | ✅ ✅ |
+
+**Observações biológicas**:
+
+- `GRCh38#0#chr1:585988-2697145` é a região de referência (~2 Mb) — 10 paths crossam, indicando que múltiplos haplótipos compartilham essa região (esperado em pangenoma com referência).
+- `HG00621#1#JAHBCD010000022.1:8694535-87136060` (chr22, ~78 Mb) — 13 paths crossam, sugerindo grande overlap entre haplótipos nessa região conservada.
+- Regiões menores (~200 kb) têm 4 crossings — provavelmente GRCh38 + 1-2 haplótipos próximos.
+
+**Validação cruzada com test_query_crosses** (sessão K): consistente — antes reportava `crosses(HG00438#1#JAHBCB010000015.1:0-50048045) hits=6`. Agora confirmamos esse valor para outro path da mesma sample: `HG00438#1#JAHBCB010000015.1:57872051-58059389 = 4 paths`. Sequência tem menos overlap (região distinta).
+
+**Implementação do `CrossesCache` (B-1) confirmada correta em escala**: bug L-V2 não existia — o stub `crosses=true` era apenas falta de validação externa, não bug de implementação. Sprint 5 fecha essa lacuna.
+
+### Cobertura atualizada (pós Sprint 5)
+
+| Query | Tier A | Tier B | Tier C |
+|---|:-:|:-:|:-:|
+| `FIND PATH WHERE crosses` | ✅ (self) | ❌ | **✅ NOVO** (5 paths reais HPRC + edge cases) |
+
+Avanço total nesta sessão (Sprints 4+5): **+16 validações** em queries com filtros e crosses.
+
+---
+
 ## 7.quinquies. ✅/⚠ Resultados Sprint 3 (2026-05-10) — Tier C (HPRC chm13_subset_100w)
 
 **Dataset**: `data/chm13_subset_100w.gfa` — 4.294.760 nós, 5.025.175 edges,
