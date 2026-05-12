@@ -4,7 +4,7 @@
 > **Target journal candidates**:
 >   - *Bioinformatics* (OUP) — Application Note (rápido, <3 páginas)
 >   - *BMC Bioinformatics* — Software paper (open access, mais espaço)
->   - *Nature Methods* — só se conseguirmos R13.B+C + R14 + R15 + benchmark contra TileDB-VG / odgi
+>   - *Nature Methods* — só se conseguirmos R13.B+C + R14 + R15 + benchmark contra odgi em escala HPRC
 
 ---
 
@@ -76,10 +76,24 @@ interface that:
 
 ### 1.2 Related work
 
-- **TileDB-VG** (vgteam) — distributed, but no declarative query language.
-- **odgi** (Garrison et al.) — efficient graph ops, no SQL surface.
-- **vg snarls** — single algorithm (Sirén/Garrison integrated), no querying.
-- **gfatools** (Heng Li) — text-level stats, not declarative.
+**Query/graph tools (direct comparison)**:
+- **vg** (Garrison et al. 2018) — variation graph toolkit; imperative commands,
+  no declarative query layer.
+- **odgi** (Garrison et al.) — efficient graph ops library; pipeline-style API.
+- **gfatools** (Heng Li) — text-level GFA stats; not declarative.
+- **awk + shell scripts** — common pangenome-querying baseline.
+
+**Storage layers (complementary, not competing)**:
+- **TileDB-VG** (TileDB Inc.) — multi-dimensional array storage for variation
+  graphs; cloud-native distributed I/O. Sits *below* the query layer that GGQL
+  occupies — GGQL and TileDB-VG could in principle be composed (GGQL using
+  TileDB-VG as backend). Comparison 1:1 not meaningful (analogous to SQLite
+  vs Apache Parquet).
+- **xg** (vg index format) — binary serialized graph; queried via vg CLI.
+
+GGQL is, to our knowledge, the first **SQL-like declarative engine** for
+pangenome variation graphs. Closest analogues are imperative pipelines built
+with `vg`/`odgi` + shell composition.
 
 ### 1.3 Contribution
 
@@ -341,7 +355,7 @@ Validation campaign identified and fixed **3 production bugs** plus **1 candidat
 | 2 | Investigar bug L-V8.2 | Reproduzir + fix |
 | 3 | Executar R14 (clang + ARM) | CI matrix verde |
 | 4 | Executar R15 (rapidcheck) | 0 contraexemplos em 10K iters |
-| 5 | Benchmarks contra TileDB-VG e odgi | Tabela comparativa adicional |
+| 5 | Benchmarks contra odgi (HPRC scale) | Tabela comparativa adicional (TileDB-VG removido — paradigma diferente, ver paper_comparisons.md §7.2) |
 | 6 | Citação correta Liao 2023 snarls top-level | Verificar contagem reportada |
 | 7 | Cross-check vg snarls em HPRC full (R10.bis) | Speedup confirmado em escala |
 | 8 | Abstract revisado por co-autor experiente | ~250 palavras finais |

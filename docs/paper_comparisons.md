@@ -19,9 +19,16 @@
 | **Python** | 3.12 + struct + set ops | Python Software Fdn | Python | Ground truth via set operations |
 
 Estendendo cobertura — ferramentas a serem testadas (status de planejamento na §2):
-- **TileDB-VG** (tiledb-inc) — armazenamento distribuído de variation graphs
 - **odgi** (Garrison et al.) — operações eficientes em pangenome graphs
-- **minigraph** (lh3) — graph-based aligner
+- **minigraph** (lh3) — graph-based aligner (excluído da matriz, ver §7.2)
+
+**Related work — paradigma diferente, não comparado lado-a-lado**:
+- **TileDB-VG** (TileDB Inc.) — *storage layer* para variation graphs (arrays
+  multidimensionais cloud-native), não um query engine declarativo. Sobreposição
+  com GGQL é só parcial (ambos servem queries em pangenomes), mas em **níveis
+  diferentes do stack**: GGQL é "SQL-like front-end", TileDB-VG é "storage
+  back-end distribuído". Comparação 1:1 não faria sentido — equivale a
+  comparar SQLite vs Apache Parquet. Documentado em §7.2.
 
 ---
 
@@ -31,27 +38,30 @@ Estendendo cobertura — ferramentas a serem testadas (status de planejamento na
 
 `✅` suporta · `~` indireto/parcial · `❌` não suporta · `—` N/A para o tool
 
-| Funcionalidade | GGQL | vg | gfatools | awk | TileDB-VG | odgi | minigraph | Python |
-|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| Linguagem declarativa SQL-like | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `FIND SEGMENT` count | ✅ | ✅ stats | ✅ stat | ✅ | ✅ | ✅ stats | ❌ | ✅ |
-| `FIND EDGE` count | ✅ | ✅ stats | ✅ stat | ✅ | ✅ | ✅ stats | ❌ | ✅ |
-| `FIND TIP` | ✅ | ~ | ~ | ✅ | ~ | ✅ tips | ❌ | ✅ |
-| `FIND REPEAT` | ✅ | ❌ | ❌ | ✅ | ❌ | ~ | ❌ | ✅ |
-| `FIND BUBBLE` (snarls) | ✅ Billi/SESE | ✅ integrated | ❌ | ❌ | ❌ | ✅ snarls | ❌ | ❌ |
-| `FIND PATH` | ✅ | ✅ paths | ✅ | ✅ | ✅ | ✅ paths | ❌ | ✅ |
-| `WHERE` compositional AND/OR/parens | ✅ | ❌ | ❌ | ✅ (script) | ~ | ❌ | ❌ | ✅ |
-| `WHERE length op N` | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
-| `WHERE depth op X` (float) | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
-| `WHERE name = "X"` | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
-| `WHERE crosses(P)` (set inter) | ✅ | ~ paths | ❌ | ✅ | ~ | ❌ | ❌ | ✅ |
-| `WHERE contains_kmer("ACGT")` | ✅ FM-Index | ✅ find | ❌ | ✅ slow | ✅ | ❌ | ✅ | ✅ slow |
-| `SEARCH KMER "ACGT"` | ✅ FM-Index | ✅ find | ❌ | ✅ slow | ✅ | ❌ | ✅ | ✅ slow |
-| `LIMIT N OFFSET M` idempotente | ✅ | ❌ | ❌ | ❌ | ~ | ❌ | ❌ | ❌ |
-| `RETURN col1, col2, *` | ✅ | ❌ | ❌ | ❌ | ~ | ❌ | ❌ | ❌ |
-| Profiles (4 ingest modes) | ✅ | ❌ | ❌ | — | ❌ | ❌ | ❌ | — |
-| Determinismo byte-exact | ✅ R1 | ~ | ✅ | — | ✅ | ❌ docs | ❌ docs | — |
-| Cross-platform | Linux x64 | Linux/Mac | Linux/Mac | qq UNIX | Linux/Mac/Cloud | Linux | Linux/Mac | qq |
+| Funcionalidade | GGQL | vg | gfatools | awk | odgi | Python |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|
+| Linguagem declarativa SQL-like | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `FIND SEGMENT` count | ✅ | ✅ stats | ✅ stat | ✅ | ✅ stats | ✅ |
+| `FIND EDGE` count | ✅ | ✅ stats | ✅ stat | ✅ | ✅ stats | ✅ |
+| `FIND TIP` | ✅ | ~ | ~ | ✅ | ✅ tips | ✅ |
+| `FIND REPEAT` | ✅ | ❌ | ❌ | ✅ | ~ | ✅ |
+| `FIND BUBBLE` (snarls) | ✅ Billi/SESE | ✅ integrated | ❌ | ❌ | ✅ snarls | ❌ |
+| `FIND PATH` | ✅ | ✅ paths | ✅ | ✅ | ✅ paths | ✅ |
+| `WHERE` compositional AND/OR/parens | ✅ | ❌ | ❌ | ✅ (script) | ❌ | ✅ |
+| `WHERE length op N` | ✅ | ❌ | ❌ | ✅ | ❌ | ✅ |
+| `WHERE depth op X` (float) | ✅ | ❌ | ❌ | ✅ | ❌ | ✅ |
+| `WHERE name = "X"` | ✅ | ❌ | ❌ | ✅ | ❌ | ✅ |
+| `WHERE crosses(P)` (set inter) | ✅ | ~ paths | ❌ | ✅ | ❌ | ✅ |
+| `WHERE contains_kmer("ACGT")` | ✅ FM-Index | ✅ find | ❌ | ✅ slow | ❌ | ✅ slow |
+| `SEARCH KMER "ACGT"` | ✅ FM-Index | ✅ find | ❌ | ✅ slow | ❌ | ✅ slow |
+| `LIMIT N OFFSET M` idempotente | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `RETURN col1, col2, *` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Profiles (4 ingest modes) | ✅ | ❌ | ❌ | — | ❌ | — |
+| Determinismo byte-exact | ✅ R1 | ~ | ✅ | — | ❌ docs | — |
+| Cross-platform | Linux x64 | Linux/Mac | Linux/Mac | qq UNIX | Linux | qq |
+
+> **TileDB-VG** e **minigraph** estão fora desta matriz (paradigmas diferentes
+> — ver §7.2). Cobertura: 6 ferramentas com sobreposição real de funcionalidade.
 
 **Diferenciação chave de GGQL**:
 - Único com **linguagem declarativa** que unifica primitivas de 3 ferramentas
@@ -84,7 +94,6 @@ Legenda de status:
 | FIND SEGMENT | vg | ✅ (DRB1) | ⬜ (DRB1) | ⬜ | ⬜ |
 | FIND SEGMENT | gfatools | ✅ (DRB1+chm13) | ⬜ | ⬜ | ⬜ |
 | FIND SEGMENT | awk | ✅ (todos tiers) | ✅ (R2 chm13) | ⬜ | — |
-| FIND SEGMENT | TileDB-VG | ⬜ | ⬜ | ⬜ | ⬜ |
 | FIND SEGMENT | odgi | ⬜ | ⬜ | ⬜ | ⬜ |
 | FIND SEGMENT | Python | ✅ (DRB1) | ⬜ | ⬜ | — |
 | FIND EDGE | vg | ✅ (DRB1) | ⬜ | ⬜ | ⬜ |
@@ -124,8 +133,6 @@ Legenda de status:
 |---|---|:-:|:-:|:-:|:-:|
 | SEARCH KMER curto (4-8 bp) | awk | ✅ (R3+R11) | ✅ R2 (1.7×) | ⬜ | — |
 | SEARCH KMER curto | vg find | ⬜ | ⬜ | ⬜ | ⬜ |
-| SEARCH KMER curto | TileDB-VG | ⬜ | ⬜ | ⬜ | ⬜ |
-| SEARCH KMER curto | minigraph | ⬜ (sketch?) | ⬜ | ⬜ | ⬜ |
 | SEARCH KMER longo (10+ bp) | awk | ✅ R2 (high sel) | ✅ R2 | ⬜ | — |
 | SEARCH KMER longo | vg find | ⬜ | ⬜ | ⬜ | ⬜ |
 
@@ -136,7 +143,6 @@ Legenda de status:
 | Cold ingest (45 GB GFA HPRC) | GGQL bench_gbwt | ✅ (R10) | ✅ 22min | ✅ 14GB peak | ✅ 23GB |
 | Cold ingest HPRC | vg convert -p | ⬜ | ⬜ | ⬜ | ⬜ |
 | Cold ingest HPRC | odgi build | ⬜ | ⬜ | ⬜ | ⬜ |
-| Cold ingest HPRC | TileDB-VG | ⬜ | ⬜ | ⬜ | ⬜ |
 | Determinismo (run 2× → diff) | GGQL | ✅ R1 (3 datasets) | — | — | ✅ byte-exact |
 | Determinismo | vg | ⬜ | — | — | ⬜ |
 | Determinismo | odgi | ⬜ | — | — | ⬜ |
@@ -159,9 +165,11 @@ Legenda de status:
 | T1 | Tempo + RAM + Disk de **vg convert -p** em HPRC full (R10.bis) | 2-4 h | Nenhum |
 | T2 | Tempo + RAM de **vg snarls** em HPRC full (R10.bis) | 2-8 h | Nenhum |
 | T3 | Setup **odgi** + ingest HPRC + counts vs GGQL | 4-8 h | Build odgi |
-| T4 | Setup **TileDB-VG** + ingest + 3 queries vs GGQL | 1-2 dias | Setup complexo |
 | T5 | Memory peak via `/usr/bin/time -v` em todas queries R2 | 1 h | Re-rodar com flag |
 | T6 | Disk usage comparação: GGQL .idx vs vg .pg vs odgi .og em HPRC | 1 h | Após T1, T3 |
+
+> **T4 (TileDB-VG) descartado** — paradigma diferente (storage vs query),
+> ver §7.2. Não vale o esforço de 1-2 dias.
 
 **Prioridade MÉDIA — completude**:
 
@@ -184,10 +192,12 @@ Legenda de status:
 
 | Prioridade | Itens | Esforço total |
 |---|---|---|
-| ALTA (T1-T6) | 6 itens | ~2-3 dias |
+| ALTA (T1, T2, T3, T5, T6) | 5 itens | ~2-3 dias |
 | MÉDIA (T7-T10) | 4 itens | ~1 dia |
 | BAIXA (T11-T13) | 3 itens | ~0.5 dia |
-| **TOTAL** | **13 itens** | **~3.5-4.5 dias** |
+| **TOTAL** | **12 itens** | **~2.5-4 dias** |
+
+(Descartado T4 TileDB-VG: paradigma diferente, ver §7.2.)
 
 Após esse esforço, teríamos matriz **completamente preenchida** para o paper —
 nenhuma célula vazia, comparações justas em escala (HPRC full) e dimensões
@@ -462,18 +472,54 @@ R5 corrigiu o bug; GGQL agora segue SQL/Python standard.
 | Comparação | Por quê não fizemos | Quando |
 |---|---|---|
 | vg snarls em HPRC full | ~horas de execução | R10.bis sessão futura |
-| TileDB-VG (qualquer query) | Setup distribuído complexo | Pós-aceitação preprint |
-| odgi (graph ops) | Sem feature para queries SQL-like | Não comparável diretamente |
 | minigraph (alignment) | Caso de uso diferente | N/A |
 
 ### §7.2 Comparações que não fazem sentido
 
+#### Paradigmas diferentes (related work, não concorrente)
+
+- **TileDB-VG** (TileDB Inc.) — *storage layer* multidimensional para variation
+  graphs, **não query engine**. Ambos servem queries em pangenomes, mas em
+  níveis diferentes do stack:
+
+  ```
+  ┌─────────────────────────────────┐
+  │  Query layer (declarativo)      │ ← GGQL aqui
+  │  - FIND SEGMENT WHERE ...       │
+  │  - SEARCH KMER, crosses()       │
+  ├─────────────────────────────────┤
+  │  Index layer                    │ ← Ambos têm
+  │  - CSR/Elias-Fano/FM-Index/GBWT │   (mas diferentes)
+  ├─────────────────────────────────┤
+  │  Storage layer (acesso bruto)   │ ← TileDB-VG aqui
+  │  - Arrays multidimensionais     │
+  │  - Cloud I/O, lazy loading      │
+  └─────────────────────────────────┘
+  ```
+
+  Comparação 1:1 não seria justa — equivale a benchmark SQLite vs Apache
+  Parquet. Em princípio, GGQL poderia usar TileDB-VG como **backend de
+  storage**, então são complementares, não concorrentes.
+
+- **minigraph** (lh3) — *graph-based aligner*, não query tool. Suporta
+  sketch internamente para seed alignment, mas não expõe interface
+  declarativa de consulta. Removido da matriz §2.1.
+
+#### Paradigma certo, mas medição não-pertinente
+
 - **awk linear scan** em HPRC full: paradigma errado. awk não tem índice,
   então faria O(N) por query. Esperado que GGQL seja >10× mais rápido por
-  design.
+  design. Comparações em chm13_100w (já feitas) bastam.
 - **vg find** vs GGQL SEARCH KMER em HPRC: vg find requer GCSA2 que é mais
   caro que FM-Index para queries exatas curtas. Esperado GGQL >100× mais
   rápido — não medido por tempo.
+
+#### Concorrentes diretos (de fato comparados)
+
+GGQL é praticamente único no nicho **"SQL-like declarativo sobre pangenome"**.
+Os competidores honestos são **vg + shell scripts** e **odgi + shell scripts**
+(ambos imperativos, exigem composição manual de comandos). Esses são
+comparados rigorosamente nas §3-§5.
 
 ### §7.3 Caveats nas medições
 

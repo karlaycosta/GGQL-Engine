@@ -21,7 +21,6 @@ Antes de iniciar T1-T13, garantir:
 - [x] **hyperfine** 1.18 (sistema)
 - [x] **/usr/bin/time -v** (sistema, GNU time)
 - [ ] **odgi** — pré-requisito T3 (build a partir do source)
-- [ ] **TileDB-VG** — pré-requisito T4 (Python + tiledb)
 
 ### §0.2 Datasets
 - [x] `data/chm13_subset_100w.gfa` + `.idx` (4.3M segs, 100 walks)
@@ -78,15 +77,15 @@ não mais só extrapolação.
 
 **Saída do dia**: odgi completamente integrado, vg find + Python set medidos.
 
-### Dia 4 (opcional) — TileDB-VG (~1-2 dias)
+### Dia 4 — Consolidação final (~2-3h)
 
 | Slot | Tarefa | Output |
 |---|---|---|
-| Dia 4+ | **T4** Setup TileDB-VG + ingest + 3 queries | C+T+M+D TileDB-VG |
-| | **T6** comparação consolidada D: GGQL vs vg .pg vs odgi .og | Tabela D final |
-| | **T13** GFA→.idx vs GFA→.pg vs GFA→.og tamanho serializado | D detalhado |
+| 09:00-10:00 | **T6** comparação consolidada D: GGQL vs vg .pg vs odgi .og | Tabela D final |
+| 10:00-11:00 | **T13** GFA→.idx vs GFA→.pg vs GFA→.og tamanho serializado | D detalhado |
 
-**Saída do dia**: matriz 100% preenchida.
+**Saída do dia**: matriz 100% preenchida (sem TileDB-VG — paradigma diferente,
+ver `paper_comparisons.md` §7.2).
 
 ---
 
@@ -194,25 +193,13 @@ Para snarls, documentar se diferença semântica.
 
 **Output esperado**: 4-6 linhas de odgi na matriz §2.2 preenchidas.
 
-### T4 — TileDB-VG (C+T+M+D) — ⏱ 1-2 dias (opcional)
+### T4 — ⊘ DESCARTADO (TileDB-VG paradigma diferente)
 
-**Setup mais complexo**. Requer:
-
-```bash
-pip install tiledbvg
-# Documentação: https://github.com/TileDB-Inc/TileDB-VG
-```
-
-**Pipeline**:
-1. Import GFA → TileDB array group
-2. Query SEGMENT count
-3. Query PATH count
-4. Query SEARCH KMER (TileDB-VG suporta)
-
-**Critério ✅**: 3 queries básicas funcionam + counts batem com GGQL.
-
-**Recomendação**: pular T4 se cronograma apertado — TileDB-VG é tool
-distribuída, comparação justa em laptop é difícil.
+TileDB-VG é *storage layer* multidimensional, não query engine declarativo.
+Comparação 1:1 não é justa — equivale a benchmark SQLite vs Apache Parquet.
+GGQL e TileDB-VG são potencialmente **complementares** (GGQL poderia usar
+TileDB-VG como backend), não concorrentes. Justificativa completa em
+`paper_comparisons.md` §7.2. Decisão tomada em 2026-05-12.
 
 ### T5 — Memory peak nas queries R2 (M completo) — ⏱ 1h
 
@@ -250,7 +237,6 @@ done
 | GGQL .idx | 23 GB | 47% |
 | vg .pg | (T1) | (T1/49) |
 | odgi .og | (T3) | (T3/49) |
-| TileDB-VG | (T4 opt) | — |
 
 **Critério ✅**: `du -sh` em cada índice, tabela atualizada.
 
@@ -373,22 +359,19 @@ du -sh /home/karlay/Downloads/hprc-v1.0-mc-chm13.{gfa,gfa.idx,pg,og}
 | T1 vg convert HPRC | OOM ou crash em 49 GB | Tentar `--threads 4`; se falhar, dividir GFA por chrom |
 | T2 vg snarls HPRC | Pode demorar 8h+ (vg single-threaded) | Rodar background, fazer T3 em paralelo |
 | T3 odgi build | Dependências (jemalloc, htslib) | Usar Docker `pangenome/odgi:latest` |
-| T4 TileDB-VG | Setup complexo + curva de aprendizado | Pular se cronograma apertado |
 | T5 RSS | 3 runs em 13 queries = 40min extra | Tolerável |
 | T7 vg find | GCSA index demora horas em HPRC | Limitar a chm13_100w |
 
 ### §3.2 Risco global
 
-Cronograma realista: **3-5 dias úteis** (não 3.5-4.5h como na §2.4 do
-paper_comparisons). A subestimativa anterior não contava setup de odgi e
-TileDB-VG. Plano atual é realista.
+Cronograma realista: **2.5-4 dias úteis** (após descartar T4 TileDB-VG).
+A subestimativa original (3.5-4.5h) não contava setup de odgi.
 
 ### §3.3 Plano contingente
 
 Se cronograma apertar:
 - **Mínimo aceitável**: T1+T2+T3+T5+T6+T9 (~3 dias) — fecha vg+odgi em HPRC
-- **Stretch**: T1-T13 (~5 dias) — fecha 100% da matriz
-- **Pular**: T4 (TileDB-VG) — adiar para sessão pós-aceitação
+- **Stretch**: T1-T13 (sem T4) (~4 dias) — fecha 100% da matriz justa
 
 ---
 
