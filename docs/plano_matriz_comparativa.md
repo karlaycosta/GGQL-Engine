@@ -393,15 +393,18 @@ A matriz §2.2 está **pronta para o paper** quando:
 ### Concluídos
 - ~30 células ✅ corretude (Sprints 1-12, R3, R4, R5, R10, R11)
 - ~6 células ✅ tempo (R2 chm13_100w)
-- 0 células ✅ memória (todas ⬜)
+- **~12 células ✅ memória** (T5 — 2026-05-12)
 - 1 célula ✅ disco (GGQL .idx HPRC)
+- ✅ **T8** — minigraph excluído (decisão documentada)
+- ✅ **T5** — memory peak medido (13 queries × 3 runs, ~42s)
 
 ### Em progresso
-- (nenhum item no momento — aguardando início do plano)
+- (Dia 1 manhã concluído; pronto para T9 + T12 ou T1)
 
 ### Próximo a executar
-Recomendação: começar pelo **T8** (decisão, 30min) + **T5** (memory R2, 1h).
-São quick wins que destravam todo o resto do dia 1.
+Recomendação: **T9** (memory ingest HPRC com `/usr/bin/time -v`, 30 min
+re-run) + **T12** (gfatools stat em HPRC, 1h). Esses dois fecham a dimensão
+M da ingestão e bridge para T1 (vg convert) à tarde.
 
 ---
 

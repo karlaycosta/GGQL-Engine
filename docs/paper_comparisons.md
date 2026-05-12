@@ -93,47 +93,47 @@ Legenda de status:
 |---|---|:-:|:-:|:-:|:-:|
 | FIND SEGMENT | vg | ✅ (DRB1) | ⬜ (DRB1) | ⬜ | ⬜ |
 | FIND SEGMENT | gfatools | ✅ (DRB1+chm13) | ⬜ | ⬜ | ⬜ |
-| FIND SEGMENT | awk | ✅ (todos tiers) | ✅ (R2 chm13) | ⬜ | — |
+| FIND SEGMENT | awk | ✅ (todos tiers) | ✅ (R2 chm13) | ✅ (T5: 2011 MB) | — |
 | FIND SEGMENT | odgi | ⬜ | ⬜ | ⬜ | ⬜ |
 | FIND SEGMENT | Python | ✅ (DRB1) | ⬜ | ⬜ | — |
 | FIND EDGE | vg | ✅ (DRB1) | ⬜ | ⬜ | ⬜ |
 | FIND EDGE | gfatools | ✅ (DRB1+chm13) | ⬜ | ⬜ | ⬜ |
-| FIND EDGE | awk | ✅ | ⬜ | ⬜ | — |
+| FIND EDGE | awk | ✅ | ⬜ | ✅ (T5: 1739 MB) | — |
 | FIND EDGE | odgi | ⬜ | ⬜ | ⬜ | ⬜ |
-| FIND TIP | awk | ✅ (todos) | ⬜ | ⬜ | — |
+| FIND TIP | awk | ✅ (todos) | ⬜ | ✅ (T5: 1166 MB) | — |
 | FIND TIP | odgi tips | ⬜ | ⬜ | ⬜ | ⬜ |
-| FIND REPEAT | awk | ✅ (todos) | ⬜ | ⬜ | — |
-| **FIND BUBBLE** | **vg snarls** | **✅** (DRB1+chm13) | **✅** R2 (77×) | ⬜ | ⬜ |
+| FIND REPEAT | awk | ✅ (todos) | ⬜ | ✅ (T5: 1251 MB) | — |
+| **FIND BUBBLE** | **vg snarls** | **✅** (DRB1+chm13) | **✅** R2 (77×) | ✅ (T5: 1275 MB) | ⬜ |
 | FIND BUBBLE | odgi snarls | ⬜ | ⬜ | ⬜ | ⬜ |
 | FIND PATH | vg | ✅ (DRB1) | ⬜ | ⬜ | ⬜ |
 | FIND PATH | gfatools | ✅ (DRB1) | ⬜ | ⬜ | ⬜ |
-| FIND PATH | awk | ✅ (todos) | ⬜ | ⬜ | — |
+| FIND PATH | awk | ✅ (todos) | ⬜ | ✅ (T5: 1164 MB) | — |
 | FIND PATH | odgi paths | ⬜ | ⬜ | ⬜ | ⬜ |
 
 #### §2.2.2 Filtros WHERE
 
 | Funcionalidade | Tool | C | T | M | D |
 |---|---|:-:|:-:|:-:|:-:|
-| WHERE length op N | awk | ✅ (R3+R4+R5) | ✅ (R2 chm13 2×) | ⬜ | — |
+| WHERE length op N | awk | ✅ (R3+R4+R5) | ✅ (R2 chm13 2×) | ✅ (T5: 1192-1440 MB) | — |
 | WHERE length op N | Python | ✅ | ⬜ | ⬜ | — |
 | WHERE depth op X | awk | ✅ (Sprint 4 L-V1) | ⬜ | ⬜ | — |
 | WHERE depth op X | Python | ✅ | ⬜ | ⬜ | — |
-| WHERE name = X | awk | ✅ (R3) | ⬜ (R2 mediu) | ⬜ | — |
+| WHERE name = X | awk | ✅ (R3) | ⬜ (R2 mediu) | ✅ (T5: 1257 MB) | — |
 | WHERE crosses(P) | Python set | ✅ (Sprint 5 + R9) | ⬜ | ⬜ | — |
 | WHERE crosses(P) | vg | ⬜ (vg find -p) | ⬜ | ⬜ | ⬜ |
-| WHERE contains_kmer | awk grep | ✅ (R2 chm13 1.7×) | ✅ R2 | ⬜ | — |
+| WHERE contains_kmer | awk grep | ✅ (R2 chm13 1.7×) | ✅ R2 | ✅ (T5: 1164-1209 MB) | — |
 | WHERE contains_kmer | vg find | ⬜ | ⬜ | ⬜ | ⬜ |
-| WHERE compositional AND | awk + Python | ✅ (R5: 14 casos) | ⬜ | ⬜ | — |
-| WHERE compositional OR | awk + Python | ✅ (R5) | ⬜ | ⬜ | — |
+| WHERE compositional AND | awk + Python | ✅ (R5: 14 casos) | ⬜ | ✅ (T5: 1194 MB) | — |
+| WHERE compositional OR | awk + Python | ✅ (R5) | ⬜ | ✅ (T5: 1880 MB) | — |
 | WHERE compositional parens | awk + Python | ✅ (R5) | ⬜ | ⬜ | — |
 
 #### §2.2.3 Sequence search
 
 | Funcionalidade | Tool | C | T | M | D |
 |---|---|:-:|:-:|:-:|:-:|
-| SEARCH KMER curto (4-8 bp) | awk | ✅ (R3+R11) | ✅ R2 (1.7×) | ⬜ | — |
+| SEARCH KMER curto (4-8 bp) | awk | ✅ (R3+R11) | ✅ R2 (1.7×) | ✅ (T5: 1209 MB) | — |
 | SEARCH KMER curto | vg find | ⬜ | ⬜ | ⬜ | ⬜ |
-| SEARCH KMER longo (10+ bp) | awk | ✅ R2 (high sel) | ✅ R2 | ⬜ | — |
+| SEARCH KMER longo (10+ bp) | awk | ✅ R2 (high sel) | ✅ R2 | ✅ (T5: 1164 MB) | — |
 | SEARCH KMER longo | vg find | ⬜ | ⬜ | ⬜ | ⬜ |
 
 #### §2.2.4 Ingestão (build do índice)
@@ -355,6 +355,35 @@ em **<1s**, com variabilidade 10× menor (σ=2% vs 9%).
 | GGQL WHERE name="1" (name_index) | 1,092 ms | ±34 | — |
 | awk linear scan length | 1,601 ms | ±193 | — |
 | **GGQL 2.0× ± 0.14 mais rápido que awk** | | | 🏆 |
+
+#### Bloco 5 — Memory peak (T5)
+
+Capturado via `/usr/bin/time -v`, 3 runs por query (T5), mediana de RSS.
+Baseline ~1.16 GB = `.idx` + FM-Index residente em memória (mmap). Queries
+que iteram todos os nodes/edges sobem o pico transiente.
+
+| Operação | RSS mediano | Δ acima do baseline (1164 MB) |
+|---|---:|---:|
+| GGQL FIND TIP | 1,166 MB | +2 MB |
+| GGQL FIND PATH | 1,164 MB | baseline |
+| GGQL SEARCH KMER (high sel) | 1,164 MB | baseline |
+| GGQL SEARCH KMER (low sel ~68k hits) | 1,209 MB | +45 MB |
+| GGQL FIND REPEAT | 1,251 MB | +87 MB |
+| GGQL FIND BUBBLE | 1,275 MB | +111 MB |
+| GGQL WHERE length>1000 | 1,192 MB | +28 MB |
+| GGQL WHERE name="1" | 1,257 MB | +93 MB |
+| GGQL WHERE length AND | 1,194 MB | +30 MB |
+| GGQL WHERE length >= 32 | 1,440 MB | +276 MB |
+| **GGQL WHERE length OR** | **1,880 MB** | **+716 MB** |
+| GGQL FIND EDGE | 1,739 MB | +575 MB |
+| **GGQL FIND SEGMENT** | **2,011 MB** | **+847 MB** |
+
+**Estabilidade**: 3 runs com variação ≤1 MB em todas as queries — RSS é
+determinístico. σ/mediana < 0.1%, melhor que o tempo (∼2-5%).
+
+**Insight**: as queries de "iterate-all" (SEGMENT, EDGE) consomem ~700-900 MB
+extra para construir o conjunto de IDs e popular `flat[]` com até 4.3M rows.
+Queries seletivas (TIP, PATH, KMER high-sel) ficam no baseline.
 
 ### §4.2 HPRC year-1 chm13 (85M nodes, warm cache)
 
