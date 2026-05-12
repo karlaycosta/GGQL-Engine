@@ -1,0 +1,42 @@
+── Q: FIND SEGMENT ──
+│  · índice carregado  /tmp/drb1_asan.gfa.idx
+5581
+── Q: FIND EDGE ──
+│  · índice carregado  /tmp/drb1_asan.gfa.idx
+7448
+── Q: FIND PATH ──
+│  · índice carregado  /tmp/drb1_asan.gfa.idx
+12
+── Q: FIND BUBBLE ──
+│  · índice carregado  /tmp/drb1_asan.gfa.idx
+1516
+── Q: FIND TIP ──
+│  · índice carregado  /tmp/drb1_asan.gfa.idx
+5
+── Q: FIND REPEAT ──
+│  · índice carregado  /tmp/drb1_asan.gfa.idx
+1761
+── Q: FIND SEGMENT WHERE length > 30 LIMIT 5 ──
+│  · índice carregado  /tmp/drb1_asan.gfa.idx
+167
+── Q: FIND SEGMENT WHERE length > 30 AND length < 32 ──
+│  · índice carregado  /tmp/drb1_asan.gfa.idx
+5
+── Q: FIND SEGMENT WHERE length = 1 OR length > 30 ──
+│  · índice carregado  /tmp/drb1_asan.gfa.idx
+3670
+── Q: FIND PATH WHERE crosses("gi|157702218:147985-163915") ──
+│  · índice carregado  /tmp/drb1_asan.gfa.idx
+12
+── Q: FIND SEGMENT WHERE contains_kmer("AAA") ──
+│  · índice carregado  /tmp/drb1_asan.gfa.idx
+314
+── Q: FIND SEGMENT RETURN id, name, length LIMIT 3 ──
+│  · índice carregado  /tmp/drb1_asan.gfa.idx
+5581
+── Q: FIND PATH RETURN name LIMIT 5 OFFSET 2 ──
+│  · índice carregado  /tmp/drb1_asan.gfa.idx
+12
+── Q: SEARCH KMER "ACGT" ──
+│  · índice carregado  /tmp/drb1_asan.gfa.idx
+7

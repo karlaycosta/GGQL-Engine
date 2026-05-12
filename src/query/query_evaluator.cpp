@@ -30,7 +30,7 @@ template <typename T>
         case Operator::NEQ: return l != r;
         case Operator::GT:  return l > r;
         case Operator::LT:  return l < r;
-        case Operator::GEQ: return l >= r;
+        case Operator::GEQ: return l >= r;  // L-V8.3 fix (2026-05-12): era `l > r`
         case Operator::LEQ: return l <= r;
     }
     std::unreachable();

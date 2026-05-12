@@ -1,0 +1,70 @@
+Test project /home/karlay/Documentos/c++/ggql_engine/build-asan
+      Start 12: test_query_crosses
+      Start 13: test_query_planner_idx
+ 1/14 Test #12: test_query_crosses ...............   Passed   46.06 sec
+      Start 14: test_ffi_query
+ 2/14 Test #14: test_ffi_query ...................   Passed   23.64 sec
+      Start  9: test_boophf
+ 3/14 Test  #9: test_boophf ......................   Passed    2.13 sec
+      Start  7: test_storage_csr
+ 4/14 Test  #7: test_storage_csr .................   Passed    0.20 sec
+      Start  6: test_ingestor_profiles
+ 5/14 Test  #6: test_ingestor_profiles ...........   Passed    0.37 sec
+      Start  5: test_ingestor_parse
+ 6/14 Test  #5: test_ingestor_parse ..............   Passed    0.07 sec
+      Start  4: test_ingestor_manifest
+ 7/14 Test  #4: test_ingestor_manifest ...........   Passed    0.07 sec
+      Start  3: test_ingestor_binpack
+ 8/14 Test  #3: test_ingestor_binpack ............   Passed    0.06 sec
+      Start  2: test_ingestor_remap
+ 9/14 Test  #2: test_ingestor_remap ..............   Passed    0.05 sec
+      Start  1: test_ingestor_tokenize
+10/14 Test  #1: test_ingestor_tokenize ...........   Passed    0.05 sec
+      Start 11: test_query_planner
+11/14 Test #11: test_query_planner ...............   Passed    0.04 sec
+      Start  8: test_storage_fm_index
+12/14 Test  #8: test_storage_fm_index ............   Passed    0.02 sec
+      Start 10: test_grammar
+13/14 Test #10: test_grammar .....................   Passed    0.02 sec
+14/14 Test #13: test_query_planner_idx ...........***Failed  691.69 sec
+│  · índice carregado  /home/karlay/Documentos/c++/ggql_engine/data/chm13_subset_100w.gfa.idx
+Loaded: 4294760 nodes · 100 paths · FM=yes (idx=/home/karlay/Documentos/c++/ggql_engine/data/chm13_subset_100w.gfa.idx)
+[ OK ] FIND SEGMENT LIMIT 5 → 5 rows
+[ OK ] FIND SEGMENT tem colunas default
+[ OK ] WHERE length > 10000 LIMIT 3
+[ OK ] total_hits >= row_count
+[ OK ] RETURN id, name, length seleciona 3 colunas
+[ OK ] RETURN * (B-8) — todas as colunas em 1 row
+[ OK ] FIND EDGE LIMIT 10
+[ OK ] FIND EDGE 3 cols default
+[ OK ] FIND PATH LIMIT 3
+[ OK ] WHERE node_count > 0
+[ OK ] FIND BUBBLE parseia
+[ OK ] FIND BUBBLE: executa OU reporta snarls.bin ausente
+[ OK ] FIND TIP cols=3 (id,in,out)
+[ OK ] FIND REPEAT cols=3
+[ OK ] SEARCH KMER LIMIT 3
+[ OK ] SEARCH KMER LIMIT 3 OFFSET 1 (B-11)
+[ OK ] find segment limit 2 (lowercase)
+[ OK ] (OR) AND simples — execução real
+[ OK ] comentário entre cláusulas
+[ OK ] FIND EDGE conteúdo consistente com topo.out_neighbors (B-V2 regression)
+[ OK ] R13.A boundary: count(!=X) == count(>X) + count(<X)
+[FAIL] R13.A boundary: count(>=X) == count(==X) + count(>X)
+[ OK ] R13.A boundary: count(<=X) == count(==X) + count(<X)
+[FAIL] R13.A boundary: count(>=X) > count(>X) quando count(==X)>0 (mata mut >=→>)
+[ OK ] R13.A boundary: count(<=X) > count(<X) quando count(==X)>0 (mata mut <=→<)
+[ OK ] R13.A.float boundary: count(depth<0.0) == 0
+[ OK ] R13.A.float boundary: count(>=0.0) == count(==0.0) + count(>0.0)
+[ OK ] R13.A.float boundary: count(<=0.0) == count(==0.0) + count(<0.0)
+
+=== 26 pass · 2 fail ===
+
+
+93% tests passed, 1 tests failed out of 14
+
+Total Test time (real) = 691.69 sec
+
+The following tests FAILED:
+	 13 - test_query_planner_idx (Failed)
+Errors while running CTest

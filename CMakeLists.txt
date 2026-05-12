@@ -199,3 +199,4 @@ target_link_libraries(ggql_ffi PRIVATE ggql_query)
 
 # ── Testes unitários do ingestor (ARCH-5) ────────────────────────────────────
 add_subdirectory(tests)
+
