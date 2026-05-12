@@ -1,6 +1,6 @@
 # GGQL Engine — Comparações com outras ferramentas
 
-> **Documento companion**: `paper/draft.md`
+> **Documento companion**: `docs/paper_draft.md`
 > **Última atualização**: 2026-05-11
 > **Propósito**: consolidar todas as comparações de **corretude**, **performance**,
 > **funcionalidade** e **recursos** entre GGQL Engine e ferramentas estabelecidas
