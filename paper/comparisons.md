@@ -18,42 +18,196 @@
 | **awk** | gawk 5.2.2 | GNU | C | Linear scan baseline |
 | **Python** | 3.12 + struct + set ops | Python Software Fdn | Python | Ground truth via set operations |
 
-Referenciadas mas não testadas diretamente:
+Estendendo cobertura — ferramentas a serem testadas (status de planejamento na §2):
 - **TileDB-VG** (tiledb-inc) — armazenamento distribuído de variation graphs
 - **odgi** (Garrison et al.) — operações eficientes em pangenome graphs
 - **minigraph** (lh3) — graph-based aligner
 
 ---
 
-## §2. Matriz de funcionalidades
+## §2. Matriz de funcionalidades e plano de testes
 
-Comparação **categórica** de capabilities oferecidas:
+### §2.1 Suporte categórico (capability matrix)
 
-| Funcionalidade | GGQL | vg | gfatools | odgi | TileDB-VG |
-|---|:-:|:-:|:-:|:-:|:-:|
-| **Linguagem declarativa (SQL-like)** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `FIND SEGMENT` | ✅ | via stats | ✅ stat | ✅ stats | ✅ |
-| `FIND EDGE` | ✅ | via stats | ✅ stat | ✅ stats | ✅ |
-| `FIND TIP` (in/out_degree=0) | ✅ | indireto | indireto | ✅ tips | indireto |
-| `FIND REPEAT` (out_degree≥2) | ✅ | ❌ direto | ❌ direto | indireto | ❌ direto |
-| `FIND BUBBLE / snarls` | ✅ Billi/SESE | ✅ integrated | ❌ | ✅ snarls | ❌ |
-| `FIND PATH` | ✅ | ✅ paths | ✅ | ✅ paths | ✅ |
-| `WHERE` clauses (compositional) | ✅ AND/OR/parens | ❌ | ❌ | ❌ | parcial |
-| `WHERE length op N` | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `WHERE depth op X` | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `WHERE crosses(path)` | ✅ | indireto | ❌ | ❌ | parcial |
-| `WHERE contains_kmer("ACGT")` | ✅ FM-Index | ✅ find | ❌ | ❌ | ✅ |
-| `SEARCH KMER "ACGT"` | ✅ FM-Index | ✅ find | ❌ | ❌ | ✅ |
-| `LIMIT N OFFSET M` (idempotente) | ✅ | ❌ | ❌ | ❌ | parcial |
-| `RETURN col1, col2, *` | ✅ | ❌ | ❌ | ❌ | parcial |
-| Profiles (pangenome/meta/asm/comp) | ✅ 4 modes | ❌ | ❌ | ❌ | ❌ |
-| Cross-platform | Linux x64 | Linux/Mac | Linux/Mac | Linux | Linux/Mac/Cloud |
-| Reprodutibilidade byte-exact | ✅ verificado (R1) | parcial | ✅ | ❌ documentado | ✅ documentado |
+`✅` suporta · `~` indireto/parcial · `❌` não suporta · `—` N/A para o tool
+
+| Funcionalidade | GGQL | vg | gfatools | awk | TileDB-VG | odgi | minigraph | Python |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| Linguagem declarativa SQL-like | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `FIND SEGMENT` count | ✅ | ✅ stats | ✅ stat | ✅ | ✅ | ✅ stats | ❌ | ✅ |
+| `FIND EDGE` count | ✅ | ✅ stats | ✅ stat | ✅ | ✅ | ✅ stats | ❌ | ✅ |
+| `FIND TIP` | ✅ | ~ | ~ | ✅ | ~ | ✅ tips | ❌ | ✅ |
+| `FIND REPEAT` | ✅ | ❌ | ❌ | ✅ | ❌ | ~ | ❌ | ✅ |
+| `FIND BUBBLE` (snarls) | ✅ Billi/SESE | ✅ integrated | ❌ | ❌ | ❌ | ✅ snarls | ❌ | ❌ |
+| `FIND PATH` | ✅ | ✅ paths | ✅ | ✅ | ✅ | ✅ paths | ❌ | ✅ |
+| `WHERE` compositional AND/OR/parens | ✅ | ❌ | ❌ | ✅ (script) | ~ | ❌ | ❌ | ✅ |
+| `WHERE length op N` | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| `WHERE depth op X` (float) | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| `WHERE name = "X"` | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| `WHERE crosses(P)` (set inter) | ✅ | ~ paths | ❌ | ✅ | ~ | ❌ | ❌ | ✅ |
+| `WHERE contains_kmer("ACGT")` | ✅ FM-Index | ✅ find | ❌ | ✅ slow | ✅ | ❌ | ✅ | ✅ slow |
+| `SEARCH KMER "ACGT"` | ✅ FM-Index | ✅ find | ❌ | ✅ slow | ✅ | ❌ | ✅ | ✅ slow |
+| `LIMIT N OFFSET M` idempotente | ✅ | ❌ | ❌ | ❌ | ~ | ❌ | ❌ | ❌ |
+| `RETURN col1, col2, *` | ✅ | ❌ | ❌ | ❌ | ~ | ❌ | ❌ | ❌ |
+| Profiles (4 ingest modes) | ✅ | ❌ | ❌ | — | ❌ | ❌ | ❌ | — |
+| Determinismo byte-exact | ✅ R1 | ~ | ✅ | — | ✅ | ❌ docs | ❌ docs | — |
+| Cross-platform | Linux x64 | Linux/Mac | Linux/Mac | qq UNIX | Linux/Mac/Cloud | Linux | Linux/Mac | qq |
 
 **Diferenciação chave de GGQL**:
-- Único com **linguagem declarativa** unificando primitivas de 3 tools (vg, gfatools, awk)
-- Único com **WHERE compositional** (AND/OR/parens com precedência SQL-padrão)
-- Único validado com **byte-exact reproducibility** ao nível de SHA256
+- Único com **linguagem declarativa** que unifica primitivas de 3 ferramentas
+- Único com **WHERE compositional** com precedência SQL-padrão
+- Único com **profiles configuráveis** (pangenome/metag/asm/comp)
+- Único com **determinismo byte-exact** verificado via SHA256
+
+---
+
+### §2.2 Plano de testes por dimensão
+
+Para cada (funcionalidade × ferramenta), marcamos status nas **4 métricas**:
+
+- **C** — Corretude (paridade exata vs GT externa, Δ=0 esperado)
+- **T** — Tempo de execução (mediana ± IQR via hyperfine)
+- **M** — Memória pico (RSS via `/usr/bin/time -v`)
+- **D** — Disco (.idx ou cache equivalente)
+
+Legenda de status:
+- `✅` executado, resultado em §3/§4/§5 deste doc
+- `🔄` em progresso
+- `⬜` a executar (TODO)
+- `—` N/A (tool não suporta a funcionalidade)
+- `❌` não-pertinente (tool não usa cache em disco / é stateless)
+
+#### §2.2.1 Queries estruturais (FIND SEGMENT/EDGE/TIP/REPEAT/BUBBLE/PATH)
+
+| Funcionalidade | Tool | C | T | M | D |
+|---|---|:-:|:-:|:-:|:-:|
+| FIND SEGMENT | vg | ✅ (DRB1) | ⬜ (DRB1) | ⬜ | ⬜ |
+| FIND SEGMENT | gfatools | ✅ (DRB1+chm13) | ⬜ | ⬜ | ⬜ |
+| FIND SEGMENT | awk | ✅ (todos tiers) | ✅ (R2 chm13) | ⬜ | — |
+| FIND SEGMENT | TileDB-VG | ⬜ | ⬜ | ⬜ | ⬜ |
+| FIND SEGMENT | odgi | ⬜ | ⬜ | ⬜ | ⬜ |
+| FIND SEGMENT | Python | ✅ (DRB1) | ⬜ | ⬜ | — |
+| FIND EDGE | vg | ✅ (DRB1) | ⬜ | ⬜ | ⬜ |
+| FIND EDGE | gfatools | ✅ (DRB1+chm13) | ⬜ | ⬜ | ⬜ |
+| FIND EDGE | awk | ✅ | ⬜ | ⬜ | — |
+| FIND EDGE | odgi | ⬜ | ⬜ | ⬜ | ⬜ |
+| FIND TIP | awk | ✅ (todos) | ⬜ | ⬜ | — |
+| FIND TIP | odgi tips | ⬜ | ⬜ | ⬜ | ⬜ |
+| FIND REPEAT | awk | ✅ (todos) | ⬜ | ⬜ | — |
+| **FIND BUBBLE** | **vg snarls** | **✅** (DRB1+chm13) | **✅** R2 (77×) | ⬜ | ⬜ |
+| FIND BUBBLE | odgi snarls | ⬜ | ⬜ | ⬜ | ⬜ |
+| FIND PATH | vg | ✅ (DRB1) | ⬜ | ⬜ | ⬜ |
+| FIND PATH | gfatools | ✅ (DRB1) | ⬜ | ⬜ | ⬜ |
+| FIND PATH | awk | ✅ (todos) | ⬜ | ⬜ | — |
+| FIND PATH | odgi paths | ⬜ | ⬜ | ⬜ | ⬜ |
+
+#### §2.2.2 Filtros WHERE
+
+| Funcionalidade | Tool | C | T | M | D |
+|---|---|:-:|:-:|:-:|:-:|
+| WHERE length op N | awk | ✅ (R3+R4+R5) | ✅ (R2 chm13 2×) | ⬜ | — |
+| WHERE length op N | Python | ✅ | ⬜ | ⬜ | — |
+| WHERE depth op X | awk | ✅ (Sprint 4 L-V1) | ⬜ | ⬜ | — |
+| WHERE depth op X | Python | ✅ | ⬜ | ⬜ | — |
+| WHERE name = X | awk | ✅ (R3) | ⬜ (R2 mediu) | ⬜ | — |
+| WHERE crosses(P) | Python set | ✅ (Sprint 5 + R9) | ⬜ | ⬜ | — |
+| WHERE crosses(P) | vg | ⬜ (vg find -p) | ⬜ | ⬜ | ⬜ |
+| WHERE contains_kmer | awk grep | ✅ (R2 chm13 1.7×) | ✅ R2 | ⬜ | — |
+| WHERE contains_kmer | vg find | ⬜ | ⬜ | ⬜ | ⬜ |
+| WHERE compositional AND | awk + Python | ✅ (R5: 14 casos) | ⬜ | ⬜ | — |
+| WHERE compositional OR | awk + Python | ✅ (R5) | ⬜ | ⬜ | — |
+| WHERE compositional parens | awk + Python | ✅ (R5) | ⬜ | ⬜ | — |
+
+#### §2.2.3 Sequence search
+
+| Funcionalidade | Tool | C | T | M | D |
+|---|---|:-:|:-:|:-:|:-:|
+| SEARCH KMER curto (4-8 bp) | awk | ✅ (R3+R11) | ✅ R2 (1.7×) | ⬜ | — |
+| SEARCH KMER curto | vg find | ⬜ | ⬜ | ⬜ | ⬜ |
+| SEARCH KMER curto | TileDB-VG | ⬜ | ⬜ | ⬜ | ⬜ |
+| SEARCH KMER curto | minigraph | ⬜ (sketch?) | ⬜ | ⬜ | ⬜ |
+| SEARCH KMER longo (10+ bp) | awk | ✅ R2 (high sel) | ✅ R2 | ⬜ | — |
+| SEARCH KMER longo | vg find | ⬜ | ⬜ | ⬜ | ⬜ |
+
+#### §2.2.4 Ingestão (build do índice)
+
+| Operação | Tool | C | T | M | D |
+|---|---|:-:|:-:|:-:|:-:|
+| Cold ingest (45 GB GFA HPRC) | GGQL bench_gbwt | ✅ (R10) | ✅ 22min | ✅ 14GB peak | ✅ 23GB |
+| Cold ingest HPRC | vg convert -p | ⬜ | ⬜ | ⬜ | ⬜ |
+| Cold ingest HPRC | odgi build | ⬜ | ⬜ | ⬜ | ⬜ |
+| Cold ingest HPRC | TileDB-VG | ⬜ | ⬜ | ⬜ | ⬜ |
+| Determinismo (run 2× → diff) | GGQL | ✅ R1 (3 datasets) | — | — | ✅ byte-exact |
+| Determinismo | vg | ⬜ | — | — | ⬜ |
+| Determinismo | odgi | ⬜ | — | — | ⬜ |
+
+#### §2.2.5 Pagination e RETURN content
+
+| Operação | Tool | C | T | M | D |
+|---|---|:-:|:-:|:-:|:-:|
+| LIMIT N idempotente | GGQL | ✅ R4 | ⬜ | ⬜ | — |
+| OFFSET M cobertura | GGQL | ✅ R4 (11/11) | ⬜ | ⬜ | — |
+| RETURN col específico | GGQL vs awk | ✅ R3 (6/6) | ⬜ | ⬜ | — |
+| RETURN * | GGQL | ✅ B-8 grammar | ⬜ | ⬜ | — |
+
+### §2.3 TODOs explícitos para fechar matriz
+
+**Prioridade ALTA — comparações faltantes para o paper**:
+
+| # | Tarefa | Esforço | Bloqueador |
+|---|---|---|---|
+| T1 | Tempo + RAM + Disk de **vg convert -p** em HPRC full (R10.bis) | 2-4 h | Nenhum |
+| T2 | Tempo + RAM de **vg snarls** em HPRC full (R10.bis) | 2-8 h | Nenhum |
+| T3 | Setup **odgi** + ingest HPRC + counts vs GGQL | 4-8 h | Build odgi |
+| T4 | Setup **TileDB-VG** + ingest + 3 queries vs GGQL | 1-2 dias | Setup complexo |
+| T5 | Memory peak via `/usr/bin/time -v` em todas queries R2 | 1 h | Re-rodar com flag |
+| T6 | Disk usage comparação: GGQL .idx vs vg .pg vs odgi .og em HPRC | 1 h | Após T1, T3 |
+
+**Prioridade MÉDIA — completude**:
+
+| # | Tarefa | Esforço |
+|---|---|---|
+| T7 | vg find como GT para SEARCH KMER (espera-se GGQL >100× mais rápido) | 2-4 h |
+| T8 | minigraph não tem queries diretas — confirmar exclusão da matriz | 30 min |
+| T9 | Memory peak em ingest HPRC full do GGQL com `/usr/bin/time -v` | 30 min (re-run) |
+| T10 | Comparar vg path -p (extrai paths) vs FIND PATH RETURN name | 1 h |
+
+**Prioridade BAIXA — só se tempo permitir**:
+
+| # | Tarefa | Esforço |
+|---|---|---|
+| T11 | Python set inter como baseline de tempo para crosses() (esperado GGQL >50×) | 2 h |
+| T12 | gfatools stat tempo + RAM em HPRC (paralelo ao GGQL FIND SEGMENT) | 1 h |
+| T13 | Comparar GFA → .idx vs → vg .pg → tamanho serializado | 1 h |
+
+### §2.4 Custo total estimado para fechar matriz completa
+
+| Prioridade | Itens | Esforço total |
+|---|---|---|
+| ALTA (T1-T6) | 6 itens | ~2-3 dias |
+| MÉDIA (T7-T10) | 4 itens | ~1 dia |
+| BAIXA (T11-T13) | 3 itens | ~0.5 dia |
+| **TOTAL** | **13 itens** | **~3.5-4.5 dias** |
+
+Após esse esforço, teríamos matriz **completamente preenchida** para o paper —
+nenhuma célula vazia, comparações justas em escala (HPRC full) e dimensões
+(C, T, M, D).
+
+---
+
+### §2.5 Critério para fechar (definição de "feito" por célula)
+
+Para uma célula `(funcionalidade × ferramenta × métrica)` ser marcada ✅:
+
+- **Corretude (C)**: GGQL vs ferramenta retornam o **mesmo conjunto** ou
+  diferença documentada com justificativa semântica. Δ=0 preferível; tolerância
+  ≤5 em FIND BUBBLE pela diferença Billi/SESE vs integrated.
+- **Tempo (T)**: medido via hyperfine 5 warmup + 10 medidas, **σ/mediana < 10%**
+  obrigatório. Hardware fixo (`tests/validation/r2_results/hardware.txt`).
+- **Memória (M)**: RSS pico via `/usr/bin/time -v` (ou ru_maxrss).
+  Captura único valor por run; mediana sobre 3 runs.
+- **Disco (D)**: `du -sh` do diretório .idx (ou equivalente da ferramenta).
+  Capturado após ingest completo.
 
 ---
 
