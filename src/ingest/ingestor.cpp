@@ -10,11 +10,10 @@
 #include "ggql/storage/snarl_decomposition.hpp"
 #include "ggql/utils.hpp"
 
-#include <gbwt/utils.h>  // ::gbwt::text_buffer_type, vector_type, ENDMARKER
-
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <gbwt/utils.h> // ::gbwt::text_buffer_type, vector_type, ENDMARKER
 
 #ifdef _OPENMP
     #include <omp.h>
@@ -300,8 +299,8 @@ bool GfaIngestorMmapParallel::parse_w_line(const char*& p, const char* end,
         return false;
     }
     path_name.clear();
-    fmt::format_to(std::back_inserter(path_name), "{}#{}#{}:{}-{}",
-                   tokens[0], tokens[1], tokens[2], tokens[3], tokens[4]);
+    fmt::format_to(std::back_inserter(path_name), "{}#{}#{}:{}-{}", tokens[0], tokens[1], tokens[2],
+                   tokens[3], tokens[4]);
     std::string_view walk = tokens[5];
     const char* wp = walk.data();
     const char* wend = wp + walk.size();
@@ -488,8 +487,8 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
             thr_gbwt_paths[t].resize(num_bins);
         }
     }
-    std::vector<TmpFileGuard> thr_tmp_guards(
-        static_cast<size_t>(num_threads) * (collect_paths ? num_bins : 0));
+    std::vector<TmpFileGuard> thr_tmp_guards(static_cast<size_t>(num_threads) *
+                                             (collect_paths ? num_bins : 0));
 
     if (collect_paths) {
         for (int t = 0; t < num_threads; ++t) {
@@ -504,15 +503,15 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
                     break;
                 }
                 ::close(tfd);
-                const size_t guard_idx =
-                    static_cast<size_t>(t) * num_bins + b;
+                const size_t guard_idx = static_cast<size_t>(t) * num_bins + b;
                 thr_tmp_guards[guard_idx].path = tpl;
                 thr_gbwt_paths[t][b] = tpl;
                 thr_gbwt_bufs[t][b] = std::make_unique<::gbwt::text_buffer_type>(
-                    tpl, std::ios::out, /*buffer_size=*/1024 * 1024,
-                    node_width_out);
+                    tpl, std::ios::out, /*buffer_size=*/1024 * 1024, node_width_out);
             }
-            if (!collect_paths) break;
+            if (!collect_paths) {
+                break;
+            }
         }
     }
 
@@ -764,19 +763,18 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
         for (size_t b = 0; b < num_bins; ++b) {
             for (int t = 0; t < num_threads; ++t) {
                 auto& names = thr_names[static_cast<size_t>(t)][b];
-                if (names.empty()) continue;
+                if (names.empty()) {
+                    continue;
+                }
                 PassadaDoisResult::GbwtGroup g;
                 if (bin_use_in_ram[b]) {
-                    g.in_ram_seqs =
-                        std::move(thr_in_ram[static_cast<size_t>(t)][b]);
+                    g.in_ram_seqs = std::move(thr_in_ram[static_cast<size_t>(t)][b]);
                 } else {
-                    const size_t guard_idx =
-                        static_cast<size_t>(t) * num_bins + b;
+                    const size_t guard_idx = static_cast<size_t>(t) * num_bins + b;
                     if (guard_idx < thr_tmp_guards.size()) {
                         g.tmp_path = thr_tmp_guards[guard_idx].release();
                     } else {
-                        g.tmp_path =
-                            std::move(thr_gbwt_paths[static_cast<size_t>(t)][b]);
+                        g.tmp_path = std::move(thr_gbwt_paths[static_cast<size_t>(t)][b]);
                     }
                 }
                 g.path_names = std::move(names);
@@ -1273,9 +1271,8 @@ IngestStatsParallel GfaIngestorMmapParallel::complete_with_snarls(
         res_.topology->save_snarls_only(cache_dir);
         stats.elapsed_save_s = sec(clock::now() - t_save0).count();
         if (verbose) {
-            cli::step_ok_end("FIND BUBBLE",
-                             fmt::format("{} snarls · {}", cli::format_count(count),
-                                         ggql::format_seconds(t_find_bubble)));
+            cli::step_ok_end("FIND BUBBLE", fmt::format("{} snarls · {}", cli::format_count(count),
+                                                        ggql::format_seconds(t_find_bubble)));
         }
     } catch (const std::exception& e) {
         if (verbose) {
@@ -1351,9 +1348,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::complet
     }
     const uint8_t node_width = pass2.node_width;
     const auto t_gb0 = clock::now();
-    auto gbwt_t = res_.topology->build_path_index_parallel(std::move(pass2.gbwt_groups),
-                                                            node_width,
-                                                            /*num_threads=*/1);
+    auto gbwt_t = res_.topology->build_path_index_parallel(std::move(pass2.gbwt_groups), node_width,
+                                                           /*num_threads=*/1);
     const auto t_gb1 = clock::now();
     stats.elapsed_gbwt_s = gbwt_t.wall_s;
     stats.gbwt_cpu_avg_s = gbwt_t.cpu_avg_s;
@@ -1406,9 +1402,8 @@ std::optional<IngestStatsParallel> GfaIngestorMmapParallel::try_cache_fast(
     const bool fm_ok = !build_fm_index || std::filesystem::exists(cache_dir + "/fm_index.bin");
     // gbwt_ok aceita o novo path_stores.bin OU o legacy gbwts.bin (migrado
     // on-the-fly em load()).
-    const bool gbwt_ok = !build_gbwt
-                          || std::filesystem::exists(cache_dir + "/path_stores.bin")
-                          || std::filesystem::exists(cache_dir + "/gbwts.bin");
+    const bool gbwt_ok = !build_gbwt || std::filesystem::exists(cache_dir + "/path_stores.bin") ||
+                         std::filesystem::exists(cache_dir + "/gbwts.bin");
     const bool snarls_ok = !build_snarls || std::filesystem::exists(cache_dir + "/snarls.bin");
 
     if (meta_ok && fm_ok && gbwt_ok && snarls_ok) {
@@ -1461,9 +1456,8 @@ std::optional<IngestStatsParallel> GfaIngestorMmapParallel::try_cache_hash(
     }
 
     const bool meta_ok = !save_metadata || std::filesystem::exists(cache_dir + "/metadata.bin");
-    const bool gbwt_ok = !build_gbwt
-                          || std::filesystem::exists(cache_dir + "/path_stores.bin")
-                          || std::filesystem::exists(cache_dir + "/gbwts.bin");
+    const bool gbwt_ok = !build_gbwt || std::filesystem::exists(cache_dir + "/path_stores.bin") ||
+                         std::filesystem::exists(cache_dir + "/gbwts.bin");
     const bool snarls_ok = !build_snarls || std::filesystem::exists(cache_dir + "/snarls.bin");
 
     if (meta_ok && gbwt_ok && snarls_ok) {
@@ -1532,8 +1526,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                                      ggql::format_seconds(sec(t_io1 - t0).count())));
         }
 
-        res_.mphf = std::make_unique<boophf_parallel_t>(pass1.keys.size(), pass1.keys, num_threads,
-                                                        gamma);
+        res_.mphf =
+            std::make_unique<boophf_parallel_t>(pass1.keys.size(), pass1.keys, num_threads, gamma);
         t_built = clock::now();
         if (verbose) {
             cli::step_ok("MPHF construído",
@@ -1653,12 +1647,13 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
         }
         auto t_fm0 = clock::now();
         GfaSequenceIndex fm_index;
-        fm_index.build(std::span<const char>(fm_seq_for_build.get(),
-                                             fm_seq_for_build_size),
+        fm_index.build(std::span<const char>(fm_seq_for_build.get(), fm_seq_for_build_size),
                        num_threads);
         fm_seq_for_build.reset();
         fm_seq_for_build_size = 0;
-        fm_index.save(cache_dir);
+        if (auto r = fm_index.save(cache_dir); !r) {
+            return std::unexpected(r.error());
+        }
         auto t_fm1 = clock::now();
         stats.elapsed_fm_index_s = sec(t_fm1 - t_fm0).count();
     }
@@ -1719,7 +1714,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                     const std::string new_path = old_path + ".vg";
                     ::gbwt::text_buffer_type in_buf(old_path, std::ios::in, 64u << 20, node_width);
                     ::gbwt::text_buffer_type out_buf(new_path, std::ios::out, 64u << 20,
-                                              new_node_width);
+                                                     new_node_width);
                     for (std::uint64_t val : in_buf) {
                         if (val == ::gbwt::ENDMARKER) {
                             out_buf.push_back(::gbwt::ENDMARKER);
@@ -1820,7 +1815,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                         // rápido que GBWT decompression). gbwt_encode_node garante que
                         // valores armazenados nunca colidem com ::gbwt::ENDMARKER (0).
                         ::gbwt::text_buffer_type buf(g.tmp_path, std::ios::in, size_t(64) << 20,
-                                              node_width);
+                                                     node_width);
                         uint32_t cur_nc = 0;
                         int64_t cur_bp = 0;
                         for (const std::uint64_t val : buf) {
@@ -1852,7 +1847,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
 
             auto t_gbwt0 = clock::now();
             auto gbwt_t = res_.topology->build_path_index_parallel(std::move(topo_groups),
-                                                                    node_width, num_threads);
+                                                                   node_width, num_threads);
             auto t_gbwt1 = clock::now();
 
             stats.elapsed_gbwt_s = gbwt_t.wall_s;
@@ -1905,11 +1900,10 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                 if (verbose) {
                     const double ps_s = sec(t_ps1 - t_ps0).count();
                     const std::string_view method = stats_from_ram
-                        ? "RAM+disco (pré-computado)"
-                        : "GBWT decompression (fallback)";
-                    cli::step_ok_end("Path stats",
-                                     cli::format_summary({method,
-                                                          cli::format_duration_loose(ps_s)}));
+                                                        ? "RAM+disco (pré-computado)"
+                                                        : "GBWT decompression (fallback)";
+                    cli::step_ok_end("Path stats", cli::format_summary(
+                                                       {method, cli::format_duration_loose(ps_s)}));
                 }
                 store_up.reset();
             }
@@ -1932,10 +1926,9 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
                 res_.topology->set_snarls(std::move(snarls));
                 stats.elapsed_snarls_s = sec(clock::now() - t_snarls0).count();
                 if (verbose) {
-                    cli::step_ok_end(
-                        "FIND BUBBLE",
-                        fmt::format("{} snarls · {}", cli::format_count(count),
-                                    ggql::format_seconds(stats.elapsed_snarls_s)));
+                    cli::step_ok_end("FIND BUBBLE",
+                                     fmt::format("{} snarls · {}", cli::format_count(count),
+                                                 ggql::format_seconds(stats.elapsed_snarls_s)));
                 }
             } catch (const std::exception& e) {
                 if (verbose) {
@@ -1953,7 +1946,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
         const auto t_save0 = clock::now();
         try {
             if (res_.topology) {
-                res_.topology->save(cache_dir);  // emite step_ok_end "índice salvo"
+                res_.topology->save(cache_dir); // emite step_ok_end "índice salvo"
             }
         } catch (const std::exception& e) {
             if (verbose) {

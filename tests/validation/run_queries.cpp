@@ -106,7 +106,7 @@ int main(int argc, char** argv) {
     bool topo_ok = false, fm_ok = false;
     try { topo.load(idx); topo_ok = true; } catch (...) {}
     try { meta.load(idx); } catch (...) {}
-    try { fm.load(idx);   fm_ok = true; } catch (...) {}
+    fm_ok = fm.load(idx).has_value() && fm.is_loaded();
 
     QueryPlanner planner(topo_ok ? &topo : nullptr, &meta, fm_ok ? &fm : nullptr);
 

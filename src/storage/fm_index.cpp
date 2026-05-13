@@ -14,10 +14,10 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <expected>
 #include <fstream>
 #include <fmt/core.h>
 #include <memory>
-#include <stdexcept>
 #ifdef _OPENMP
     #include <omp.h>
 #endif
@@ -218,8 +218,16 @@ void GfaSequenceIndex::build(std::span<const char> seq_chars, int num_threads) {
 
     using SaPair = std::pair<int64_t, int64_t>;
     std::vector<std::vector<SaPair>> thr_samples(static_cast<size_t>(nt));
-    const size_t est_per_thread =
-        static_cast<size_t>(N / SA_SAMPLE) / static_cast<size_t>(nt) + 1000;
+    // Cada sentinel '$' também vira amostra (ver is_sentinel abaixo). Em
+    // pangenomas com muitos segmentos os sentinelas podem dominar — ex.: HPRC
+    // 85M sentinelas vs 100M samples regulares. Sem essa folga, thr_samples
+    // re-alocava O(log) vezes durante o BWT scan paralelo.
+    const size_t regular_per_thread = static_cast<size_t>(N / SA_SAMPLE)
+                                      / static_cast<size_t>(nt);
+    const size_t sentinel_upper     = freq[0] > 0
+        ? (static_cast<size_t>(freq[0]) / static_cast<size_t>(nt) + 1024)
+        : 1024;
+    const size_t est_per_thread = regular_per_thread + sentinel_upper;
     for (auto& v : thr_samples) { v.reserve(est_per_thread); }
 
 #ifdef _OPENMP
@@ -313,25 +321,68 @@ void GfaSequenceIndex::build(std::span<const char> seq_chars, int num_threads) {
     N_ = static_cast<uint64_t>(N);
 
     // ── Tabela Occ: 2 passes paralelos ──────────────────────────────────────
+    // Orçamento de progresso: Pass 1 = 60% (masks, dominante), Pass 2 = 40%
+    // (counts + prefix sum + occ fill). Ratear evita o efeito visual de
+    // "100% Occ" ainda processando dezenas de segundos.
     const size_t num_blocks = (static_cast<size_t>(N) + 63) / 64;
     blocks_.assign(num_blocks, OccBlock{});
 
+    const size_t pass1_budget = static_cast<size_t>(N) * 60 / 100;
+    const size_t pass2_budget = static_cast<size_t>(N) - pass1_budget;
     ggql::ProgressTracker tracker_occ(static_cast<size_t>(N), "FM-Index Occ", true);
 
-    // Pass 1: máscaras (cada bloco é independente)
+    // Pass 1: máscaras (cada bloco é independente). Agregação por thread —
+    // 2 MB chunks em vez de 64 chars para evitar 53M atomics em HPRC.
+    constexpr size_t kProgressChunk = 2 * 1024 * 1024;
 #ifdef _OPENMP
-    #pragma omp parallel for schedule(static) num_threads(nt)
-#endif
-    for (size_t blk = 0; blk < num_blocks; ++blk) {
-        const size_t base = blk * 64;
-        const size_t end = std::min(base + 64, static_cast<size_t>(N));
-        uint64_t masks[8] = {0};
-        for (size_t i = base; i < end; ++i) {
-            masks[bwt_[i]] |= (1ULL << (i - base));
+    #pragma omp parallel num_threads(nt)
+    {
+        size_t local_progress = 0;
+    #pragma omp for schedule(static) nowait
+        for (size_t blk = 0; blk < num_blocks; ++blk) {
+            const size_t base = blk * 64;
+            const size_t end = std::min(base + 64, static_cast<size_t>(N));
+            uint64_t masks[8] = {0};
+            for (size_t i = base; i < end; ++i) {
+                masks[bwt_[i]] |= (1ULL << (i - base));
+            }
+            blocks_[blk].mask = std::to_array(masks);
+            local_progress += (end - base);
+            if (local_progress >= kProgressChunk) {
+                tracker_occ.add_progress(local_progress * pass1_budget
+                                         / static_cast<size_t>(N));
+                local_progress = 0;
+            }
         }
-        blocks_[blk].mask = std::to_array(masks);
-        tracker_occ.add_progress(end - base);
+        if (local_progress > 0) {
+            tracker_occ.add_progress(local_progress * pass1_budget
+                                     / static_cast<size_t>(N));
+        }
     }
+#else
+    {
+        size_t local_progress = 0;
+        for (size_t blk = 0; blk < num_blocks; ++blk) {
+            const size_t base = blk * 64;
+            const size_t end = std::min(base + 64, static_cast<size_t>(N));
+            uint64_t masks[8] = {0};
+            for (size_t i = base; i < end; ++i) {
+                masks[bwt_[i]] |= (1ULL << (i - base));
+            }
+            blocks_[blk].mask = std::to_array(masks);
+            local_progress += (end - base);
+            if (local_progress >= kProgressChunk) {
+                tracker_occ.add_progress(local_progress * pass1_budget
+                                         / static_cast<size_t>(N));
+                local_progress = 0;
+            }
+        }
+        if (local_progress > 0) {
+            tracker_occ.add_progress(local_progress * pass1_budget
+                                     / static_cast<size_t>(N));
+        }
+    }
+#endif
 
     // Pass 2a: cada thread acumula contagens do seu range de blocos
     std::vector<std::array<uint64_t, 8>> thr_counts(
@@ -378,6 +429,9 @@ void GfaSequenceIndex::build(std::span<const char> seq_chars, int num_threads) {
         }
     }
 
+    // Fechamento do orçamento de Pass 2 (count+prefix+fill são contabilizados
+    // como bloco único no final — todos têm complexidade O(num_blocks)).
+    tracker_occ.add_progress(pass2_budget);
     tracker_occ.finish();
 
     const auto t2 = clock::now();
@@ -415,13 +469,14 @@ uint64_t GfaSequenceIndex::compute_payload_hash() const noexcept {
 
 // ── save ─────────────────────────────────────────────────────────────────────
 
-void GfaSequenceIndex::save(const std::string& dir) const {
-    if (N_ == 0) { return; }
+std::expected<void, std::string>
+GfaSequenceIndex::save(const std::string& dir) const {
+    if (N_ == 0) { return {}; }
 
     std::ofstream out(dir + "/fm_index.bin", std::ios::binary);
     if (!out) {
-        throw std::runtime_error("FM-Index: não foi possível abrir " + dir +
-                                 "/fm_index.bin para escrita");
+        return std::unexpected(
+            "FM-Index: não foi possível abrir " + dir + "/fm_index.bin para escrita");
     }
 
     out.write(reinterpret_cast<const char*>(&kMagicV8), sizeof(kMagicV8));
@@ -448,83 +503,95 @@ void GfaSequenceIndex::save(const std::string& dir) const {
     const uint64_t hash = compute_payload_hash();
     out.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
     if (!out) {
-        throw std::runtime_error("FM-Index: falha de I/O ao escrever fm_index.bin");
+        return std::unexpected(
+            "FM-Index: falha de I/O ao escrever " + dir + "/fm_index.bin");
     }
+    return {};
 }
 
 // ── load ─────────────────────────────────────────────────────────────────────
 
-void GfaSequenceIndex::load(const std::string& dir) {
+std::expected<void, std::string>
+GfaSequenceIndex::load(const std::string& dir) {
     std::ifstream in(dir + "/fm_index.bin", std::ios::binary);
-    if (!in) { return; }
+    if (!in) { return {}; }   // arquivo ausente: silencioso, caller checa is_loaded()
 
-    auto fail = [&](const char* msg) {
+    // B1: reset completo de TODAS as estruturas em fail (incluindo
+    // sampled_bv_/sampled_rank_ que o código anterior deixava parcialmente
+    // inicializadas — invariante "fail = estado vazio" violada).
+    auto fail = [&](const char* msg) -> std::unexpected<std::string> {
         N_ = 0;
         bwt_.clear();
+        bwt_.shrink_to_fit();
         sampled_vals_.clear();
+        sampled_vals_.shrink_to_fit();
         blocks_.clear();
-        throw std::runtime_error(std::string("FM-Index corrompido (") + msg + "): " +
-                                 dir + "/fm_index.bin");
+        blocks_.shrink_to_fit();
+        sampled_bv_ = sdsl::bit_vector{};
+        sdsl::util::clear(sampled_rank_);
+        return std::unexpected(fmt::format(
+            "FM-Index corrompido ({}): {}/fm_index.bin", msg, dir));
     };
 
     uint64_t magic = 0;
     in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-    if (!in) { fail("header truncado"); }
+    if (!in) { return fail("header truncado"); }
     if (magic != kMagicV8) {
-        // Formato antigo (V7 ou anterior) — caller regenera. Log para o
-        // usuário saber que o cache vai ser reconstruído.
+        // Formato antigo (V≤7) — caller regenera. Log para o usuário saber
+        // que o cache vai ser reconstruído.
         cli::note(fmt::format("FM-Index magic obsoleto em {}/fm_index.bin "
                               "(esperado V8) — reingest necessário", dir));
         N_ = 0;
-        return;
+        return {};
     }
 
     in.read(reinterpret_cast<char*>(&N_), sizeof(N_));
-    if (!in) { fail("N_ truncado"); }
-    if (N_ == 0 || N_ > (64ULL << 30)) { fail("N_ fora de limites"); }
+    if (!in) { return fail("N_ truncado"); }
+    if (N_ == 0 || N_ > (64ULL << 30)) { return fail("N_ fora de limites"); }
 
     in.read(reinterpret_cast<char*>(C_), sizeof(C_));
-    if (!in) { fail("C_ truncado"); }
+    if (!in) { return fail("C_ truncado"); }
 
     bwt_.resize(N_);
     in.read(reinterpret_cast<char*>(bwt_.data()), static_cast<std::streamsize>(N_));
-    if (!in) { fail("BWT truncado"); }
+    if (!in) { return fail("BWT truncado"); }
 
     uint64_t bv_size = 0;
     in.read(reinterpret_cast<char*>(&bv_size), sizeof(bv_size));
-    if (!in) { fail("bv_size truncado"); }
-    if (bv_size != N_) { fail("bv_size != N_"); }
+    if (!in) { return fail("bv_size truncado"); }
+    if (bv_size != N_) { return fail("bv_size != N_"); }
     const uint64_t bv_words = (bv_size + 63) / 64;
     sampled_bv_ = sdsl::bit_vector(bv_size, 0);
     in.read(reinterpret_cast<char*>(sampled_bv_.data()),
             static_cast<std::streamsize>(bv_words * 8));
-    if (!in) { fail("bitmap truncado"); }
+    if (!in) { return fail("bitmap truncado"); }
 
     uint64_t nsamp = 0;
     in.read(reinterpret_cast<char*>(&nsamp), sizeof(nsamp));
-    if (!in) { fail("nsamp truncado"); }
-    if (nsamp > N_) { fail("nsamp fora de limites"); }
+    if (!in) { return fail("nsamp truncado"); }
+    if (nsamp > N_) { return fail("nsamp fora de limites"); }
     sampled_vals_.resize(nsamp);
     in.read(reinterpret_cast<char*>(sampled_vals_.data()),
             static_cast<std::streamsize>(nsamp * sizeof(int64_t)));
-    if (!in) { fail("sampled_vals truncado"); }
+    if (!in) { return fail("sampled_vals truncado"); }
 
     sdsl::util::init_support(sampled_rank_, &sampled_bv_);
 
     uint64_t nblocks = 0;
     in.read(reinterpret_cast<char*>(&nblocks), sizeof(nblocks));
-    if (!in) { fail("nblocks truncado"); }
+    if (!in) { return fail("nblocks truncado"); }
     const uint64_t expected_blocks = (N_ + 63) / 64;
-    if (nblocks != expected_blocks) { fail("nblocks inconsistente com N_"); }
+    if (nblocks != expected_blocks) { return fail("nblocks inconsistente com N_"); }
     blocks_.resize(nblocks);
     in.read(reinterpret_cast<char*>(blocks_.data()),
             static_cast<std::streamsize>(nblocks * sizeof(OccBlock)));
-    if (!in) { fail("blocks truncado"); }
+    if (!in) { return fail("blocks truncado"); }
 
     uint64_t stored_hash = 0;
     in.read(reinterpret_cast<char*>(&stored_hash), sizeof(stored_hash));
-    if (!in) { fail("hash truncado"); }
-    if (stored_hash != compute_payload_hash()) { fail("hash XXH64 divergente"); }
+    if (!in) { return fail("hash truncado"); }
+    if (stored_hash != compute_payload_hash()) { return fail("hash XXH64 divergente"); }
+    return {};
 }
 
 } // namespace ggql

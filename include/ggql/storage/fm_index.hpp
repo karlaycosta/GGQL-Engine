@@ -2,7 +2,7 @@
 
 // FM-Index sobre sequências de segmentos GFA.
 //
-// Design (v5 — bitmap-sampled locate):
+// Design (V8 — bitmap-sampled locate, hash cobre mask+occ):
 //   - Pré-mapeamento paralelo: input ASCII → alfabeto denso 0..6 antes de libsais.
 //   - libsais64_omp: SA completo temporário; BWT e amostras em scan paralelo.
 //   - SA allocation: make_unique_for_overwrite — evita 8N bytes de zero-init.
@@ -10,19 +10,25 @@
 //   - r = SA_SAMPLE = 32 (potência de 2).
 //   - get_occ(): popcount em chunk de 64 bits — O(1) por chamada.
 //   - locate(): bitmap O(1) via sdsl::bit_vector + rank_support_v.
-//   - OccBlock{occ,mask}: AoS — 128 bytes contíguos.
-//   - CHAR_MAP[256]: lookup table constexpr — O(1), zero branches.
+//   - OccBlock: 128 bytes = occ[8] (64 B) seguido de mask[8] (64 B);
+//     `get_occ(c)` toca 2 cache lines (uma por campo).
+//   - MAP[256] em fm_index.cpp: lookup table constexpr — O(1), zero branches.
 //
-// Complexidade:
-//   Build RAM pico : 11N bytes (seq N + mapped N + SA 8N + BWT N)
-//   fm_index.bin   : N (BWT) + N/8 (bitmap) + S×8 (vals) + (N/64)×128 (Occ)
-//   Busca locate   : O(r) com bitmap O(1) e get_occ O(1) via popcount
+// Complexidade (N = soma das sequências, ~N/4 amostras com SA_SAMPLE=32):
+//   Build RAM pico : ~12N bytes durante libsais64 (input N + mapped N +
+//                    SA 8N + buffers internos ~2-3N). Cai para ~3,4N após
+//                    sa_buf.reset(): bwt N + sampled_bv N/8 + vals ~N/4 +
+//                    blocks 2N.
+//   fm_index.bin   : N (BWT) + N/8 (bitmap) + ~N/4 (vals) + 2N (Occ)
+//                    = ~3,4N total.
+//   Busca locate   : O(r) com bitmap O(1) e get_occ O(1) via popcount.
 //
 // Implementação: src/storage/fm_index.cpp
 // (inclui os headers pesados — libsais64, omp, chrono, fstream, fmt)
 
 #include <array>
 #include <cstdint>
+#include <expected>
 #include <span>
 #include <string>
 #include <string_view>
@@ -49,31 +55,40 @@ class GfaSequenceIndex {
     // Retorna vazio para k-mers com '$', caracteres fora de {A,C,G,N,T} ou N_==0.
     [[nodiscard]] std::vector<uint64_t> search_kmer(std::string_view kmer) const;
 
-    // Hash XXH64 sobre N_, C_, bwt_, bitmap, sampled_vals_ e occ fields.
+    // Hash XXH64 sobre N_, C_, bwt_, bitmap, sampled_vals_ e blocos
+    // (mask + occ — V8). Cobertura total ≈ 3,4N bytes.
     [[nodiscard]] uint64_t compute_payload_hash() const noexcept;
 
-    // Serialização em disco (lança std::runtime_error em falha de I/O).
-    void save(const std::string& dir) const;
+    // Serialização em disco. Retorna mensagem de erro em falha de I/O.
+    [[nodiscard]] std::expected<void, std::string>
+    save(const std::string& dir) const;
 
-    // Deserialização. Arquivo ausente: silencioso (N_=0). Arquivo corrompido:
-    // lança std::runtime_error — o chamador decide rebuild vs. abort.
-    void load(const std::string& dir);
+    // Deserialização. Convenção:
+    //   arquivo ausente → sucesso, N_=0 (caller checa is_loaded())
+    //   magic obsoleto  → sucesso, N_=0 (caller regenera)
+    //   corrompido      → std::unexpected com diagnóstico
+    [[nodiscard]] std::expected<void, std::string>
+    load(const std::string& dir);
 
     [[nodiscard]] bool is_loaded() const noexcept { return N_ > 0; }
 
-    // Layout v7 em disco (fm_index.bin):
-    //   magic (8B)=FMIDX7 | N_ (8B) | C_[8] (64B)
+    // Layout V8 em disco (fm_index.bin):
+    //   magic (8B)=FMIDX8 | N_ (8B) | C_[8] (64B)
     //   bwt_ (N B)
     //   bv_size (8B) | sampled_bv_ raw (ceil(N/64)*8 B)
     //   nsamp (8B) | sampled_vals_ (nsamp*8 B)
-    //   nblocks (8B) | blocks_ (nblocks*128 B, AoS: occ[8]+mask[8] interleaved)
-    //   xxh64_hash (8B)
-    // V8 (2026-05-04): hash agora cobre blocks_[].mask além de occ.
-    // Caches V7 são rejeitados pelo load() — caller regenera.
+    //   nblocks (8B) | blocks_ (nblocks * 128 B, cada bloco = occ[8] (64 B)
+    //                            seguido de mask[8] (64 B); AoS por bloco)
+    //   xxh64_hash (8B) — cobre BWT + bitmap + vals + blocks (mask+occ)
+    // Caches V≤7 são rejeitados pelo load() — caller regenera.
     static constexpr uint64_t kMagicV8 = 0x464D49445838ULL; // "FMIDX8"
 
   private:
-    // AoS de 128 bytes = 2 cache lines (occ e mask sempre carregados juntos).
+    // OccBlock = 128 B / bloco BWT de 64 posições.
+    // Layout: occ[8] (64 B = 1 cache line, contagens acumuladas) seguido
+    // de mask[8] (64 B = 1 cache line, bitmask por símbolo). get_occ(c)
+    // toca ambas as cache lines: occ[c] para a base + popcount(mask[c]
+    // & lomask) para o delta dentro do bloco.
     struct OccBlock {
         std::array<uint64_t, 8> occ;  // contagem acumulada até o bloco
         std::array<uint64_t, 8> mask; // bitmask 64 posições por símbolo

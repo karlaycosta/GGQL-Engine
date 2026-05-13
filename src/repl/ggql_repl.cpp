@@ -23,6 +23,7 @@
 #include <filesystem>
 #include <fmt/color.h>
 #include <fmt/core.h>
+#include <ggql/cli/console.hpp>
 #include <ggql/ingest/ingestor.hpp>
 #include <ggql/ingest/metadata_store.hpp>
 #include <ggql/ingest/profile.hpp>
@@ -210,7 +211,9 @@ static void load_gfa(Session& sess, const std::string& gfa_path, int threads,
 
     // Carrega para acesso na memória
     sess.metadata.load(idx_path);
-    sess.fm_index.load(idx_path);
+    if (auto r = sess.fm_index.load(idx_path); !r) {
+        cli::note(fmt::format("FM-Index ignorado: {}", r.error()));
+    }
 
     sess.planner =
         std::make_unique<QueryPlanner>(sess.ingestor.topology(), &sess.metadata,
@@ -464,7 +467,9 @@ int main(int argc, char** argv) {
         // Apenas IDX em cache — sem topologia CSR no momento a não ser que lida num save state
         sess.idx_path = args.idx_path;
         sess.metadata.load(args.idx_path);
-        sess.fm_index.load(args.idx_path);
+        if (auto r = sess.fm_index.load(args.idx_path); !r) {
+            cli::note(fmt::format("FM-Index ignorado: {}", r.error()));
+        }
         sess.planner = std::make_unique<QueryPlanner>(
             nullptr, &sess.metadata, sess.fm_index.is_loaded() ? &sess.fm_index : nullptr);
         fmt::println("  Banco de Metadados carregado: {}", args.idx_path);
