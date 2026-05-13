@@ -15,6 +15,7 @@
 #include <bit>
 #include <chrono>
 #include <expected>
+#include <filesystem>
 #include <fstream>
 #include <fmt/core.h>
 #include <memory>
@@ -119,34 +120,62 @@ uint64_t GfaSequenceIndex::locate(int64_t i) const noexcept {
     return kInvalidPos;
 }
 
-// ── search_kmer ──────────────────────────────────────────────────────────────
-// Backward search. Retorna offsets (0-based) na string concatenada.
-// Rejeita silenciosamente k-mers vazios, com '$' ou com caracteres fora de
-// {A,C,G,N,T} — nesses casos não há match possível.
+// ── backward_search ──────────────────────────────────────────────────────────
+// Retorna {L, R} do intervalo BWT após o backward search. L > R ⇒ sem matches.
+// Compartilhado por count_kmer() e search_kmer().
 
-std::vector<uint64_t> GfaSequenceIndex::search_kmer(std::string_view kmer) const {
-    if (kmer.empty() || N_ == 0) { return {}; }
+GfaSequenceIndex::BwtRange
+GfaSequenceIndex::backward_search(std::string_view kmer) const noexcept {
+    if (kmer.empty() || N_ == 0) { return {1, 0}; }
     for (const char ch : kmer) {
         const uint8_t m = map_char(ch);
-        if (m == 0 || m == 6) { return {}; } // 0='$' (sentinel), 6=char inválido
+        if (m == 0 || m == 6) { return {1, 0}; }   // '$' (sentinel) ou inválido
     }
-
     int64_t L = 0;
     int64_t R = static_cast<int64_t>(N_) - 1;
-
     for (int i = static_cast<int>(kmer.size()) - 1; i >= 0; --i) {
         const uint8_t c = map_char(kmer[i]);
-        // get_occ_pair funde as duas chamadas em 1 cache miss quando L-1
-        // e R caem no mesmo OccBlock.
+        // get_occ_pair funde as duas chamadas em 1 cache miss quando L-1 e R
+        // caem no mesmo OccBlock.
         const auto [occL, occR] = get_occ_pair(c, L - 1, R);
         L = static_cast<int64_t>(C_[c]) + static_cast<int64_t>(occL);
         R = static_cast<int64_t>(C_[c]) + static_cast<int64_t>(occR) - 1;
-        if (L > R) { return {}; }
+        if (L > R) { return {1, 0}; }
     }
+    return {L, R};
+}
+
+// ── count_kmer ───────────────────────────────────────────────────────────────
+// O(|kmer|) backward search sem materializar offsets. Para apenas contar.
+
+uint64_t GfaSequenceIndex::count_kmer(std::string_view kmer) const noexcept {
+    const auto [L, R] = backward_search(kmer);
+    if (L > R) { return 0; }
+    return static_cast<uint64_t>(R - L + 1);
+}
+
+// ── search_kmer ──────────────────────────────────────────────────────────────
+// Backward search + locate. Retorna offsets (0-based) na string concatenada.
+// Rejeita silenciosamente k-mers vazios, com '$' ou com caracteres fora de
+// {A,C,G,N,T} — nesses casos não há match possível.
+//
+// max_results=0 (default) materializa todos os hits — perigoso para k-mers
+// curtos: SEARCH KMER "A" em pangenoma humano resulta em ~N/4 hits (centenas
+// de M de offsets, GB de RAM). Caller que não pode garantir k>=8 deve passar
+// max_results explícito ou usar count_kmer() primeiro.
+
+std::vector<uint64_t>
+GfaSequenceIndex::search_kmer(std::string_view kmer, size_t max_results) const {
+    const auto [L, R] = backward_search(kmer);
+    if (L > R) { return {}; }
+
+    const size_t total_hits = static_cast<size_t>(R - L + 1);
+    const size_t cap = (max_results == 0) ? total_hits
+                                          : std::min(total_hits, max_results);
 
     std::vector<uint64_t> offsets;
-    offsets.reserve(static_cast<size_t>(R - L + 1));
-    for (int64_t i = L; i <= R; ++i) {
+    offsets.reserve(cap);
+    for (int64_t i = L; i <= R && offsets.size() < cap; ++i) {
         const uint64_t pos = locate(i);
         if (pos != kInvalidPos) {
             offsets.push_back(pos);
@@ -519,7 +548,9 @@ GfaSequenceIndex::load(const std::string& dir) {
     // B1: reset completo de TODAS as estruturas em fail (incluindo
     // sampled_bv_/sampled_rank_ que o código anterior deixava parcialmente
     // inicializadas — invariante "fail = estado vazio" violada).
-    auto fail = [&](const char* msg) -> std::unexpected<std::string> {
+    // msg é std::string (não const char*) para aceitar fmt::format dinâmico
+    // sem dangling c_str() de temporária.
+    auto fail = [&](std::string msg) -> std::unexpected<std::string> {
         N_ = 0;
         bwt_.clear();
         bwt_.shrink_to_fit();
@@ -548,6 +579,33 @@ GfaSequenceIndex::load(const std::string& dir) {
     in.read(reinterpret_cast<char*>(&N_), sizeof(N_));
     if (!in) { return fail("N_ truncado"); }
     if (N_ == 0 || N_ > (64ULL << 30)) { return fail("N_ fora de limites"); }
+
+    // Cross-check defensivo (evita OOM antes do hash se header bit-flipped):
+    // se file_size << tamanho mínimo implícito por N_, o cache está corrompido.
+    // Lower bound: header (16 B) + C_ (64 B) + bwt (N) + bv_size (8 B) + bv raw
+    // (ceil(N/64)*8) + nsamp (8 B) + sampled_vals (≥0) + nblocks (8 B) +
+    // blocks (ceil(N/64) * 128 B) + hash (8 B).
+    {
+        std::error_code ec;
+        const auto file_sz = std::filesystem::file_size(dir + "/fm_index.bin", ec);
+        if (!ec) {
+            const uint64_t bv_words   = (N_ + 63) / 64;
+            const uint64_t nblocks    = (N_ + 63) / 64;
+            const uint64_t expected_min = sizeof(uint64_t)              // magic
+                                          + sizeof(N_)
+                                          + sizeof(C_)
+                                          + N_                          // bwt
+                                          + sizeof(uint64_t) + bv_words * 8
+                                          + sizeof(uint64_t)            // nsamp
+                                          + sizeof(uint64_t)            // nblocks
+                                          + nblocks * sizeof(OccBlock)
+                                          + sizeof(uint64_t);           // hash
+            if (file_sz < expected_min) {
+                return fail(fmt::format("file_size={} < mínimo implícito {} para N_={}",
+                                        file_sz, expected_min, N_));
+            }
+        }
+    }
 
     in.read(reinterpret_cast<char*>(C_), sizeof(C_));
     if (!in) { return fail("C_ truncado"); }

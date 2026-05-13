@@ -53,7 +53,19 @@ class GfaSequenceIndex {
 
     // Backward search sobre BWT. Retorna offsets (0-based) na string concatenada.
     // Retorna vazio para k-mers com '$', caracteres fora de {A,C,G,N,T} ou N_==0.
-    [[nodiscard]] std::vector<uint64_t> search_kmer(std::string_view kmer) const;
+    //
+    // max_results: limite duro de offsets materializados (0 = ilimitado).
+    //   Use sempre que k-mer pode ter alto recall (ex.: k=1 em pangenoma
+    //   causa ~25% × N matches → centenas de milhões de locate() + alocação
+    //   gigante). Para apenas contar sem localizar, use count_kmer().
+    [[nodiscard]] std::vector<uint64_t>
+    search_kmer(std::string_view kmer, size_t max_results = 0) const;
+
+    // Apenas conta ocorrências (R - L + 1 do backward search), sem chamar
+    // locate() para cada hit. O(|k-mer|) — milhões de vezes mais barato
+    // que search_kmer quando o objetivo é só "quantos hits?".
+    // Retorna 0 para k-mers inválidos (mesmo critério de search_kmer).
+    [[nodiscard]] uint64_t count_kmer(std::string_view kmer) const noexcept;
 
     // Hash XXH64 sobre N_, C_, bwt_, bitmap, sampled_vals_ e blocos
     // (mask + occ — V8). Cobertura total ≈ 3,4N bytes.
@@ -104,6 +116,12 @@ class GfaSequenceIndex {
     [[nodiscard]] std::pair<uint64_t, uint64_t>
     get_occ_pair(uint8_t c, int64_t idxL, int64_t idxR) const noexcept;
     [[nodiscard]] uint64_t locate(int64_t i) const noexcept;
+
+    // Backward search interno — retorna {L, R} com L > R sinalizando "0 hits"
+    // (k-mer vazio, com '$', char inválido, ou simplesmente não encontrado).
+    // Compartilhado por count_kmer() e search_kmer().
+    struct BwtRange { int64_t L; int64_t R; };
+    [[nodiscard]] BwtRange backward_search(std::string_view kmer) const noexcept;
 
     uint64_t N_ = 0;
     uint64_t C_[8] = {0};
