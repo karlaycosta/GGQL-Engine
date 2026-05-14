@@ -287,10 +287,12 @@ GgqlEngineHandle ggql_engine_load(const char* cache_dir) {
     try {
         auto* w = new GgqlEngineWrapper();
         w->metadata.load(std::string(cache_dir));
-        // FM-Index opcional — perfis sem build_fm_index não terão arquivo.
-        // load() com expected: ausência é success+is_loaded()==false; corrupção
-        // retorna std::unexpected — silenciamos aqui (caller pode reingestar).
-        (void)w->fm_index.load(std::string(cache_dir));
+        // I-2: FM-Index opcional. Ausência → is_loaded()==false silencioso.
+        // Corrupção → preserva diagnóstico em engine_create_error (caller
+        // pode reingerir após inspecionar a mensagem).
+        if (auto r = w->fm_index.load(std::string(cache_dir)); !r) {
+            engine_create_error = std::string("fm_index: ") + r.error();
+        }
         // Topology opcional — perfis sem build_topology não terão E_*/ef_*.
         // Se ausente, FIND TIP/EDGE/PATH/BUBBLE/REPEAT (e crosses no PATH)
         // retornarão erro semântico via planner; SEGMENT/SEARCH KMER continuam.
@@ -324,9 +326,12 @@ GgqlEngineHandle ggql_engine_create(GgqlIngestorHandle ingestor, const char* cac
         auto* w = new GgqlEngineWrapper();
         w->topology = static_cast<GfaIngestorMmapParallel*>(ingestor)->topology();
         w->metadata.load(std::string(cache_dir));
-        // FM-Index opcional — corrupção tratada como ausência (regenerar
-        // não é responsabilidade desta entry point).
-        (void)w->fm_index.load(std::string(cache_dir));
+        // I-2: FM-Index opcional. Ausência silenciosa; corrupção preserva
+        // diagnóstico em engine_create_error sem abortar — o caller pode
+        // re-ingerir após inspecionar a mensagem.
+        if (auto r = w->fm_index.load(std::string(cache_dir)); !r) {
+            engine_create_error = std::string("fm_index: ") + r.error();
+        }
         w->planner = std::make_unique<QueryPlanner>(
             w->topology,
             &w->metadata,

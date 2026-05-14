@@ -58,6 +58,7 @@ Estendendo cobertura — ferramentas a serem testadas (status de planejamento na
 | `RETURN col1, col2, *` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Profiles (4 ingest modes) | ✅ | ❌ | ❌ | — | ❌ | — |
 | Determinismo byte-exact | ✅ R1 | ~ | ✅ | — | ❌ docs | — |
+| Robustez adversarial (Fase 5) | ✅ pós I-1 fix | — | — | ✅ | — | — |
 | Cross-platform | Linux x64 | Linux/Mac | Linux/Mac | qq UNIX | Linux | qq |
 
 > **TileDB-VG** e **minigraph** estão fora desta matriz (paradigmas diferentes
@@ -303,6 +304,38 @@ Cobrindo:
 - 5 tiers de escala (4 nós → 85 milhões)
 - 4 profiles de ingestão (pangenome, metagenomics, assembly, comparative)
 
+### §3.6 Tier C-CHM13-464 — paridade em 1,35M segs (Fase 2, 2026-05-13)
+
+Dataset: `data/comparisons/CHM13-464.gfa` (3,75 GiB, 1,35M segs, 0 paths).
+Smoke completo `smoke_chm13.sh` em 15 cells (F03/F11/F12 fora — sem paths
+nem `dp:f:`).
+
+**13/15 paridades exatas** vs awk/vg:
+
+| Bloco | F# | Δ counts | Notas |
+|---|---|---:|---|
+| Estruturais | F01 segs | 0 | 1.345.611 nodes |
+| Estruturais | F02 edges | 0 | 1.836.470 links |
+| Estruturais | F04 tips | 0 | — |
+| Estruturais | F05 repeat | 0 | `out_degree > 1` (def GGQL) |
+| Estruturais | F06 bubble | 369K vs vg 14K | semantic diff (§6.1, ~26× razão) |
+| k-mer | F07 SEARCH KMER | dedup vs raw | 286K segs vs awk 2,9M occ (§6.5) |
+| WHERE | F09a/b/c length | 0 | 3 boundary checks |
+| WHERE | F10 name | 0 | killer feature (1.442× speedup) |
+| WHERE | F13a/b kmer | 0 | k≤8 lento (§7.4 L4) |
+| Comp | F14a/b AND/OR | 0 | precedência SQL |
+| Page | F15 LIMIT/OFFSET | 0 | idempotente |
+| Page | F16 RETURN | 0 | projection dinâmica |
+
+**Ferramentas excluídas neste tier**:
+- **odgi** ⊘: `Error parsing segment 's1': stol` — não aceita IDs
+  alfanuméricos. **Diferencial qualitativo do GGQL/vg** (ambos fazem
+  remap automático).
+- **vg snarls** ⊘ na contagem F06 (não roda em escala HPRC).
+
+**Caveat**: `GGQL_MAX_TOTAL_HITS=10000000` necessário (default 1M
+trunca). Comportamento intencional, documentado em §7.4.
+
 ---
 
 ## §4. Performance — medições estatisticamente rigorosas (R2)
@@ -398,6 +431,36 @@ Para HPRC full, vg snarls foi estimado em **horas** (extrapolando o 77× speedup
 de chm13_100w: 16.9s × 77 ≈ 1,300s ~ 22 min, mas vg snarls escala não-linear).
 Cross-check direto em escala fica como **R10.bis** (futuro).
 
+### §4.3 Warm queries WHERE/SEARCH KMER (Fase 3, 2026-05-13)
+
+Bench warm com load do `.idx` amortizado (`stdin --batch`). Speedups
+medidos com hyperfine 1.18 (5 warmup + 10 medições).
+
+| F# | Query | DRB1-3123 (430 KiB) | CHM13-464 (3,75 GiB) | Baseline |
+|---|---|---:|---:|---|
+| F09 | `WHERE length op N` | **36×** (60µs vs 2.181µs) | **23×** (120ms vs 2.750ms) | awk |
+| F10 | `WHERE name = "X"` | 295× (10µs vs 2.953µs) | **1.442× ⚡⚡** (1,9ms vs 2.740ms) | awk |
+| F12 | `WHERE crosses(P)` | **15×** (4ms vs 60ms) | N/A (sem paths) | Python set inter |
+| F13a | `SEARCH KMER` k≥10 (raro) | 7,7× | **43-53× ⚡** | awk |
+| F13b | `SEARCH KMER` k≤8 (>100K hits) | OK | **0,35-0,48× ❌** (8,5s vs 4,1s) | awk |
+| F14 | AND/OR/parens | 3,5× | **18×** | awk pipe |
+
+**Insight metodológico** (R3): load do `.idx` (~10s em CHM13-464 16 GiB)
+**deve ser amortizado** em workloads reais. Bench 1-shot mostrava awk
+vencendo; re-bench com N queries warm via stdin batch revelou GGQL
+dominando 18-1442×.
+
+**Achados**:
+1. **F10 é killer feature** (hash O(1) vs scan O(N) — 1.442× speedup).
+2. **F13 threshold**: GGQL ganha quando `hits < ~10K`. Para k-mer comum
+   (k≤8, >100K hits), `locate()` em milhões de ocorrências domina cache
+   misses no FM-Index — perde para awk linear scan.
+3. **Mitigação de F13 comum proposta** (I-4, roadmap):
+   `vector + sort + unique` → `unordered_set` em
+   `query_planner.cpp:621` (~25% speedup grátis).
+4. **Tradeoff honesto**: GGQL é projetado para workloads de **muitas
+   queries** após load amortizado. One-shot batch favorece awk.
+
 ---
 
 ## §5. Uso de recursos
@@ -425,12 +488,30 @@ Cross-check direto em escala fica como **R10.bis** (futuro).
 | vg .pg | não medido (estimado >50 GB) | — |
 
 Detalhes dos 16 arquivos do GGQL .idx para HPRC:
-- `fm_index.bin`: 12 GB (52% do total — FM-Index é o componente mais pesado)
-- `metadata_seqs.bin`: 3.9 GB
-- `path_stores.bin`: 2.0 GB
-- `metadata_strings.bin`: 1.3 GB
-- `snarls.bin`: 660 MB
-- Demais (CSR, MPHF, remap, length_index): ~3 GB total
+- `fm_index.bin`: 12,17 GiB (51,5% do total — FM-Index é o componente mais pesado)
+- `metadata_seqs.bin`: 4,09 GiB
+- `path_stores.bin`: 1,89 GiB
+- `metadata_strings.bin`: 1,35 GiB
+- `snarls.bin`: 660 MiB
+- Demais (CSR, MPHF, remap, length_index): ~3 GiB total
+
+#### Tabela mestra 3-tier (D, Fase 6 §5.7)
+
+Convenção: GiB/MiB/KiB binários (1 GiB = 2³⁰ B). Medições reais com
+`du -sb` em 2026-05-14.
+
+| Dataset | GFA | GGQL `.idx` | odgi `.og` | vg `.pg` |
+|---|---:|---:|---:|---:|
+| DRB1-3123 (sem paths, tier_b) | 429,66 KiB | **581,99 KiB** (135,46%) | — | — |
+| DRB1-3123 (com paths) | 429,66 KiB | 697,25 KiB (162,28%) | 971,67 KiB | 395,08 KiB |
+| chm13_subset_100w (4,3M segs) | 632,89 MiB | **1.368,70 MiB** (216,27%) | — | — |
+| CHM13-464 (1,35M segs) | 3,75 GiB | **15,72 GiB** (419,47%) | ⊘ stol | 1,55 GiB |
+| HPRC (85,3M segs) | **45,68 GiB** | **21,99 GiB** (48,13%) | **14,97 GiB** (32,77%) | ⊘ T1 OOM |
+
+**Ratio `.idx`/GFA é não-monotônico** (135% → 216% → 419% → 48%): em
+datasets pequenos overhead estrutural domina; CHM13-464 sem paths paga
+FM-Index puro; em HPRC redundância de sequência permite compressão.
+**51,5% do `.idx` HPRC é FM-Index** — entrega SEARCH KMER em ms.
 
 ### §5.2 Tempo de construção
 
@@ -439,10 +520,42 @@ Detalhes dos 16 arquivos do GGQL .idx para HPRC:
 | Tier A tiny | <0.1 s | <1 s |
 | Tier B DRB1 | 0.06 s | ~5 s |
 | Tier C chm13_100w (4.3M) | **25 s** (8 threads) | ~horas |
-| Tier C-full HPRC (85M) | **22 min** (12 threads) | ~horas (estimado) |
+| Tier C-full HPRC (85M) | **17:39** (8 threads) | ⊘ T1 OOM em 62 GiB |
 
-vg ingest exact times not measured (would require parallel runs); informal
-observation from `vg convert` em chm13_100w foi >100s.
+vg ingest exact times: vg convert em HPRC abortado por OOM-kill após
+1h41min em máquina de 62 GiB. Reproduzível com máquina ≥128 GiB ou
+bisseção por chromosome (§7.1).
+
+### §5.3 Multi-thread scaling (S, Fase 4, 2026-05-14)
+
+Dimensão **S** (escalabilidade com `-t N`). Hardware: Intel i7-9750H
+(6c/12t), DDR4 dual-channel.
+
+**Dataset CHM13-464** (varredura completa):
+
+| Tool | -t 1 | -t 4 | -t 8 | Speedup t=8/1 | Eficiência |
+|---|---:|---:|---:|---:|---:|
+| **GGQL** ⚡ | 6:22 | 3:06 | 3:14 | **1,97×** | 25% (t=8); 51% (t=4) |
+| vg convert | 8:11 | — | 8:10 | **1,00× placebo** | — |
+| odgi | ⊘ stol (IDs alfanum) | — | — | — | — |
+
+**Dataset HPRC** (ponto único t=8):
+
+| Tool | CPU% efetivo | Speedup extrapolado | Comentário |
+|---|---:|---:|---|
+| GGQL T9 | **596%** (5,96× efetivo) | ~6× | gBWT (fase 5) domina |
+| odgi T3.b | 113% | ~1,13× | single-thread bound |
+
+**Achados**:
+1. **GGQL é única tool com paralelismo real**: vg `--threads` é placebo
+   no convert (-t 1 ≈ -t 8 = 8:10, 99% CPU constante).
+2. **FM-Index domina 93%** do pipeline em CHM13-464 → memory-bandwidth
+   bound em `libsais64_omp`. Sweet spot **-t 4** nesta máquina.
+3. **Lei de Amdahl prevê 6,7×** (99,4% paralelo); gap é hardware (DDR4
+   dual-channel + SMT inefetivo), não algoritmo. Em servidor multi-socket
+   esperaria 4-6×.
+4. **Em HPRC**, gBWT (fase 5, ~7 min) escala melhor que FM-Index — puxa
+   o CPU% efetivo para 596% em t=8.
 
 ---
 
@@ -491,6 +604,29 @@ em DRB1 (12 P-lines), chm13_100w (100 W-lines), HPRC (25 P + 28,759 W = 28,784).
 | Python `and`/`or` | `(A and B) or C` |
 
 R5 corrigiu o bug; GGQL agora segue SQL/Python standard.
+
+### §6.5 SEARCH KMER: dedup-por-seg vs ocorrências brutas
+
+| Tool | Semântica | Counts em CHM13-464 (k=8 "AAAAAAAA") |
+|---|---|---:|
+| **GGQL** `SEARCH KMER` | Dedupa por **segmento** (`SELECT DISTINCT seg WHERE seg.seq LIKE ...`) | 286.696 segs |
+| `vg find -G` | Conta **ocorrências brutas** (cada match no texto) | (não comparável) |
+| `awk` linear scan | Conta **ocorrências brutas** | 2.938.966 occ |
+
+GGQL trata o resultado como conjunto de segmentos contendo o k-mer
+(semântica SQL `DISTINCT`). Implementação em `query_planner.cpp:624-625`
+(`std::sort + std::unique` por seg_id). Equivale a:
+
+```sql
+SELECT DISTINCT seg FROM segments WHERE seg.seq LIKE '%AAAAAAAA%'
+```
+
+**Implicação para o paper**: a comparação `GGQL vs awk` em counts brutos
+não é semanticamente válida. Quando o usuário pergunta "quantos segs
+contêm este k-mer?", GGQL responde diretamente; quando pergunta
+"quantas vezes este k-mer aparece?", awk/vg são mais apropriados. Para
+contar ocorrências, GGQL precisaria expor `COUNT(*) GROUP BY position`
+(roadmap).
 
 ---
 
@@ -552,35 +688,80 @@ comparados rigorosamente nas §3-§5.
 
 ### §7.3 Caveats nas medições
 
-- Hardware único (laptop Intel 12-core, 62 GB RAM) — números podem variar
-  em workstation/cluster.
+- Hardware único (laptop Intel i7-9750H 6c/12t, 62 GiB RAM, DDR4
+  dual-channel) — números podem variar em workstation/cluster.
 - Cache OS quente em todas as queries warm — primeiro hit pós-boot seria
   mais lento.
 - Sem swapping considerado — todos os datasets cabem em RAM.
+
+### §7.4 Limitações honestas L1-L9 (Fase 6 §3.2)
+
+Pontos onde GGQL **perde** ou tem **gap conhecido**, com magnitude e
+mitigação:
+
+| ID | Perda | Magnitude | Mitigação proposta |
+|---|---|---|---|
+| **L1** | RSS ingest GGQL | 41,4 GiB CHM13-464 / 50,71 GiB HPRC | chunkar FM-Index por componente (~2 GiB pico) — roadmap |
+| **L2** | `.idx` 47% maior que `.og` (HPRC) | 21,99 GiB vs 14,97 GiB | aceitar — FM-Index entrega SEARCH KMER que odgi não tem |
+| **L3** | F13 k-mer comum (k≤8) lento | era 0,35-0,48× vs awk | ✅ **mitigado 2026-05-14** — fix I-4 (`vector→unordered_set` em `query_planner.cpp:641-655`); re-bench pendente |
+| **L4** | DoS por k-mer curto (k≤3) | era timeout > minutos | ✅ **resolvido 2026-05-14** — fix I-1 em `query_planner.cpp:616` (`max_results` propagado; agora 9,22 s/12,3 GiB) |
+| **L5** | Single-platform (Linux x64) | vg/odgi rodam macOS, ARM | roadmap; portar BMI2/AVX |
+| **L6** | Speedup paraleliza só 1,97× | em laptop i7-9750H DDR4 dual-channel | em servidor multi-socket esperado 4-6× |
+| **L7** | Sem alignment (substitui vg align) | — | posicionamento: ferramentas complementares |
+| **L8** | Sem subgraph extraction (`vg find -x`) | — | roadmap |
+| **L9** | IDs IUPAC silenciados em SEARCH KMER | era 0 hits sem warning | ✅ **resolvido 2026-05-14** — fix I-3: chars fora de {A,C,G,N,T} retornam `std::unexpected` com mensagem explícita |
+
+**Nota sobre L4 (DoS)**: era o único bug que um usuário hostil podia
+disparar trivialmente. Fix aplicado pré-paper (2026-05-14). Detalhes
+em `tests/comparisons/fase5_adversarial_results.md` §2 e `docs/correcoes_fase6_vs_plano.md` §6.
 
 ---
 
 ## §8. Resumo executivo (para abstract)
 
-**GGQL Engine vs estado-da-arte**:
+**GGQL Engine vs estado-da-arte** (consolidado das Fases 1-6, 2026-05-14):
 
-1. **Corretude**: paridade exata em 145+ cross-checks contra vg, gfatools,
-   awk — verificada em escala de 4 nós a 85 milhões de nós.
+1. **Corretude** (Fases 1-2): paridade exata em 145+ cross-checks contra
+   vg, gfatools, awk — verificada de 4 nós a 85 milhões de nós (HPRC).
+   13/15 paridades em CHM13-464 (1,35M segs); 10/12 em DRB1-3123 (com
+   bug `<>` no PEG descoberto e corrigido).
 
-2. **Performance**:
-   - **77× faster than vg snarls** na operação flagship (FIND BUBBLE)
-   - 2× faster than awk em filtros WHERE
-   - 1.7× faster than awk em SEARCH KMER
+2. **Performance** (Fases 3-4):
+   - **77× faster than vg snarls** na operação flagship (FIND BUBBLE).
+   - **F10 lookup hash 1.442× speedup** em CHM13-464 (killer feature).
+   - **F09 range filter 23×**, **F12 crosses 15×** (CrossesCache),
+     **F13 k-mer raro 43-53×**, **F14 composição 18×**.
+   - Honestidade: F13 k-mer comum (k≤8, >100K hits) **perde 0,35-0,48×**
+     para awk — sweet spot é k≥10 com hits raros.
+   - **Único com paralelismo real no ingest**: GGQL 1,97× speedup t=8,
+     596% CPU efetivo em HPRC; vg `--threads` é placebo (1,00×).
 
-3. **Espaço**: índice 47% do GFA original em HPRC (49 GB → 23 GB);
-   profile mínimo (`assembly`) cabe em 54% do GFA.
+3. **Espaço** (D, 3-tier): índice GGQL 48,1% do GFA em HPRC (45,68 GiB →
+   21,99 GiB). Ratio não-monotônico (135% → 216% → 419% → 48%):
+   overhead estrutural em datasets pequenos; redundância de seq permite
+   compressão em pangenoma. **51,5% do `.idx` HPRC é FM-Index** —
+   componente que odgi não tem.
 
-4. **Funcionalidade única**: SQL-like declarative interface + WHERE
-   compositional (AND/OR/parens com precedência) — nenhuma outra ferramenta
-   no espaço pangenome oferece isso.
+4. **Robustez** (Fase 5, A): único trabalho na área que reporta cenários
+   adversariais. DoS por k-mer curto (`SEARCH KMER "A"`) **identificado
+   e corrigido** pré-paper (Fase 7, 2026-05-14): de 4 min/13 GiB para
+   9,22 s/12,3 GiB em CHM13-464. Robustez gracioso a `.idx` corrompido
+   e sintaxe maliciosa.
 
-5. **Reprodutibilidade**: byte-exact (verificada via SHA256 em 3 datasets),
-   benchmarks com IQR documentado, CI público + Docker.
+5. **Funcionalidade única** (capability matrix §2.1):
+   - SQL-like declarative + WHERE compositional (AND/OR/parens, SQL).
+   - 4 profiles configuráveis (pangenome/metag/asm/comp).
+   - `LIMIT N OFFSET M` idempotente + `RETURN col, *` projeção dinâmica.
+   - Determinismo byte-exact (SHA256 verificado em R1).
+   - Nenhuma outra ferramenta oferece isso.
+
+6. **Reprodutibilidade**: byte-exact (SHA256 em 3 datasets), benchmarks
+   com IQR documentado (hyperfine 1.18, 5 warmup + 10 medições),
+   `du -sb` exato em todos os `.idx` reportados, CI público + Docker.
+
+7. **Score agregado de funcionalidades**:
+   GGQL **20/20 (100%)** > Python 14/20 (70%) > awk 12/20 (60%) >
+   vg 11/20 (55%) > odgi 7/20 (35%) > gfatools 4/20 (20%).
 
 ---
 

@@ -150,6 +150,16 @@ int main() {
         // OFFSET (B-11) — apenas verifica que parseia e executa
         auto r2 = run(planner, R"(SEARCH KMER "ACGT" LIMIT 3 OFFSET 1)");
         check(r2.row_count <= 3,                                 "SEARCH KMER LIMIT 3 OFFSET 1 (B-11)");
+
+        // I-1 (DoS) regression: SEARCH KMER "A" com LIMIT pequeno deve
+        // completar rapidamente sem materializar ~25% × N offsets. Antes do
+        // fix em query_planner.cpp:616, este teste ocupava ~GiB de RAM e
+        // levava minutos em datasets pangenômicos. A asserção é só "completou
+        // dentro do LIMIT" — o tempo real é validado por outros benchmarks.
+        auto r_dos = run(planner, R"(SEARCH KMER "A" LIMIT 10)");
+        check(r_dos.row_count <= 10,                             "I-1: SEARCH KMER \"A\" LIMIT 10 cap (DoS regression)");
+        auto r_dos2 = run(planner, R"(SEARCH KMER "AA" LIMIT 5)");
+        check(r_dos2.row_count <= 5,                             "I-1: SEARCH KMER \"AA\" LIMIT 5 cap");
     } else {
         std::printf("  skip SEARCH KMER (FM-Index ausente)\n");
     }

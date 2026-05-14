@@ -22,6 +22,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 
 namespace ggql {
@@ -613,16 +614,45 @@ QueryPlanner::execute_search_kmer(const SearchKmerQuery& q) const {
         return std::unexpected{"SEARCH KMER requer FM-Index e MetadataStore instanciados"};
     }
 
-    auto offsets = seq_index_->search_kmer(q.kmer);
-    std::vector<uint64_t> ids;
-    ids.reserve(offsets.size());
-    for (uint64_t pos : offsets) {
-        if (auto id = metadata_->segment_id_from_offset(pos)) {
-            ids.push_back(*id);
+    // I-3: rejeita IUPAC ambíguos (R/Y/M/K/B/D/H/V/W/S) e qualquer char
+    // fora de {A,C,G,N,T}. O FM-Index silencia esses k-mers (0 hits),
+    // confundindo bioinformatas acostumados com consenso ambíguo.
+    // Mensagem clara > 0 hits silencioso.
+    for (const char c : q.kmer) {
+        const char up = (c >= 'a' && c <= 'z') ? static_cast<char>(c - 32) : c;
+        if (up != 'A' && up != 'C' && up != 'G' && up != 'N' && up != 'T') {
+            return std::unexpected{
+                std::string("SEARCH KMER: caractere '") + c +
+                "' inválido. Apenas {A,C,G,N,T} aceitos — IUPAC ambíguos "
+                "(R/Y/M/K/B/D/H/V/W/S) não são expandidos."
+            };
         }
     }
+
+    // I-1 (DoS): propaga max_results ao FM-Index. Sem isso, k-mer com alto
+    // recall (k≤3 em pangenoma → ~25% × N matches) materializa centenas de
+    // milhões de offsets antes da paginação. Boost 16× compensa o dedup
+    // por-seg posterior (std::unique abaixo).
+    // Roadmap: count_kmer() + warning quando hits >> limit (UX).
+    constexpr size_t kKmerDedupBoost = 16;
+    const size_t max_results = q.limit.has_value()
+        ? std::min(static_cast<size_t>(*q.limit) * kKmerDedupBoost,
+                   size_t{kSafetyHardLimit})
+        : size_t{kSafetyHardLimit};
+    auto offsets = seq_index_->search_kmer(q.kmer, max_results);
+    // I-4: dedup via unordered_set é O(N) vs O(N log N) do sort+unique.
+    // Em k-mer comum (>100K offsets no mesmo seg), dedupa antes de alocar
+    // vetor final — ~25% speedup grátis sem mudar semântica. Sort final
+    // preserva determinismo da iteração (hash do unordered é não-estável).
+    std::unordered_set<uint64_t> id_set;
+    id_set.reserve(offsets.size());
+    for (uint64_t pos : offsets) {
+        if (auto id = metadata_->segment_id_from_offset(pos)) {
+            id_set.insert(*id);
+        }
+    }
+    std::vector<uint64_t> ids(id_set.begin(), id_set.end());
     std::sort(ids.begin(), ids.end());
-    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
 
     auto cols = detail::resolve_return_fields(q.return_fields, detail::kSegmentColumns);
     const size_t ncols = cols.size();

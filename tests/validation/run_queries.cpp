@@ -24,11 +24,22 @@
 
 using namespace ggql;
 
+// 2026-05-13: emite diagnóstico no stderr em parse/exec error (Fase 1
+// descobriu que silenciar `nullopt` mascarava bugs de parser — ex.: bug
+// `<>` retornava 0 sem warning). Fase 2+ exigem honestidade do batch.
 static size_t run_count(const QueryPlanner& planner, const std::string& q) {
     auto ast = grammar::parse_ggql(q);
-    if (!ast) { return 0; }
+    if (!ast) {
+        std::fprintf(stderr, "[parse error] %s: %s\n",
+                     q.c_str(), ast.error().c_str());
+        return 0;
+    }
     auto res = planner.execute(*ast);
-    if (!res) { return 0; }
+    if (!res) {
+        std::fprintf(stderr, "[plan error] %s: %s\n",
+                     q.c_str(), res.error().c_str());
+        return 0;
+    }
     return res->total_hits;
 }
 
@@ -38,12 +49,14 @@ static size_t run_count(const QueryPlanner& planner, const std::string& q) {
 static int run_rows(const QueryPlanner& planner, const std::string& q) {
     auto ast = grammar::parse_ggql(q);
     if (!ast) {
-        std::fprintf(stderr, "parse error\n");
+        std::fprintf(stderr, "[parse error] %s: %s\n",
+                     q.c_str(), ast.error().c_str());
         return 1;
     }
     auto res = planner.execute(*ast);
     if (!res) {
-        std::fprintf(stderr, "exec error: %s\n", res.error().c_str());
+        std::fprintf(stderr, "[plan error] %s: %s\n",
+                     q.c_str(), res.error().c_str());
         return 1;
     }
     const auto& r = *res;
@@ -104,9 +117,31 @@ int main(int argc, char** argv) {
     GfaMetadataStore meta;
     GfaSequenceIndex fm;
     bool topo_ok = false, fm_ok = false;
-    try { topo.load(idx); topo_ok = true; } catch (...) {}
-    try { meta.load(idx); } catch (...) {}
-    fm_ok = fm.load(idx).has_value() && fm.is_loaded();
+    // I-2: metadata é OBRIGATÓRIO (passado direto ao planner). Falha aqui
+    // mascararia corrupção, retornando counts errados sem warning.
+    try {
+        meta.load(idx);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[load error] meta: %s\n", e.what());
+        return 1;
+    }
+    // I-2: topology é opcional (planner cai em fallback se ausente).
+    // Diferencia falha real (warning) de "perfil sem topologia" (silencioso).
+    try {
+        topo.load(idx);
+        topo_ok = true;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[load warning] topo: %s (queries TIP/EDGE/PATH/BUBBLE/REPEAT indisponíveis)\n",
+                     e.what());
+    }
+    // I-2: FM-Index é opcional + retorna std::expected. Diferencia
+    // arquivo ausente (silencioso) de corrupção (warning preservado).
+    if (auto r = fm.load(idx); !r) {
+        std::fprintf(stderr, "[load warning] fm_index: %s (SEARCH KMER e WHERE contains_kmer indisponíveis)\n",
+                     r.error().c_str());
+    } else {
+        fm_ok = fm.is_loaded();
+    }
 
     QueryPlanner planner(topo_ok ? &topo : nullptr, &meta, fm_ok ? &fm : nullptr);
 

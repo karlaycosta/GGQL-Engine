@@ -128,10 +128,25 @@ int main(int argc, char* argv[]) {
     // Heurística cache hit: gBWT não foi (re)construído, então o painel de
     // perf de gBWT não tem dados — só elapsed_total_s reflete o trabalho
     // feito (load do cache + eventuais rebuilds incrementais como snarls).
-    const bool gbwt_was_built = st.elapsed_gbwt_s > 0.0 && st.gbwt_total_nodes > 0;
+    // I-5: distingue 3 cenários — sem paths, cache hit real, build novo.
+    const bool no_paths        = st.path_count == 0;
+    const bool gbwt_was_built  = st.elapsed_gbwt_s > 0.0 && st.gbwt_total_nodes > 0;
 
     cli::title("Métricas de Performance gBWT");
     cli::blank();
+
+    if (no_paths) {
+        cli::note("(GFA sem paths — gBWT não construído; só topologia indexada)");
+        cli::blank();
+        cli::section("Resumo");
+        cli::kv_count("Total de Caminhos", 0);
+        cli::kv_size("Pico RSS Processo", peak_rss_kb * 1024);
+        cli::kv_time("TOTAL Pipeline", st.elapsed_total_s);
+        cli::blank();
+        cli::ok("Benchmark concluído com sucesso");
+        cli::blank();
+        return 0;
+    }
 
     if (!gbwt_was_built) {
         cli::note("(cache hit — gBWT já estava persistido; bench mediu carga + rebuilds incrementais)");
