@@ -327,23 +327,33 @@ struct Paginator {
     bool has_explicit = false;
     uint32_t skip_n = 0;
     uint32_t pag_skipped = 0;
+    // #4 (2026-05-19): queries estruturais (segment/edge/path/tip/repeat/
+    // bubble) iteram um domínio naturalmente bounded por #segs do grafo —
+    // sem risco de DoS. O cap kMaxTotalHitsCount truncava o COUNT delas em
+    // ~1M, retornando número ERRADO silenciosamente (ex.: chm13 4,29M →
+    // 1000001 sem GGQL_MAX_TOTAL_HITS). Aqui o count pode varrer o domínio
+    // inteiro. SEARCH KMER NÃO seta isto: itera ocorrências do FM-Index
+    // (ilimitado, DoS-prone — proteção I-1/I-7 preservada).
+    bool unbounded_count = false;
 
     enum class Decision : uint8_t { Stop, Skip, Emit };
 
     template <typename Q>
-    [[nodiscard]] static Paginator from_query(const Q& q) noexcept {
+    [[nodiscard]] static Paginator from_query(const Q& q,
+                                              bool unbounded_count = false) noexcept {
         Paginator p;
         p.take_n = q.limit.value_or(kSafetyHardLimit);
         p.has_explicit = q.limit.has_value();
         if constexpr (requires { q.offset; }) {
             p.skip_n = q.offset.value_or(0);
         }
+        p.unbounded_count = unbounded_count;
         return p;
     }
 
     [[nodiscard]] Decision advance(QueryResult& result) noexcept {
         ++result.total_hits;
-        if (result.total_hits > kMaxTotalHitsCount()) {
+        if (!unbounded_count && result.total_hits > kMaxTotalHitsCount()) {
             result.total_hits_truncated = true;
             return Decision::Stop;
         }
@@ -629,15 +639,22 @@ QueryPlanner::execute_search_kmer(const SearchKmerQuery& q) const {
         }
     }
 
-    // I-1 (DoS): propaga max_results ao FM-Index. Sem isso, k-mer com alto
-    // recall (k≤3 em pangenoma → ~25% × N matches) materializa centenas de
-    // milhões de offsets antes da paginação. Boost 16× compensa o dedup
-    // por-seg posterior (std::unique abaixo).
-    // Roadmap: count_kmer() + warning quando hits >> limit (UX).
+    // I-1 (DoS) + I-7 (corretude): propaga max_results ao FM-Index. Sem isso,
+    // k-mer com alto recall (k≤3 em pangenoma → ~25% × N matches) materializa
+    // centenas de milhões de offsets antes da paginação.
+    //
+    // I-7 (auditoria DoD §11.6, 2026-05-15): a versão original do I-1 fazia
+    // `std::min(*q.limit × 16, kSafetyHardLimit)`, o que impedia QUALQUER
+    // SEARCH KMER de buscar >100k offsets — mesmo com LIMIT explícito.
+    // Consequência: `SEARCH KMER "ACGT"` (≈2,9M occ → 286.696 segs) era
+    // truncado silenciosamente para 56.311 segs, e `LIMIT 500000` era
+    // ignorado acima do teto. Fix: o teto kSafetyHardLimit protege apenas
+    // o caso SEM LIMIT (DoS por k-mer curto sem paginação). Com LIMIT
+    // explícito o usuário assume a responsabilidade — boost 16× compensa
+    // o dedup por-seg posterior, sem teto.
     constexpr size_t kKmerDedupBoost = 16;
     const size_t max_results = q.limit.has_value()
-        ? std::min(static_cast<size_t>(*q.limit) * kKmerDedupBoost,
-                   size_t{kSafetyHardLimit})
+        ? static_cast<size_t>(*q.limit) * kKmerDedupBoost
         : size_t{kSafetyHardLimit};
     auto offsets = seq_index_->search_kmer(q.kmer, max_results);
     // I-4: dedup via unordered_set é O(N) vs O(N log N) do sort+unique.
@@ -741,7 +758,7 @@ QueryPlanner::plan_node_query(const FindQuery& q, std::span<const uint64_t> node
     auto cols = detail::resolve_return_fields(q.return_fields, detail::kNodeColumns);
     const size_t ncols = cols.size();
     const auto emitters = detail::map_node_cols(cols);
-    auto pag = detail::Paginator::from_query(q);
+    auto pag = detail::Paginator::from_query(q, /*unbounded_count=*/true);
 
     QueryResult result;
     result.columns = std::move(cols);
@@ -797,7 +814,7 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_bubbles(const FindQue
     auto cols = detail::resolve_return_fields(q.return_fields, detail::kBubbleColumns);
     const size_t ncols = cols.size();
     const auto emitters = detail::map_bubble_cols(cols);
-    auto pag = detail::Paginator::from_query(q);
+    auto pag = detail::Paginator::from_query(q, /*unbounded_count=*/true);
 
     QueryResult result;
     result.columns = std::move(cols);
@@ -897,7 +914,7 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_segments(const FindQu
     const bool ret_rc = std::ranges::contains(cols, "read_count");
     const bool ret_dp = std::ranges::contains(cols, "depth");
 
-    auto pag = detail::Paginator::from_query(q);
+    auto pag = detail::Paginator::from_query(q, /*unbounded_count=*/true);
 
     QueryResult result;
     result.columns = cols;
@@ -1051,7 +1068,7 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_edges(const FindQuery
                             orient_cond_count == q.where->conditions.size();
     }
 
-    auto pag = detail::Paginator::from_query(q);
+    auto pag = detail::Paginator::from_query(q, /*unbounded_count=*/true);
 
     QueryResult result;
     result.columns = std::move(cols);
@@ -1122,7 +1139,7 @@ std::expected<QueryResult, std::string> QueryPlanner::plan_paths(const FindQuery
     auto cols = detail::resolve_return_fields(q.return_fields, detail::kPathColumns);
     const size_t ncols = cols.size();
     const auto emitters = detail::map_path_cols(cols);
-    auto pag = detail::Paginator::from_query(q);
+    auto pag = detail::Paginator::from_query(q, /*unbounded_count=*/true);
 
     QueryResult result;
     result.columns = std::move(cols);

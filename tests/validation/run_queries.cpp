@@ -21,6 +21,7 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 using namespace ggql;
 
@@ -95,9 +96,46 @@ static std::string ensure_limit(std::string q) {
         if (c >= 'a' && c <= 'z') { c = static_cast<char>(c - 32); }
     }
     if (upper.find(kHas) == std::string::npos) {
-        q += " LIMIT 100000000";
+        // I-7 (auditoria DoD §11.6, 2026-05-15): pós-fix Opção A do I-1,
+        // SEARCH KMER propaga q.limit × 16 ao FM-Index SEM teto. Injetar
+        // LIMIT 100000000 aqui → 1,6 bi offsets → DoS por k-mer curto
+        // (ex.: `SEARCH KMER "A"` k=1, centenas de M de occ).
+        //
+        // LIMIT 500000 escolhido empiricamente: (1) ≥ 286.696 (maior
+        // contagem de segs distintos da suite — F07 `SEARCH KMER "ACGT"`
+        // em CHM13-464), então o Paginator não trunca o count; (2)
+        // 500000 × 16 = 8M offsets como teto efetivo → `SEARCH KMER "A"`
+        // completa em ~25-30 s (bounded), não os 4 min/13 GiB pré-I-1.
+        // FIND/EDGE/etc. mantêm 100M (count global é bounded por
+        // #segs ≈ 1,35M).
+        if (upper.find("SEARCH KMER") != std::string::npos) {
+            q += " LIMIT 500000";
+        } else {
+            q += " LIMIT 100000000";
+        }
     }
     return q;
+}
+
+// #1 (perf, 2026-05-19): o FM-Index só é consumido por `SEARCH KMER` e
+// `WHERE contains_kmer(...)`. Carregá-lo incondicionalmente dominava a
+// latência one-shot em pangenomas grandes (GRCh38: ~8,5 s ≈ 100% load do
+// .idx, perdendo até para `gfatools stat`). "KMER" (case-insensitive) só
+// ocorre nesses dois construtos da grammar GGQL; um falso-positivo apenas
+// recarrega à toa — nunca afeta corretude.
+[[nodiscard]] static bool query_needs_fm(std::string_view q) noexcept {
+    static constexpr std::string_view kK = "KMER";
+    if (q.size() < kK.size()) { return false; }
+    for (size_t i = 0; i + kK.size() <= q.size(); ++i) {
+        bool match = true;
+        for (size_t j = 0; j < kK.size(); ++j) {
+            char c = q[i + j];
+            if (c >= 'a' && c <= 'z') { c = static_cast<char>(c - 32); }
+            if (c != kK[j]) { match = false; break; }
+        }
+        if (match) { return true; }
+    }
+    return false;
 }
 
 int main(int argc, char** argv) {
@@ -112,6 +150,35 @@ int main(int argc, char** argv) {
         return 2;
     }
     const std::string idx = argv[1];
+
+    // ── Determina modo + coleta queries ANTES de carregar (p/ #1) ────────────
+    enum class Mode { Default6, Single, Rows, Batch };
+    Mode mode = Mode::Default6;
+    std::string single_q;             // Single / Rows
+    std::vector<std::string> batch;   // Batch (buffer p/ decidir need_fm)
+    if (argc == 3 && std::string_view(argv[2]) == "--batch") {
+        mode = Mode::Batch;
+        for (std::string line; std::getline(std::cin, line); ) {
+            batch.push_back(std::move(line));
+        }
+    } else if (argc == 4 && std::string_view(argv[2]) == "--rows") {
+        mode = Mode::Rows;
+        single_q = argv[3];
+    } else if (argc >= 3) {
+        mode = Mode::Single;
+        single_q = argv[2];
+    }
+
+    // #1: FM-Index só carrega se alguma query usa SEARCH KMER/contains_kmer.
+    // Default6 (SEGMENT/EDGE/TIP/REPEAT/BUBBLE/PATH) nunca usa.
+    bool need_fm = false;
+    if (mode == Mode::Single || mode == Mode::Rows) {
+        need_fm = query_needs_fm(single_q);
+    } else if (mode == Mode::Batch) {
+        for (const auto& l : batch) {
+            if (query_needs_fm(l)) { need_fm = true; break; }
+        }
+    }
 
     GfaCsrTopology topo;
     GfaMetadataStore meta;
@@ -136,19 +203,21 @@ int main(int argc, char** argv) {
     }
     // I-2: FM-Index é opcional + retorna std::expected. Diferencia
     // arquivo ausente (silencioso) de corrupção (warning preservado).
-    if (auto r = fm.load(idx); !r) {
-        std::fprintf(stderr, "[load warning] fm_index: %s (SEARCH KMER e WHERE contains_kmer indisponíveis)\n",
-                     r.error().c_str());
-    } else {
-        fm_ok = fm.is_loaded();
+    // #1: só tenta carregar se a(s) query(ies) realmente precisam.
+    if (need_fm) {
+        if (auto r = fm.load(idx); !r) {
+            std::fprintf(stderr, "[load warning] fm_index: %s (SEARCH KMER e WHERE contains_kmer indisponíveis)\n",
+                         r.error().c_str());
+        } else {
+            fm_ok = fm.is_loaded();
+        }
     }
 
     QueryPlanner planner(topo_ok ? &topo : nullptr, &meta, fm_ok ? &fm : nullptr);
 
-    // ── Modo batch: lê queries de stdin ───────────────────────────────────────
-    if (argc == 3 && std::string_view(argv[2]) == "--batch") {
-        std::string line;
-        while (std::getline(std::cin, line)) {
+    // ── Modo batch ───────────────────────────────────────────────────────────
+    if (mode == Mode::Batch) {
+        for (const auto& line : batch) {
             // pula vazias e comentários
             auto first = line.find_first_not_of(" \t");
             if (first == std::string::npos) { continue; }
@@ -159,16 +228,14 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // ── Modo --rows: <idx> --rows "<query>" ──────────────────────────────────
-    if (argc == 4 && std::string_view(argv[2]) == "--rows") {
-        std::string q = ensure_limit(argv[3]);
-        return run_rows(planner, q);
+    // ── Modo --rows ──────────────────────────────────────────────────────────
+    if (mode == Mode::Rows) {
+        return run_rows(planner, ensure_limit(single_q));
     }
 
-    // ── Modo single query: <idx> "<query>" ───────────────────────────────────
-    if (argc >= 3) {
-        std::string q = ensure_limit(argv[2]);
-        std::printf("%zu\n", run_count(planner, q));
+    // ── Modo single query ────────────────────────────────────────────────────
+    if (mode == Mode::Single) {
+        std::printf("%zu\n", run_count(planner, ensure_limit(single_q)));
         return 0;
     }
 
