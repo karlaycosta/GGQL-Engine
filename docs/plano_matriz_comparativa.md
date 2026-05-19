@@ -71,11 +71,12 @@ Dia 2 redirecionado para T3 (odgi) já que T2 depende de T1.
 | Slot | Tarefa | Output |
 |---|---|---|
 | — | ~~**T2** `vg snarls` em HPRC~~ | ⊘ depende de T1 (bloqueado) |
-| — | ~~**T10** `vg path -p` vs GGQL FIND PATH~~ | ⊘ depende de `.pg` |
+| ✅ | ~~**T10** `vg paths -L` vs GGQL FIND PATH~~ | feito em DRB1-3123 (§4.5 ggql_vs_vg.md) |
 
 **Plano revisado**: avançar direto para Dia 3 (T3 odgi), que é
-independente de vg. T2/T10 poderão ser executados quando houver máquina
-≥128 GiB ou após bisseção do GFA HPRC por chromosome.
+independente de vg. T2 fica bloqueado até máquina ≥128 GiB ou bisseção
+do GFA HPRC por chromosome. T10 foi resolvido em DRB1-3123 (dataset com
+P-lines) em 2026-05-19; só a variante HPRC continua bloqueada.
 
 ### Dia 3 — odgi (~6-8h)
 
@@ -505,7 +506,9 @@ Output em `tests/validation/T9_T12_results/T12_gfatools_{stat.txt,time.log}`.
 ### Bloqueados / Cancelados
 - ⊘ **T1** (vg convert HPRC) — OOM após ~1h41min em 2026-05-12 (ver §5.3)
 - ⊘ **T2** (vg snarls HPRC) — depende de `.pg` de T1
-- ⊘ **T10** (vg path -p HPRC) — depende de `.pg` de T1
+- ✅ **T10** (vg paths -L vs FIND PATH) — feito 2026-05-19 em DRB1-3123:
+  paridade de count **e** de nomes (diff=0, 12 paths), 1,15× speedup.
+  Ver `ggql_vs_vg.md §4.5`. Variante HPRC segue ⊘ (depende de `.pg` de T1).
 
 ### Em progresso
 - (nenhum no momento)

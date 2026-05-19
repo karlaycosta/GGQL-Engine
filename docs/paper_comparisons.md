@@ -179,7 +179,7 @@ Legenda de status:
 | T7 | vg find como GT para SEARCH KMER (espera-se GGQL >100× mais rápido) | 2-4 h |
 | T8 | minigraph não tem queries diretas — confirmar exclusão da matriz | 30 min |
 | T9 | Memory peak em ingest HPRC full do GGQL com `/usr/bin/time -v` | 30 min (re-run) |
-| T10 | Comparar vg path -p (extrai paths) vs FIND PATH RETURN name | 1 h |
+| ✅ T10 | ~~vg paths -L vs FIND PATH RETURN name~~ — feito 2026-05-19, DRB1-3123: count+nomes idênticos (diff=0), 1,15× (ggql_vs_vg.md §4.5) | — |
 
 **Prioridade BAIXA — só se tempo permitir**:
 
