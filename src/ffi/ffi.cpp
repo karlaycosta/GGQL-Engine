@@ -7,9 +7,16 @@
 #include "ggql/query/query_planner.hpp"
 #include "ggql/storage/fm_index.hpp"
 
+#include "ggql/storage/topology.hpp"
+
+#include <atomic>
 #include <cstring>
+#include <filesystem>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <variant>
 
 using namespace ggql;
@@ -29,9 +36,40 @@ struct GgqlEngineWrapper {
     // owned_topology vive enquanto o wrapper viver.
     std::optional<GfaCsrTopology> owned_topology;
     const GfaCsrTopology* topology = nullptr;  // pode ser null se ausente
-    std::unique_ptr<QueryPlanner> planner;
+    // #1A (2026-05-20): lazy FM-Index. O fm.load() é caro (multi-GB em
+    // pangenoma grande); só carregamos na primeira query que precisa
+    // (SEARCH KMER / WHERE contains_kmer). Plan
+    //   - cache_dir_for_fm: caminho retido p/ chamar load() depois
+    //   - fm_load_once: garante 1 só load por engine
+    //   - fm_attempted: fast-path sem entrar no call_once após primeira tentativa
+    //   - planner é shared_ptr p/ permitir swap atômico após fm_load
+    //   - planner_mutex protege o swap (raríssimo) das leituras em execute
+    std::string cache_dir_for_fm;
+    std::once_flag fm_load_once;
+    std::atomic<bool> fm_attempted{false};
+    mutable std::mutex planner_mutex;
+    std::shared_ptr<QueryPlanner> planner;
     std::string last_error;
 };
+
+// #1A FFI: o FM-Index só é consumido por SEARCH KMER / WHERE contains_kmer.
+// "KMER" (case-insensitive) só ocorre nesses dois construtos da grammar GGQL;
+// um falso-positivo apenas tenta o load à toa (sem risco de correção).
+// Espelha tests/validation/run_queries.cpp:query_needs_fm (commit 458e127).
+[[nodiscard]] static bool query_needs_fm(std::string_view q) noexcept {
+    static constexpr std::string_view kK = "KMER";
+    if (q.size() < kK.size()) { return false; }
+    for (size_t i = 0; i + kK.size() <= q.size(); ++i) {
+        bool match = true;
+        for (size_t j = 0; j < kK.size(); ++j) {
+            char c = q[i + j];
+            if (c >= 'a' && c <= 'z') { c = static_cast<char>(c - 32); }
+            if (c != kK[j]) { match = false; break; }
+        }
+        if (match) { return true; }
+    }
+    return false;
+}
 
 // ── Result wrapper ────────────────────────────────────────────────────────────
 //
@@ -254,6 +292,32 @@ GgqlIngestStats ggql_ingestor_ingest_with_profile(
                          event_cb, user_data);
 }
 
+// Round 1.C (2026-05-20): controle granular — `build_gbwt`/`build_snarls`
+// expostos individualmente. Permite combos fora dos 4 perfis fixos.
+GgqlIngestStats ggql_ingestor_ingest_granular(
+    GgqlIngestorHandle handle,
+    const char* filepath,
+    int num_threads,
+    double gamma,
+    bool verbose,
+    bool save_metadata,
+    bool build_topology,
+    bool build_fm_index,
+    bool build_gbwt,
+    bool build_snarls,
+    size_t max_gbwt_paths,
+    bool keep_gbwt_tmp,
+    const char* cache_dir,
+    GgqlEventCallback event_cb,
+    void* user_data
+) {
+    return do_ingest_ffi(handle, filepath, num_threads, gamma, verbose,
+                         save_metadata, build_topology, build_fm_index,
+                         build_gbwt, build_snarls,
+                         max_gbwt_paths, keep_gbwt_tmp, cache_dir,
+                         event_cb, user_data);
+}
+
 int32_t ggql_profile_from_name(const char* name, GgqlIngestProfile* out) {
     if (!name || !out) { return -1; }
     auto parsed = parse_profile(std::string_view(name));
@@ -287,12 +351,11 @@ GgqlEngineHandle ggql_engine_load(const char* cache_dir) {
     try {
         auto* w = new GgqlEngineWrapper();
         w->metadata.load(std::string(cache_dir));
-        // I-2: FM-Index opcional. Ausência → is_loaded()==false silencioso.
-        // Corrupção → preserva diagnóstico em engine_create_error (caller
-        // pode reingerir após inspecionar a mensagem).
-        if (auto r = w->fm_index.load(std::string(cache_dir)); !r) {
-            engine_create_error = std::string("fm_index: ") + r.error();
-        }
+        // #1A FFI (2026-05-20): NÃO carrega FM-Index aqui. É caro (multi-GB
+        // em pangenoma grande — GRCh38 ~8 s) e a maioria das queries não
+        // usa. Será carregado lazy em ggql_engine_execute na primeira query
+        // que precisar (KMER). cache_dir_for_fm guarda o caminho.
+        w->cache_dir_for_fm = std::string(cache_dir);
         // Topology opcional — perfis sem build_topology não terão E_*/ef_*.
         // Se ausente, FIND TIP/EDGE/PATH/BUBBLE/REPEAT (e crosses no PATH)
         // retornarão erro semântico via planner; SEGMENT/SEARCH KMER continuam.
@@ -302,10 +365,11 @@ GgqlEngineHandle ggql_engine_load(const char* cache_dir) {
             w->owned_topology.emplace(std::move(topo));
             w->topology = &*w->owned_topology;
         } catch (...) {}
-        w->planner = std::make_unique<QueryPlanner>(
+        // Planner começa SEM fm; lazy-rebuild no primeiro KMER (ver execute).
+        w->planner = std::make_shared<QueryPlanner>(
             w->topology,
             &w->metadata,
-            w->fm_index.is_loaded() ? &w->fm_index : nullptr
+            /*seq_index=*/nullptr
         );
         return w;
     } catch (const std::exception& e) {
@@ -326,16 +390,12 @@ GgqlEngineHandle ggql_engine_create(GgqlIngestorHandle ingestor, const char* cac
         auto* w = new GgqlEngineWrapper();
         w->topology = static_cast<GfaIngestorMmapParallel*>(ingestor)->topology();
         w->metadata.load(std::string(cache_dir));
-        // I-2: FM-Index opcional. Ausência silenciosa; corrupção preserva
-        // diagnóstico em engine_create_error sem abortar — o caller pode
-        // re-ingerir após inspecionar a mensagem.
-        if (auto r = w->fm_index.load(std::string(cache_dir)); !r) {
-            engine_create_error = std::string("fm_index: ") + r.error();
-        }
-        w->planner = std::make_unique<QueryPlanner>(
+        // #1A FFI: FM-Index lazy (mesma motivação de ggql_engine_load).
+        w->cache_dir_for_fm = std::string(cache_dir);
+        w->planner = std::make_shared<QueryPlanner>(
             w->topology,
             &w->metadata,
-            w->fm_index.is_loaded() ? &w->fm_index : nullptr
+            /*seq_index=*/nullptr
         );
         return w;
     } catch (const std::exception& e) {
@@ -356,6 +416,36 @@ const char* ggql_engine_last_error(GgqlEngineHandle engine) {
     return static_cast<GgqlEngineWrapper*>(engine)->last_error.c_str();
 }
 
+// Round 1.B (2026-05-20): introspecção de capabilities sem rodar queries.
+int32_t ggql_engine_capabilities(GgqlEngineHandle engine,
+                                 GgqlEngineCapabilities* out) {
+    if (!engine || !out) { return -1; }
+    auto* w = static_cast<GgqlEngineWrapper*>(engine);
+    *out = {};
+    // Metadata sempre carregado em load/create se chegamos a um handle válido.
+    out->has_metadata = true;
+    out->segment_count = static_cast<uint64_t>(w->metadata.size());
+    // Topology + derivados
+    out->has_topology = (w->topology != nullptr);
+    if (w->topology) {
+        out->edge_count = w->topology->num_edges();
+        out->path_count = static_cast<uint64_t>(w->topology->path_count());
+        out->has_gbwt = w->topology->has_path_storage_backend();
+        out->has_snarls = w->topology->has_snarls();
+    }
+    // FM-Index: já carregado (pós primeiro KMER) OU disponível no disco
+    // (#1A lazy — fm_index.bin existe mas ainda não foi materializado).
+    // Ambos os casos significam "SEARCH KMER funcionará" do ponto de
+    // vista do consumer.
+    out->has_fm_index = w->fm_index.is_loaded();
+    if (!out->has_fm_index && !w->cache_dir_for_fm.empty()) {
+        std::error_code ec;
+        out->has_fm_index = std::filesystem::exists(
+            std::filesystem::path(w->cache_dir_for_fm) / "fm_index.bin", ec);
+    }
+    return 0;
+}
+
 GgqlResultHandle ggql_engine_execute(
     GgqlEngineHandle engine,
     const char*      query_str,
@@ -364,6 +454,29 @@ GgqlResultHandle ggql_engine_execute(
 ) {
     if (!engine || !query_str) { return nullptr; }
     auto* w = static_cast<GgqlEngineWrapper*>(engine);
+
+    // #1A FFI (2026-05-20): lazy-load do FM-Index na primeira KMER.
+    // Fast-path com atomic load (relaxed→acquire só na 1ª travessia).
+    if (query_needs_fm(query_str) &&
+        !w->fm_attempted.load(std::memory_order_acquire)) {
+        std::call_once(w->fm_load_once, [w]() {
+            if (auto r = w->fm_index.load(w->cache_dir_for_fm); r) {
+                if (w->fm_index.is_loaded()) {
+                    // Reconstruct planner com fm ponteiro válido.
+                    auto new_planner = std::make_shared<QueryPlanner>(
+                        w->topology, &w->metadata, &w->fm_index);
+                    std::lock_guard lk(w->planner_mutex);
+                    w->planner = std::move(new_planner);
+                }
+            } else {
+                // Corrupção/ausência: registra no last_error para o caller
+                // diagnosticar; planner segue com nullptr fm e SEARCH KMER
+                // retornará erro semântico.
+                w->last_error = std::string("fm_index: ") + r.error();
+            }
+            w->fm_attempted.store(true, std::memory_order_release);
+        });
+    }
 
     // Parse da query
     auto parsed = grammar::parse_ggql(query_str);
@@ -389,11 +502,17 @@ GgqlResultHandle ggql_engine_execute(
         }
     }, parsed.value());
 
-    if (!w->planner) {
+    // #1A FFI: snapshot do planner sob lock breve (swap pós-lazy-fm é raro).
+    std::shared_ptr<QueryPlanner> planner_snap;
+    {
+        std::lock_guard lk(w->planner_mutex);
+        planner_snap = w->planner;
+    }
+    if (!planner_snap) {
         w->last_error = "engine não inicializado corretamente";
         return nullptr;
     }
-    auto exec = w->planner->execute(parsed.value());
+    auto exec = planner_snap->execute(parsed.value());
     if (!exec) {
         w->last_error = std::move(exec.error());
         return nullptr;

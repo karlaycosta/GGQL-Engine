@@ -25,6 +25,14 @@ GfaCsrTopology::~GfaCsrTopology() = default;
 // ════════════════════════════════════════════════════════════════════════════
 // Move Semantics — necessário para re-vincular ponteiros SDSL (select_1, etc)
 // ════════════════════════════════════════════════════════════════════════════
+// Fix 2026-05-20: o move ctor/operator= original "esquecia" 3 campos —
+// snarls_, path_node_counts_, path_bp_lengths_. Sintoma silencioso:
+// `optional<GfaCsrTopology>::emplace(std::move(topo))` no FFI (engine_load,
+// ffi.cpp:302) descartava snarls/path_stats da nova instância → `FIND
+// BUBBLE` retornava 0 e `has_path_stats()` ficava inconsistente. Não havia
+// teste de regressão (test_ffi_query não exercita BUBBLE). Descoberto via
+// Round 1.B (capabilities) — has_snarls=false em datasets cujo snarls.bin
+// estava presente no disco.
 GfaCsrTopology::GfaCsrTopology(GfaCsrTopology&& other) noexcept
     : num_nodes_(other.num_nodes_), E_fwd_(std::move(other.E_fwd_)),
       E_bwd_(std::move(other.E_bwd_)), ef_fwd_(std::move(other.ef_fwd_)),
@@ -34,7 +42,10 @@ GfaCsrTopology::GfaCsrTopology(GfaCsrTopology&& other) noexcept
       offsets_cache_bwd_(std::move(other.offsets_cache_bwd_)),
       path_stores_(std::move(other.path_stores_)),
       gbwt_offsets_(std::move(other.gbwt_offsets_)),
-      path_names_(std::move(other.path_names_)) {
+      path_names_(std::move(other.path_names_)),
+      path_node_counts_(std::move(other.path_node_counts_)),
+      path_bp_lengths_(std::move(other.path_bp_lengths_)),
+      snarls_(std::move(other.snarls_)) {
     // Re-vincula os suportes SDSL ao novo endereço dos vetores movimentados
     ef_fwd_sel_.set_vector(&ef_fwd_);
     ef_bwd_sel_.set_vector(&ef_bwd_);
@@ -54,6 +65,10 @@ GfaCsrTopology& GfaCsrTopology::operator=(GfaCsrTopology&& other) noexcept {
         path_stores_ = std::move(other.path_stores_);
         gbwt_offsets_ = std::move(other.gbwt_offsets_);
         path_names_ = std::move(other.path_names_);
+        // Fix 2026-05-20 (ver comentário no move ctor).
+        path_node_counts_ = std::move(other.path_node_counts_);
+        path_bp_lengths_  = std::move(other.path_bp_lengths_);
+        snarls_           = std::move(other.snarls_);
 
         ef_fwd_sel_.set_vector(&ef_fwd_);
         ef_bwd_sel_.set_vector(&ef_bwd_);

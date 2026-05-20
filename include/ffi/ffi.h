@@ -130,6 +130,30 @@ GgqlIngestStats ggql_ingestor_ingest_with_profile(
     void* user_data
 );
 
+// Variante granular: expõe `build_gbwt` e `build_snarls` separadamente
+// (na API legada eles eram acoplados a `build_topology`; nos perfis ficam
+// fixos). Use para combos fora dos 4 perfis nomeados — p.ex. "topology
+// com snarls mas sem gBWT", ou "gBWT sem snarls".
+//
+// Restrição: `build_gbwt`/`build_snarls` exigem `build_topology=true`.
+GgqlIngestStats ggql_ingestor_ingest_granular(
+    GgqlIngestorHandle handle,
+    const char* filepath,
+    int num_threads,
+    double gamma,
+    bool verbose,
+    bool save_metadata,
+    bool build_topology,
+    bool build_fm_index,
+    bool build_gbwt,
+    bool build_snarls,
+    size_t max_gbwt_paths,
+    bool keep_gbwt_tmp,
+    const char* cache_dir,
+    GgqlEventCallback event_cb,
+    void* user_data
+);
+
 // Reseta o ingestor
 void ggql_ingestor_reset(GgqlIngestorHandle handle);
 
@@ -170,6 +194,30 @@ void ggql_engine_destroy(GgqlEngineHandle engine);
 // Retorna a mensagem de erro da última chamada que falhou (ggql_engine_load,
 // ggql_engine_create, ggql_engine_execute). Válida até a próxima chamada FFI.
 const char* ggql_engine_last_error(GgqlEngineHandle engine);
+
+// ── Introspecção de capabilities (Round 1.B, 2026-05-20) ──────────────────────
+//
+// Permite ao consumer descobrir o que este engine pode fazer SEM rodar uma
+// query. Counts (segment/edge/path) vêm de metadata/topology em memória — fast.
+//
+// `has_fm_index` reflete "FM-Index está construído neste .idx" (true mesmo
+// antes do lazy-load — checa existência de fm_index.bin no disco). UI pode
+// usar para cinzar botão "Buscar k-mer" quando false.
+typedef struct {
+    bool has_metadata;      // true se engine_load/create teve sucesso
+    bool has_topology;      // true se topology.bin foi carregado
+    bool has_fm_index;      // true se fm_index.bin existe (mesmo não-carregado)
+    bool has_gbwt;          // true se path_stores presente (gBWT)
+    bool has_snarls;        // true se snarls.bin foi carregado
+    uint64_t segment_count; // requer has_metadata
+    uint64_t edge_count;    // requer has_topology
+    uint64_t path_count;    // requer has_topology
+} GgqlEngineCapabilities;
+
+// Preenche `out` com capabilities + counts. Retorna 0 em sucesso, -1 em
+// erro (engine NULL ou out NULL).
+int32_t ggql_engine_capabilities(GgqlEngineHandle engine,
+                                 GgqlEngineCapabilities* out);
 
 // ── Execução de query ──────────────────────────────────────────────────────────
 
