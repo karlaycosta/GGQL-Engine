@@ -65,9 +65,6 @@ docs/
 data/*.md
 data/*.py
 
-# ─── GUI Flutter (WIP — não versionada) ──────────────────────────────────────
-gui/
-
 # ─── Coverage / profiling ─────────────────────────────────────────────────────
 *.gcno
 *.gcda
