@@ -219,6 +219,52 @@ typedef struct {
 int32_t ggql_engine_capabilities(GgqlEngineHandle engine,
                                  GgqlEngineCapabilities* out);
 
+// ── Validação parse-only (Round 2.D, 2026-05-20) ─────────────────────────────
+//
+// Parseia a query sem executar. Para REPL/IDE: syntax highlighting,
+// autocomplete, marcar erro enquanto o usuário digita — sem o custo de
+// rodar a query (que em pangenoma pode ser caro).
+//
+// `error_line`/`error_col` ficam em -1 (não exposto pelo parser PEGTL atual;
+// `error_message` carrega a posição em texto livre quando disponível).
+typedef struct {
+    bool valid;
+    int32_t error_line;
+    int32_t error_col;
+    const char* error_message; // válido até a próxima chamada FFI (thread_local)
+} GgqlParseResult;
+
+// Parseia `query`. *out preenchido sempre (success OU fail).
+// Retorna:
+//    0 — parse OK, out->valid = true
+//    1 — parse falhou, out->valid = false (error_message preenchido)
+//   -1 — argumentos inválidos (query NULL ou out NULL)
+//
+// O parâmetro `engine` é opcional (pode ser NULL) — parse é
+// engine-independente; aceito para simetria com as demais funções e p/
+// permitir futura validação semântica contra capabilities do engine.
+int32_t ggql_engine_validate(GgqlEngineHandle engine,
+                             const char* query,
+                             GgqlParseResult* out);
+
+// ── Schema introspection (Round 2.E, 2026-05-20) ─────────────────────────────
+//
+// Lista entidades conhecidas pela query engine e suas colunas. Permite UI
+// gerar autocomplete / formulários / colunas de tabela sem hardcode.
+//
+// Pointers retornados apontam para literais estáticos — válidos pelo tempo
+// de vida da lib carregada.
+
+// Retorna ponteiro para array de C-strings (nomes de entidade) + *out_count.
+// Entidades atuais: SEGMENT, EDGE, PATH, BUBBLE, TIP, REPEAT.
+const char* const* ggql_engine_list_entities(int32_t* out_count);
+
+// Retorna ponteiro para array de C-strings (nomes de coluna da entidade) +
+// *out_count. NULL se `entity_name` não for reconhecida (case-insensitive).
+// *out_count = 0 nesse caso.
+const char* const* ggql_engine_describe_entity(const char* entity_name,
+                                               int32_t* out_count);
+
 // ── Execução de query ──────────────────────────────────────────────────────────
 
 // Executa uma query GGQL com paginação.

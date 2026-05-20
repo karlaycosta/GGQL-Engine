@@ -446,6 +446,98 @@ int32_t ggql_engine_capabilities(GgqlEngineHandle engine,
     return 0;
 }
 
+// ── Round 2.D (2026-05-20): validate parse-only ──────────────────────────────
+// Buffer thread_local p/ manter o C-string vivo até a próxima chamada FFI
+// (PEGTL retorna std::string, precisamos de char* estável).
+namespace {
+thread_local std::string validate_error_buf;
+} // namespace
+
+int32_t ggql_engine_validate(GgqlEngineHandle /*engine*/,
+                             const char* query,
+                             GgqlParseResult* out) {
+    if (!query || !out) { return -1; }
+    *out = {};
+    out->error_line = -1;
+    out->error_col = -1;
+    auto parsed = grammar::parse_ggql(query);
+    if (parsed) {
+        out->valid = true;
+        out->error_message = nullptr;
+        return 0;
+    }
+    out->valid = false;
+    validate_error_buf = std::move(parsed.error());
+    out->error_message = validate_error_buf.c_str();
+    return 1;
+}
+
+// ── Round 2.E (2026-05-20): schema introspection ─────────────────────────────
+// Espelha src/query/query_planner.cpp:58-65 (detail::k*Columns). Em refactor
+// futuro vale extrair para include/ggql/query/entity_columns.hpp e compartilhar.
+namespace {
+
+// Nomes de entidade reconhecidos pela linguagem (canônicos em maiúsculas).
+// TIP e REPEAT compartilham kNodeColumns no planner.
+static const char* const kEntityNames[] = {
+    "SEGMENT", "EDGE", "PATH", "BUBBLE", "TIP", "REPEAT"
+};
+static constexpr int32_t kEntityCount = sizeof(kEntityNames) / sizeof(kEntityNames[0]);
+
+static const char* const kSegmentCols[] = {"id", "name", "length", "read_count", "depth"};
+static const char* const kEdgeCols[]    = {"from_id", "to_id", "to_orient"};
+static const char* const kPathCols[]    = {"id", "name", "node_count", "length"};
+static const char* const kBubbleCols[]  = {"source", "sink", "branch_count",
+                                           "internal_node_count", "has_cycles"};
+static const char* const kNodeCols[]    = {"id", "in_degree", "out_degree"};
+
+// Compara dois identificadores ASCII case-insensitive (sem locale).
+[[nodiscard]] static bool ascii_iequal(std::string_view a, std::string_view b) noexcept {
+    if (a.size() != b.size()) { return false; }
+    for (size_t i = 0; i < a.size(); ++i) {
+        char ca = a[i], cb = b[i];
+        if (ca >= 'a' && ca <= 'z') { ca = static_cast<char>(ca - 32); }
+        if (cb >= 'a' && cb <= 'z') { cb = static_cast<char>(cb - 32); }
+        if (ca != cb) { return false; }
+    }
+    return true;
+}
+
+} // namespace
+
+const char* const* ggql_engine_list_entities(int32_t* out_count) {
+    if (out_count) { *out_count = kEntityCount; }
+    return kEntityNames;
+}
+
+const char* const* ggql_engine_describe_entity(const char* entity_name,
+                                               int32_t* out_count) {
+    if (out_count) { *out_count = 0; }
+    if (!entity_name) { return nullptr; }
+    const std::string_view name{entity_name};
+    if (ascii_iequal(name, "SEGMENT")) {
+        if (out_count) { *out_count = static_cast<int32_t>(std::size(kSegmentCols)); }
+        return kSegmentCols;
+    }
+    if (ascii_iequal(name, "EDGE")) {
+        if (out_count) { *out_count = static_cast<int32_t>(std::size(kEdgeCols)); }
+        return kEdgeCols;
+    }
+    if (ascii_iequal(name, "PATH")) {
+        if (out_count) { *out_count = static_cast<int32_t>(std::size(kPathCols)); }
+        return kPathCols;
+    }
+    if (ascii_iequal(name, "BUBBLE")) {
+        if (out_count) { *out_count = static_cast<int32_t>(std::size(kBubbleCols)); }
+        return kBubbleCols;
+    }
+    if (ascii_iequal(name, "TIP") || ascii_iequal(name, "REPEAT")) {
+        if (out_count) { *out_count = static_cast<int32_t>(std::size(kNodeCols)); }
+        return kNodeCols;
+    }
+    return nullptr;
+}
+
 GgqlResultHandle ggql_engine_execute(
     GgqlEngineHandle engine,
     const char*      query_str,
