@@ -1,7 +1,7 @@
 # GGQL Engine — Comparações com outras ferramentas
 
 > **Documento companion**: `docs/paper_draft.md`
-> **Última atualização**: 2026-05-11
+> **Última atualização**: 2026-05-18 (re-run cross-check vg em DRB1-3123)
 > **Propósito**: consolidar todas as comparações de **corretude**, **performance**,
 > **funcionalidade** e **recursos** entre GGQL Engine e ferramentas estabelecidas
 > do ecossistema de pangenome graphs.
@@ -21,6 +21,9 @@
 Estendendo cobertura — ferramentas a serem testadas (status de planejamento na §2):
 - **odgi** (Garrison et al.) — operações eficientes em pangenome graphs
 - **minigraph** (lh3) — graph-based aligner (excluído da matriz, ver §7.2)
+
+> **Recorte dedicado GGQL × vg**: ver `docs/ggql_vs_vg.md` (concorrente
+> direto isolado — corretude, perf flagship 77×, recursos, semântica).
 
 **Related work — paradigma diferente, não comparado lado-a-lado**:
 - **TileDB-VG** (TileDB Inc.) — *storage layer* para variation graphs (arrays
@@ -93,23 +96,23 @@ Legenda de status:
 | Funcionalidade | Tool | C | T | M | D |
 |---|---|:-:|:-:|:-:|:-:|
 | FIND SEGMENT | vg | ✅ (DRB1) | ⬜ (DRB1) | ⬜ | ⬜ |
-| FIND SEGMENT | gfatools | ✅ (DRB1+chm13) | ⬜ | ⬜ | ⬜ |
+| FIND SEGMENT | gfatools `stat` | ✅ (DRB1+chm13+**GRCh38**, Δ=0) | ✅ pós-fix #1 (`458e127`): gfat vence só MT/ecoli/DRB1; **GGQL chm13 9,3× / GRCh38 45×**; `ggql_vs_gfatools.md §4.1` | ⬜ | ⬜ |
 | FIND SEGMENT | awk | ✅ (todos tiers) | ✅ (R2 chm13) | ✅ (T5: 2011 MB) | — |
-| FIND SEGMENT | odgi | ⬜ | ⬜ | ⬜ | ⬜ |
+| FIND SEGMENT | odgi `stats -S` | ✅ (DRB1+chm13, Δ=0) | ✅ pós-fix #1 (`458e127`): DRB1 GGQL 1,5× / **chm13 GGQL 4,5×**; MT/GRCh38 ⊘ odgi build; `ggql_vs_odgi.md §4.2` | ⬜ | ⬜ |
 | FIND SEGMENT | Python | ✅ (DRB1) | ⬜ | ⬜ | — |
 | FIND EDGE | vg | ✅ (DRB1) | ⬜ | ⬜ | ⬜ |
-| FIND EDGE | gfatools | ✅ (DRB1+chm13) | ⬜ | ⬜ | ⬜ |
+| FIND EDGE | gfatools `stat` | ✅ (DRB1+chm13+**GRCh38**, Δ=0) | ⬜ | ⬜ | ⬜ |
 | FIND EDGE | awk | ✅ | ⬜ | ✅ (T5: 1739 MB) | — |
-| FIND EDGE | odgi | ⬜ | ⬜ | ⬜ | ⬜ |
+| FIND EDGE | odgi `stats -S` | ✅ (DRB1+chm13, Δ=0) | ⬜ | ⬜ | ⬜ |
 | FIND TIP | awk | ✅ (todos) | ⬜ | ✅ (T5: 1166 MB) | — |
-| FIND TIP | odgi tips | ⬜ | ⬜ | ⬜ | ⬜ |
+| FIND TIP | odgi | ⊘ `odgi tips` **não existe** (sem subcomando) | — | — | — |
 | FIND REPEAT | awk | ✅ (todos) | ⬜ | ✅ (T5: 1251 MB) | — |
 | **FIND BUBBLE** | **vg snarls** | **✅** (DRB1+chm13) | **✅** R2 (77×) | ✅ (T5: 1275 MB) | ⬜ |
-| FIND BUBBLE | odgi snarls | ⬜ | ⬜ | ⬜ | ⬜ |
+| FIND BUBBLE | odgi | ⊘ `odgi snarls` **não existe** (sem primitiva de snarl; ver `ggql_vs_odgi.md §6.1`) | — | — | — |
 | FIND PATH | vg | ✅ (DRB1) | ⬜ | ⬜ | ⬜ |
-| FIND PATH | gfatools | ✅ (DRB1) | ⬜ | ⬜ | ⬜ |
+| FIND PATH | gfatools | ⊘ `stat` não conta paths (o "DRB1" era `grep -c '^P'`, não feature gfatools) | — | — | — |
 | FIND PATH | awk | ✅ (todos) | ⬜ | ✅ (T5: 1164 MB) | — |
-| FIND PATH | odgi paths | ⬜ | ⬜ | ⬜ | ⬜ |
+| FIND PATH | odgi `paths -L` | ✅ DRB1 (Δ=0 + nomes byte-iguais); ⊘ chm13 (odgi descarta W) / GRCh38 (odgi não ingere) | ⬜ | ⬜ | ⬜ |
 
 #### §2.2.2 Filtros WHERE
 
@@ -232,17 +235,25 @@ referência, exceto onde indicado.
 
 | Query | GGQL | gfatools | vg | awk | Δ |
 |---|---:|---:|---:|---:|:-:|
-| FIND SEGMENT | 5,581 | 5,581 | — | 5,581 | **0** ✅ |
-| FIND EDGE | 7,448 | 7,448 | — | 7,448 | **0** ✅ |
+| FIND SEGMENT | 5,581 | 5,581 | 5,581 | 5,581 | **0** ✅ |
+| FIND EDGE | 7,448 | 7,448 | 7,448 | 7,448 | **0** ✅ |
 | FIND TIP | 5 | — | — | 5 | **0** ✅ |
-| FIND REPEAT | 373 | — | — | 373 | **0** ✅ |
-| FIND BUBBLE | 1,518 | — | 1,518 (Net-Graph>2) | — | **0** ✅ |
-| FIND PATH | 12 | — | — | 12 | **0** ✅ |
+| FIND REPEAT (out>1) | 1,761 | — | — | 1,761 | **0** ✅ |
+| FIND BUBBLE | 1,516 | — | 1,518 (Net-Graph>2) | — | **2** ✅ (≤5) |
+| FIND PATH | 12 | — | 12 | 12 | **0** ✅ |
 | FIND PATH WHERE crosses(P1) | 12 | — | — | 12 (Python) | **0** ✅ |
 
 vg snarls reporta 2,053 totais; 535 são "vazios" (Net-Graph-Size=2). Pela
 semântica Billi/SESE (que GGQL implementa), snarls vazios são excluídos por
 design → 1,518 é o valor correto comparável.
+
+**Re-run 2026-05-18** (cross-check vg fresco, `.pg` v1.74.0, `--no-ingest`):
+SEGMENT/EDGE/PATH confirmados Δ=0 contra `vg stats -z` / `vg paths -L`.
+FIND BUBBLE: GGQL agora reporta **1,516** (era 1,518 no doc original); vg
+`stats -R` Net-Graph-Size>2 = **1,518**. Δ=2, dentro da tolerância ≤5 de
+§2.5 (diferença Billi/SESE vs integrated) — não é mais paridade exata.
+FIND REPEAT corrigido para **1,761** (definição `out_degree>1` de §3.6/§7.1.2;
+o valor "373" do doc original usava outra definição, agora obsoleto).
 
 ### §3.2 Tier C — chm13_subset_100w (4.3M segs, 100 walks)
 
@@ -335,6 +346,36 @@ nem `dp:f:`).
 
 **Caveat**: `GGQL_MAX_TOTAL_HITS=10000000` necessário (default 1M
 trunca). Comportamento intencional, documentado em §7.4.
+
+### §3.7 Tier C-GRCh38-464 — paridade estrutural em 751K segs (2026-05-18)
+
+Dataset: `data/comparisons/GRCh38-464.gfa` (3,3 GiB, rGFA, IDs alfanum
+`s1…`, 751.237 S / 1.097.658 L, 0 linhas P/W). Cross-check fresco
+GGQL × vg v1.74.0 (`.pg` via `vg convert -g -p`).
+
+| Query | GGQL | vg | Δ | Notas |
+|---|---:|---:|:-:|---|
+| FIND SEGMENT | 751.237 | 751.237 (`stats -z`) | **0** ✅ | — |
+| FIND EDGE | 1.097.658 | 1.097.658 (`stats -z`) | **0** ✅ | requer `GGQL_MAX_TOTAL_HITS=10M` (default 1M → 1.000.001) |
+| FIND BUBBLE | 239.465 | 239.465 (`stats -R`) | **0** ✅ | **paridade exata** — 0 snarls vazios (NG=2) neste grafo |
+| FIND PATH | 0 | 195 | — | **não comparável** (ver §6.6) |
+
+**§6.6 — caso novo: paths rGFA-derived.** GRCh38-464 e CHM13-464 são
+arquivos **rGFA** com tags `SN:Z:GRCh38#0#chrN`. `vg convert -g` importa
+por default segmentos rGFA como paths de referência (rank ≤ 0) → vg
+reporta 195 paths em GRCh38-464. GGQL parseia apenas linhas P/W
+explícitas → `FIND PATH = 0`. Não é divergência de corretude: é modelo
+de path distinto (análogo a §6.3 P-vs-W, mas para rGFA). Implicação: o
+"0 paths" documentado para CHM13-464 (§3.6) vale só para o modelo P/W;
+vg vê paths rGFA lá também. PATH/crosses nesses datasets fica fora da
+matriz de paridade.
+
+**Métricas (mesma máquina)**: vg convert 5:40.78 / 99% CPU 1-thread /
+2,0 GB RSS / `.pg` 1,3 GiB · GGQL ingest **2:38.97 / 597% CPU (~6×) /
+36,9 GiB RSS / `.idx` 14 GiB** · vg snarls (`stats -R`) 10,2 s / 2,0 GB.
+Confirma §5.3: vg single-thread vs GGQL paralelismo real (~6× efetivo).
+
+**odgi** ⊘ esperado neste tier (mesmo `stol` em IDs `s1…` de §3.6/§7.1.1).
 
 ---
 
@@ -506,6 +547,7 @@ Convenção: GiB/MiB/KiB binários (1 GiB = 2³⁰ B). Medições reais com
 | DRB1-3123 (com paths) | 429,66 KiB | 697,25 KiB (162,28%) | 971,67 KiB | 395,08 KiB |
 | chm13_subset_100w (4,3M segs) | 632,89 MiB | **1.368,70 MiB** (216,27%) | — | — |
 | CHM13-464 (1,35M segs) | 3,75 GiB | **15,72 GiB** (419,47%) | ⊘ stol | 1,55 GiB |
+| GRCh38-464 (751K segs) | 3,27 GiB | **13,94 GiB** (426,23%) | ⊘ stol | 1,23 GiB |
 | HPRC (85,3M segs) | **45,68 GiB** | **21,99 GiB** (48,13%) | **14,97 GiB** (32,77%) | ⊘ T1 OOM |
 
 **Ratio `.idx`/GFA é não-monotônico** (135% → 216% → 419% → 48%): em
@@ -520,6 +562,7 @@ FM-Index puro; em HPRC redundância de sequência permite compressão.
 | Tier A tiny | <0.1 s | <1 s |
 | Tier B DRB1 | 0.06 s | ~5 s |
 | Tier C chm13_100w (4.3M) | **25 s** (8 threads) | ~horas |
+| Tier C-GRCh38-464 (751K) | **2:39** (8 threads) | **5:41** (1-thread, medido 2026-05-18) |
 | Tier C-full HPRC (85M) | **17:39** (8 threads) | ⊘ T1 OOM em 62 GiB |
 
 vg ingest exact times: vg convert em HPRC abortado por OOM-kill após
@@ -632,12 +675,52 @@ contar ocorrências, GGQL precisaria expor `COUNT(*) GROUP BY position`
 
 ## §7. Limitações e gaps de comparação
 
-### §7.1 Comparações não executadas (sessões dedicadas futuras)
+### §7.1 Inventário de células ⊘ na matriz (DoD §11.3)
+
+Auditoria de 2026-05-15 contra `tests/comparisons/fase6_paper_summary.md`
+§1.1-§1.6 — todas as 22 ocorrências ⊘ classificadas em 3 categorias
+mutuamente exclusivas.
+
+#### §7.1.1 Categoria A — competidor recusa o input (paridade tecnicamente impossível)
+
+| Célula ⊘ | Onde (Fase 6) | Motivo técnico |
+|---|---|---|
+| odgi em CHM13-464 (F01, F02, ingest wall+RSS, disco) | §1.1, §1.5, §1.6 | `Error parsing segment 's1': stol` — `odgi build` v0.9.4 chama `std::stol(id)` na primeira S-line e aborta. CHM13-464 usa IDs alfanuméricos (`s1, s2, …`); odgi presume IDs decimais puros. **Não é bug GGQL** — diferencial qualitativo (GGQL e vg fazem remap automático). |
+| vg em HPRC year-1 chm13 (ingest wall+RSS, disco, snarls, paths) | §1.5, §1.6 | `vg convert -g HPRC.gfa -p` OOM após ~1h41min em máquina de 62 GiB RAM. Resolvendo apenas para `.pg` (sem `.xg`/`.gcsa`), vg precisa de ≥128 GiB. Bloqueia 4 células dependentes (T2 `vg snarls`, T10 `vg paths`, disco `.pg`, RSS pico). |
+
+**Estratégia documentada** (§10 do plano): bisseção por chromossomo
+(processar cromossomos separadamente e somar) ou hardware ≥128 GiB.
+Nenhuma das duas executada — fora do escopo desta submissão.
+
+#### §7.1.2 Categoria B — feature ausente por design no competidor
+
+GGQL é único no nicho "SQL-like declarativo sobre pangenome" — várias
+células ⊘ refletem que vg/odgi/gfatools/awk não foram projetados para a
+operação correspondente. Listadas aqui para honestidade metodológica,
+não como falha do competidor.
+
+| Célula ⊘ | Tools | Motivo |
+|---|---|---|
+| F05 `FIND REPEAT` (out_degree>1) | vg, odgi, gfatools | nenhum expõe predicate "fork point" como primitiva; awk/Python implementam via degree-script ad-hoc |
+| F06 `FIND BUBBLE` em odgi v0.9.4 | odgi | sem subcomando `snarls` nesta versão (odgi 0.10+ adiciona; não testado) |
+| F06 `FIND BUBBLE` em gfatools/awk | gfatools, awk | awk: Cactus/HSESE requer árvore de snarls — fora do `awk one-pass`. gfatools: `gfatools bubble` **existe** mas é **ref-anchored rGFA** (não snarl): só roda em rGFA próprio (DRB1/chm13→0; GRCh38→130.510 vs GGQL 239.465), incomparável por definição (`ggql_vs_gfatools.md §3.3/§6.1`) |
+| F09 `WHERE length op N` | vg, odgi | vg `paths`/`stats`/`find` não compõem predicates genéricos sobre atributos de seg |
+| F10 `WHERE name = "X"` | vg, odgi | mesmo — `vg find -n` filtra por ID numérico, não por nome string arbitrário |
+| F11 `WHERE depth op X` | vg, odgi | requer parse de `dp:f:` tag + predicate genérico; nenhum suporta nativamente |
+| F14 `WHERE A AND (B OR C)` composição | vg, odgi | sem expression parser para predicates compostos com precedência |
+| F15 `LIMIT N OFFSET M` idempotente | vg, odgi | `\| head` em pipe shell não compõe com OFFSET (mas é workaround) |
+| F16 `RETURN col, *` projection seletiva | vg, odgi | output format é fixo por subcomando; `awk '{print $X}'` é workaround manual |
+| I02 4 perfis (`pangenome`/`metag`/`asm`/`comp`) | vg, odgi, gfatools | feature **única do GGQL**; vg tem `-G/-x` flags não-comparáveis 1-a-1 |
+| I03 Cache idempotente `.idx` | vg, odgi | nenhum tem detecção automática "índice já existe, é no-op" — re-ingest sempre rebuilds |
+
+#### §7.1.3 Comparações não executadas (sessões dedicadas futuras)
 
 | Comparação | Por quê não fizemos | Quando |
 |---|---|---|
-| vg snarls em HPRC full | ~horas de execução | R10.bis sessão futura |
-| minigraph (alignment) | Caso de uso diferente | N/A |
+| vg snarls em HPRC full | OOM em 62 GiB (depende de Cat A acima); ~horas mesmo em hardware adequado | R10.bis sessão futura, máquina ≥128 GiB |
+| gfatools em CHM13/HPRC | `gfatools stat` rodaria, mas não tem queries comparáveis a F03+ | baixa prioridade — DRB1 já cobre o ponto |
+| F11 `WHERE depth` em dataset com `dp:f:` | datasets atuais (DRB1, CHM13-464, HPRC) sem `dp:f:` tag | I-6 — aquisição de dataset com depth annotations |
+| minigraph (alignment) | caso de uso diferente, ver §7.2 | N/A |
 
 ### §7.2 Comparações que não fazem sentido
 

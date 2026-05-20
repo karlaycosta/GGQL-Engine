@@ -17,7 +17,6 @@
 #include <istream>
 #include <memory>
 #include <ostream>
-#include <string_view>
 #include <vector>
 
 namespace gbwt {
@@ -30,7 +29,7 @@ class GbwtBackend {
   public:
     using node_type = std::uint32_t;
 
-    GbwtBackend();
+    GbwtBackend() noexcept;
     ~GbwtBackend();
 
     // Move-only: ::gbwt::GBWT contem estruturas SDSL que nao sao

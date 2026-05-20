@@ -28,7 +28,7 @@ constexpr std::uint32_t kVersion = 1;
 
 }  // namespace
 
-GbwtBackend::GbwtBackend() = default;
+GbwtBackend::GbwtBackend() noexcept = default;
 
 GbwtBackend::~GbwtBackend() = default;
 
@@ -43,19 +43,21 @@ GbwtBackend::GbwtBackend(std::unique_ptr<::gbwt::GBWT> gbwt) noexcept
 void GbwtBackend::extract_into(std::size_t                 path_id,
                                std::vector<std::uint64_t>& out) const {
     out.clear();
-    if (!gbwt_) { return; }
+    if (!gbwt_) [[unlikely]] { return; }
 
     // ::gbwt::GBWT::extract retorna sequencia ENCODED (gbwt-bound: shift+1 +
     // bit de orientacao). Aplicamos gbwt_decode_node aqui para que o caller
-    // (path_nodes em GfaCsrTopology) receba IDs internos globais — espelha
-    // exatamente o comportamento de cb905db:src/storage/graph_algorithms.cpp.
+    // (path_nodes em GfaCsrTopology) receba IDs internos globais.
     //
     // ENDMARKER (=0) e filtrado: nao representa um no real, e gbwt_decode_node
     // sobre 0 e UB (wrap para UINT64_MAX).
+    //
+    // Se path_id >= sequences(), gbwt::extract retorna vector vazio — out fica
+    // vazio em ambos os casos (path inexistente ou vazio de fato).
     const auto seq = gbwt_->extract(static_cast<::gbwt::size_type>(path_id));
     out.reserve(seq.size());
     for (const auto enc : seq) {
-        if (enc == ::gbwt::ENDMARKER) { continue; }
+        if (enc == ::gbwt::ENDMARKER) [[unlikely]] { continue; }
         out.push_back(ggql::gbwt_decode_node(static_cast<std::uint64_t>(enc)));
     }
 }
@@ -90,7 +92,9 @@ void GbwtBackend::save(std::ostream& out) const {
     if (!gbwt_) {
         // Shard vazio: escreve um header-only sem payload. O load detecta
         // ausencia de payload via num_paths/size = 0 do gbwt default-constr.
-        ::gbwt::GBWT empty;
+        // static const evita realocar header/tags/bwt/da_samples/metadata
+        // a cada save de shard nullptr. Magic Statics garante init thread-safe.
+        static const ::gbwt::GBWT empty;
         empty.simple_sds_serialize(out);
     } else {
         gbwt_->simple_sds_serialize(out);
@@ -108,7 +112,21 @@ GbwtBackend GbwtBackend::load(std::istream& in) {
         throw std::runtime_error("GbwtBackend::load: failed to read magic");
     }
     if (magic != kMagic) {
-        throw std::runtime_error("GbwtBackend::load: bad magic");
+        // Hex dump dos bytes recebidos para diagnostico — ajuda a identificar
+        // caches corrompidos vs arquivos truncados vs cabecalhos de outras
+        // versoes.
+        std::string magic_hex;
+        magic_hex.reserve(24);
+        constexpr char hex[] = "0123456789abcdef";
+        for (auto c : magic) {
+            const auto b = static_cast<unsigned char>(c);
+            magic_hex.push_back(hex[b >> 4]);
+            magic_hex.push_back(hex[b & 0xF]);
+            magic_hex.push_back(' ');
+        }
+        throw std::runtime_error(
+            "GbwtBackend::load: bad magic (got: " + magic_hex +
+            "expected: 47 47 51 4c 47 42 00 00 = \"GGQLGB\\0\\0\")");
     }
 
     std::uint32_t version = 0;
@@ -116,11 +134,17 @@ GbwtBackend GbwtBackend::load(std::istream& in) {
     if (!in.good()) {
         throw std::runtime_error("GbwtBackend::load: failed to read version");
     }
-    if (version != kVersion) {
+    if (version < kVersion) {
         throw std::runtime_error(
-            "GbwtBackend::load: versao " + std::to_string(version) +
-            " nao suportada (esperado " + std::to_string(kVersion) +
-            "). Cache antigo — regenere via `ggql ingest`.");
+            "GbwtBackend::load: cache de versao " + std::to_string(version) +
+            " e mais antigo que o suportado (v" + std::to_string(kVersion) +
+            "). Regenere via `ggql ingest`.");
+    }
+    if (version > kVersion) {
+        throw std::runtime_error(
+            "GbwtBackend::load: cache de versao " + std::to_string(version) +
+            " e mais novo que esta versao do engine (suporta v" +
+            std::to_string(kVersion) + "). Atualize o engine.");
     }
 
     auto gbwt = std::make_unique<::gbwt::GBWT>();

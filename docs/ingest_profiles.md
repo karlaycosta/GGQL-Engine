@@ -35,12 +35,17 @@ dados do motor. A escolha correta reduz RAM, tempo de ingestão e tamanho do
 | `FIND TIP` | C4 |
 | `FIND REPEAT` | C4 |
 | `FIND BUBBLE` | C4 + C5 |
-| `FIND PATH WHERE …` | C4 + C7 (path_stats; fast path) **ou** C4 + C6 (fallback) |
-| `FIND PATH WHERE crosses(…)` | stub atualmente (TODO Phase 2; precisará de C6=Gbwt para latência viável) |
+| `FIND PATH WHERE length / node_count / name` | C4 + C7 (path_stats; fast path) **ou** C4 + C6 (fallback) |
+| `FIND PATH WHERE crosses(…)` | C4 + C6 — **implementado** (`CrossesCondition` + `CrossesCache`) |
 
 > Caminho rápido de `FIND PATH WHERE length / node_count / name`: lê apenas
-> `path_stats.bin` (poucos KB), não toca em C6. C6 só é exercitado em fallback
-> (cache sem path_stats) e — futuramente — em queries posicionais como `crosses()`.
+> `path_stats.bin` (poucos KB), não toca em C6. C6 é exercitado em fallback
+> (cache sem path_stats) **e** por `crosses()`: `build_crosses_cache()`
+> (`query_planner.cpp:447`) pré-computa, uma vez por query, o conjunto de
+> nós do path-alvo via `topo.path_nodes()` (extração gBWT) e
+> `eval_condition` testa pertinência O(1) no `CrossesCache`
+> (`query_evaluator.cpp:137-144`). Medido na Fase 3: ~15× speedup vs
+> baseline Python (DRB1).
 
 ---
 

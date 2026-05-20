@@ -84,8 +84,13 @@ struct entity_type : peg::sor<kw_segment, kw_edge, kw_path, kw_bubble, kw_tip, k
 
 // ─── Operadores relacionais ───────────────────────────────────────────────────
 // A ordem importa no PEG: símbolos mais longos devem vir antes dos mais curtos.
+// `<>` é sintaxe SQL-padrão para `!=` (suportado em SQL-92, Oracle, PostgreSQL).
+// Sem o alternativo explícito, o PEG consumia apenas o `<` em `length <> N` e
+// silenciosamente falhava o parse (run_count → 0 sem warning) — bug
+// descoberto em Fase 1 do plano de comparação completa (2026-05-13).
 
-struct op_sym : peg::sor<TAO_PEGTL_STRING("!="), TAO_PEGTL_STRING(">="), TAO_PEGTL_STRING("<="),
+struct op_sym : peg::sor<TAO_PEGTL_STRING("!="), TAO_PEGTL_STRING("<>"),
+                         TAO_PEGTL_STRING(">="), TAO_PEGTL_STRING("<="),
                          TAO_PEGTL_STRING("="), TAO_PEGTL_STRING(">"), TAO_PEGTL_STRING("<")> {};
 
 // ─── Fields ───────────────────────────────────────────────────────────────────
@@ -279,6 +284,7 @@ namespace detail {
 [[nodiscard]] constexpr Operator parse_op(std::string_view s) noexcept {
     using enum Operator;
     if (s == "!=") { return NEQ; }
+    if (s == "<>") { return NEQ; }   // SQL-92 alternativo para !=
     if (s == ">=") { return GEQ; }
     if (s == "<=") { return LEQ; }
     if (s == ">")  { return GT; }

@@ -92,6 +92,9 @@ static void test_b_operators() {
     constexpr Case cases[] = {
         {"FIND SEGMENT WHERE length = 100",  Operator::EQ,  "WHERE x = 100"},
         {"FIND SEGMENT WHERE length != 100", Operator::NEQ, "WHERE x != 100"},
+        // SQL-92 alternativo `<>` deve ser equivalente a `!=` (Fase 1 fix 2026-05-13).
+        // Antes: PEG consumia só `<` e o parse falhava silenciosamente → run_count=0.
+        {"FIND SEGMENT WHERE length <> 100", Operator::NEQ, "WHERE x <> 100 (SQL alt)"},
         {"FIND SEGMENT WHERE length < 100",  Operator::LT,  "WHERE x < 100"},
         {"FIND SEGMENT WHERE length > 100",  Operator::GT,  "WHERE x > 100"},
         {"FIND SEGMENT WHERE length <= 100", Operator::LEQ, "WHERE x <= 100"},

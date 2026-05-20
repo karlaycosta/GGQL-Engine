@@ -160,6 +160,19 @@ int main() {
         check(r_dos.row_count <= 10,                             "I-1: SEARCH KMER \"A\" LIMIT 10 cap (DoS regression)");
         auto r_dos2 = run(planner, R"(SEARCH KMER "AA" LIMIT 5)");
         check(r_dos2.row_count <= 5,                             "I-1: SEARCH KMER \"AA\" LIMIT 5 cap");
+
+        // I-7 (auditoria DoD §11.6): a versão original do I-1 fazia
+        // `std::min(q.limit × 16, kSafetyHardLimit)`, capando TODA SEARCH
+        // KMER a 100k offsets — `SEARCH KMER "ACGT"` em CHM13-464 era
+        // truncado de 286.696 para 56.311 segs e LIMIT explícito grande
+        // era ignorado. Invariante: aumentar o LIMIT explícito NUNCA pode
+        // DIMINUIR o count (monotonicidade) e LIMIT grande não deve ser
+        // truncado abaixo do count real. Em datasets pequenos (DRB1, ACGT
+        // ≈ 7 segs) isto é trivial; a validação em escala é o smoke
+        // CHM13-464 F07 == 286.696 (reprodutibilidade §11.6).
+        auto r_k_small = run(planner, R"(SEARCH KMER "ACGT" LIMIT 2)");
+        auto r_k_big   = run(planner, R"(SEARCH KMER "ACGT" LIMIT 1000000)");
+        check(r_k_big.row_count >= r_k_small.row_count,          "I-7: SEARCH KMER count monotônico no LIMIT (não trunca por cap interno)");
     } else {
         std::printf("  skip SEARCH KMER (FM-Index ausente)\n");
     }

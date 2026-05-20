@@ -71,8 +71,9 @@ pelo menos três ferramentas distintas em um pipeline tradicional.
   WHERE crosses(...)`), o motor decide *como* — escolhendo o índice
   apropriado (CSR, gBWT, FM-Index) e o plano de execução.
 - **Escala para genomas reais.** Pipeline de ingestão paralelo (mmap +
-  OpenMP + MPHF) processa um GFA de 4 milhões de nós em menos de 2 segundos
-  e o HPRC inteiro em ~3 minutos.
+  OpenMP + MPHF) processa um GFA de 4 milhões de nós em poucos segundos
+  e o HPRC inteiro (85 M nós, 118 M arestas, 28 k haplótipos) em
+  ~17,65 minutos com perfil `pangenome` completo (cold ingest, 8 threads).
 - **Perfis de ingestão por caso de uso.** Metagenômica, pangenoma, grafo de
   montagem e genômica comparativa têm necessidades diferentes — você escolhe
   apenas as estruturas que vai consultar e economiza RAM/tempo.
@@ -234,28 +235,34 @@ FIND PATH WHERE crosses(HG002#chr1) RETURN id, name, bp_length;
 
 ## Performance
 
-Benchmarks no **GFA HPRC CHM13** · N ≈ 85 M nós · 118 M arestas · 5
-haplótipos · 8 threads.
+Benchmarks no **GFA HPRC v1.0 (mc-chm13)** · 85.282.047 nós · 118.135.187
+arestas · 28.784 haplótipos · 8 threads · perfil `pangenome` (cold ingest
+com `/usr/bin/time -v`, medido em 2026-05-12).
 
-### Pipeline de ingestão (perfil `pangenome`)
+### Pipeline de ingestão (HPRC full, perfil `pangenome`)
 
 | Fase | Tempo |
 |------|-------|
-| Pass 1 — tokenização + MPHF | 30,2 s |
-| Pass 2 — links + paths streaming | 132,4 s |
-| CSR + Elias-Fano | 7,2 s |
-| gBWT (5 paths) | 16,1 s |
-| Snarls (3-ECC + cactus) | ~5 s |
-| **Total** | **≈ 191 s** |
+| Pass 1 — tokenização + MPHF | 10,6 s |
+| Pass 2 — links + paths streaming | 2,99 min |
+| CSR + Elias-Fano | 6,2 s |
+| FM-Index (libsais64 + Occ) | 2,51 min |
+| gBWT (28.784 paths) | 7,18 min |
+| Snarls (3-ECC + cactus) | 2,08 min |
+| Persistência do `.idx/` | 1,1 s |
+| **Total wall-clock** | **17,65 min** (1059 s) |
 
-### Footprint de memória
+User CPU: 6.159 s (~5,8× wall, paralelismo efetivo ~6 threads no melhor
+caso — bottleneck em fases single-thread como o stage de IDs do Pass 1).
 
-| Componente | Tamanho |
-|------------|---------|
-| `E_fwd` + `E_bwd` — 118 M arestas × 4 B × 2 | 0,94 GB |
-| `ef_fwd` + `ef_bwd` — offsets Elias-Fano | ~64 MB |
-| `offsets_cache` — lazy, alocado sob demanda | 680 MB |
-| **Total `memory_bytes()`** | **≈ 2,76 GB** |
+### Footprint de memória e disco
+
+| Métrica | Valor |
+|---|---|
+| **RSS pico (cold ingest HPRC)** | **50,7 GB** |
+| Pico isolado da construção gBWT | 20,9 GB |
+| Cache em disco `.idx/` | 22 GB (45% do GFA de 49 GB) |
+| Page faults major / minor | 4.218 / 52,7 M |
 
 ### Latências de hot-path
 
@@ -265,14 +272,25 @@ haplótipos · 8 threads.
 | `in_degree(id)` | 7,5 |
 | `out_neighbors(id)` | 7,8 |
 
-### Perfis comparados (HPRC)
+### Comparação contra ferramentas estabelecidas (HPRC, mesmo hardware)
+
+| Ferramenta | Wall-clock | RSS pico | Threads efetivas |
+|---|---:|---:|---:|
+| **GGQL** (`bench_gbwt`, perfil `pangenome`) | **17,65 min** | **50,7 GB** | 8 (multi) |
+| `gfatools stat` (só contagem, sem índice) | 18,98 min | 47,5 GB | 1 (single) |
+
+Detalhe relevante: `gfatools stat` é estritamente uma contagem de segs/links
+(sem índice persistente, sem haplótipos, sem FM, sem snarls) e ainda assim
+gasta RAM equivalente e é mais lento que GGQL fazendo o pipeline completo.
+
+### Perfis comparados (HPRC, estimativas)
 
 | Perfil | RAM pico | Tempo total | Casos de uso |
 |--------|----------|-------------|--------------|
-| `metagenomics` | ~3 GB | ~165 s | sem haplótipos significativos |
-| `assembly` | ~7 GB | ~175 s | QC de montagem (snarls, sem gBWT) |
-| `comparative` | ~10 GB | ~185 s | paths = espécies (gBWT, sem snarls) |
-| `pangenome` | ~12 GB | ~191 s | tudo habilitado |
+| `metagenomics` | ~25 GB | ~8 min | sem haplótipos significativos |
+| `assembly` | ~30 GB | ~10 min | QC de montagem (snarls, sem gBWT) |
+| `comparative` | ~45 GB | ~15 min | paths = espécies (gBWT, sem snarls) |
+| `pangenome` | **50,7 GB** | **17,65 min** | tudo habilitado *(medido)* |
 
 ---
 
@@ -426,10 +444,14 @@ ggql_engine/
 - [x] Bindings Dart/FFI completos (engine + query + perfis)
 - [x] **Perfis de ingestão** — pangenome / metagenomics / assembly / comparative
 - [x] **17 testes CTest** (10 do projeto + 7 do gbwt)
-- [ ] `crosses()` integrado ao QueryPlanner — requer query gBWT por região
+- [x] `crosses()` integrado ao QueryPlanner (com `CrossesCache` para
+  composição AND/OR sobre paths atravessados)
+- [x] `contains_kmer()` integrado ao `FIND SEGMENT WHERE`
 - [ ] Persistência de queries pré-compiladas (cache de planos)
 - [ ] CI no GitHub Actions (`ubuntu-24.04`, `g++-14`)
 - [ ] Suporte a GFA 2.0 (linhas E/G/U)
+- [ ] Indexação de alinhamentos GAF (reuso de GBWT/CrossesCache) — ver
+  *future work* no paper
 
 ---
 

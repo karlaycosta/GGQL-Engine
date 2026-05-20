@@ -3,10 +3,28 @@ CompileFlags:
   Compiler: /usr/bin/g++-14
   Add:
     - "-std=c++23"
+    - "-march=native"
+    - "-fopenmp"
     - "-I/home/karlay/Documentos/c++/ggql_engine/include"
     - "-I/home/karlay/Documentos/c++/ggql_engine/third_party/sdsl-lite/include"
     - "-I/home/karlay/Documentos/c++/ggql_engine/third_party/gbwt/include"
     - "-I/home/karlay/Documentos/c++/ggql_engine/third_party/pegtl/include"
     - "-I/home/karlay/Documentos/c++/ggql_engine/third_party/libsais/include"
     - "-I/home/karlay/Documentos/c++/ggql_engine/third_party/fmt/include"
-    - "-I/usr/lib/llvm-20/lib/clang/20/include"
+    # ── omp.h via -idirafter (não -I) ────────────────────────────────────
+    # `clangd` no sistema é v23 (`clangd --version`). Seus paths default já
+    # incluem /usr/lib/llvm-23/lib/clang/23/include com os intrinsics SIMD
+    # (xmmintrin.h, immintrin.h, ia32intrin.h) consistentes com seus builtins.
+    #
+    # `omp.h` não vem no clang-23 standalone — só existe em
+    # /usr/lib/gcc/x86_64-linux-gnu/14/include, que **também** contém um
+    # immintrin.h do gcc-14 com `__builtin_ia32_*` específicos do gcc.
+    #
+    # Solução: usar `-idirafter` (em vez de `-I`) para colocar esse path
+    # DEPOIS dos paths system. Assim clang acha primeiro `immintrin.h` em
+    # seu próprio diretório (clang-23 builtins), e cai no gcc-14 só para
+    # `omp.h` que não existe lá.
+    #
+    # `-I` colocaria o gcc-14 ANTES dos paths system, fazendo o clang
+    # tentar usar `immintrin.h` do gcc-14 → erros como `__builtin_ia32_bsrsi`.
+    - "-idirafter/usr/lib/gcc/x86_64-linux-gnu/14/include"
