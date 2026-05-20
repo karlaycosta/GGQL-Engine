@@ -3,7 +3,9 @@
 #include "ggql/ingest/ingestor.hpp"
 #include "ggql/ingest/metadata_store.hpp"
 #include "ggql/ingest/profile.hpp"
+#include "ggql/query/entity_columns.hpp"
 #include "ggql/query/grammar.hpp"
+#include "ggql/query/query_context.hpp"
 #include "ggql/query/query_planner.hpp"
 #include "ggql/storage/fm_index.hpp"
 
@@ -50,6 +52,11 @@ struct GgqlEngineWrapper {
     mutable std::mutex planner_mutex;
     std::shared_ptr<QueryPlanner> planner;
     std::string last_error;
+    // Round 3.F: cancel cooperativo (checado em Paginator::advance via
+    // ctx::cancel_requested). Reset no início de cada engine_execute.
+    std::atomic<bool> cancel_requested{false};
+    // Round 3.G: override per-engine de kMaxTotalHitsCount. 0 = default.
+    std::atomic<std::size_t> max_total_hits_override{0};
 };
 
 // #1A FFI: o FM-Index só é consumido por SEARCH KMER / WHERE contains_kmer.
@@ -120,6 +127,47 @@ void dispatch_bridge(const cli::Event& ev, void* user) noexcept {
     out.rate_mbs = ev.rate_mbs;
 
     b->fn(&out, b->user_data);
+}
+
+// ── Helpers Round 2 (têm template/constexpr — não podem viver em extern "C") ──
+
+// Round 2.D: buffer thread_local para validate_error_message
+thread_local std::string g_validate_error_buf;
+
+// Round 2.E: schema introspection (fonte única em
+// include/ggql/query/entity_columns.hpp). Convertemos
+// std::array<string_view,N> → C-array de const char* uma vez (constexpr).
+static const char* const kEntityNames[] = {
+    "SEGMENT", "EDGE", "PATH", "BUBBLE", "TIP", "REPEAT"
+};
+static constexpr int32_t kEntityCount =
+    sizeof(kEntityNames) / sizeof(kEntityNames[0]);
+
+template <size_t N>
+[[nodiscard]] static constexpr auto to_c_array(
+    const std::array<std::string_view, N>& src) {
+    std::array<const char*, N> r{};
+    for (size_t i = 0; i < N; ++i) { r[i] = src[i].data(); }
+    return r;
+}
+
+static constexpr auto kSegmentColsC = to_c_array(ggql::query::kSegmentColumns);
+static constexpr auto kEdgeColsC    = to_c_array(ggql::query::kEdgeColumns);
+static constexpr auto kPathColsC    = to_c_array(ggql::query::kPathColumns);
+static constexpr auto kBubbleColsC  = to_c_array(ggql::query::kBubbleColumns);
+static constexpr auto kNodeColsC    = to_c_array(ggql::query::kNodeColumns);
+
+// Compara identificadores ASCII case-insensitive (sem locale).
+[[nodiscard]] static bool ascii_iequal(std::string_view a,
+                                       std::string_view b) noexcept {
+    if (a.size() != b.size()) { return false; }
+    for (size_t i = 0; i < a.size(); ++i) {
+        char ca = a[i], cb = b[i];
+        if (ca >= 'a' && ca <= 'z') { ca = static_cast<char>(ca - 32); }
+        if (cb >= 'a' && cb <= 'z') { cb = static_cast<char>(cb - 32); }
+        if (ca != cb) { return false; }
+    }
+    return true;
 }
 
 } // namespace
@@ -416,6 +464,62 @@ const char* ggql_engine_last_error(GgqlEngineHandle engine) {
     return static_cast<GgqlEngineWrapper*>(engine)->last_error.c_str();
 }
 
+// Round 3.F (2026-05-20): cancel cooperativo.
+void ggql_engine_cancel(GgqlEngineHandle engine) {
+    if (!engine) { return; }
+    auto* w = static_cast<GgqlEngineWrapper*>(engine);
+    w->cancel_requested.store(true, std::memory_order_release);
+}
+
+// Round 3.G (2026-05-20): cap per-engine.
+void ggql_engine_set_max_total_hits(GgqlEngineHandle engine, uint64_t cap) {
+    if (!engine) { return; }
+    auto* w = static_cast<GgqlEngineWrapper*>(engine);
+    w->max_total_hits_override.store(static_cast<std::size_t>(cap),
+                                     std::memory_order_release);
+}
+
+// Round 3.H (2026-05-20): streaming-via-pagination. Re-executa em
+// páginas, chama callback row-a-row; para se cb=false, esgotamento ou
+// cancel cooperativo (Round 3.F).
+int64_t ggql_engine_execute_streaming(
+    GgqlEngineHandle engine,
+    const char*      query,
+    uint32_t         page_size,
+    GgqlRowCallback  cb,
+    void*            user_data
+) {
+    if (!engine || !query || !cb) { return -1; }
+    if (page_size == 0) { page_size = 1024; }
+    int64_t total_emitted = 0;
+    uint32_t offset = 0;
+    bool keep_going = true;
+    while (keep_going) {
+        // Cancel checado entre páginas (e dentro do execute via Paginator).
+        if (static_cast<GgqlEngineWrapper*>(engine)
+              ->cancel_requested.load(std::memory_order_acquire)) {
+            break;
+        }
+        GgqlResultHandle r = ggql_engine_execute(engine, query, page_size, offset);
+        if (!r) {
+            return total_emitted > 0 ? total_emitted : int64_t{-2};
+        }
+        const int64_t n = ggql_result_row_count(r);
+        for (int64_t i = 0; i < n; ++i) {
+            if (!cb(r, static_cast<int32_t>(i), total_emitted, user_data)) {
+                keep_going = false;
+                break;
+            }
+            ++total_emitted;
+        }
+        ggql_result_free(r);
+        // Fim natural: página devolveu menos linhas que pedimos.
+        if (static_cast<uint32_t>(n) < page_size) { break; }
+        offset += page_size;
+    }
+    return total_emitted;
+}
+
 // Round 1.B (2026-05-20): introspecção de capabilities sem rodar queries.
 int32_t ggql_engine_capabilities(GgqlEngineHandle engine,
                                  GgqlEngineCapabilities* out) {
@@ -447,12 +551,8 @@ int32_t ggql_engine_capabilities(GgqlEngineHandle engine,
 }
 
 // ── Round 2.D (2026-05-20): validate parse-only ──────────────────────────────
-// Buffer thread_local p/ manter o C-string vivo até a próxima chamada FFI
-// (PEGTL retorna std::string, precisamos de char* estável).
-namespace {
-thread_local std::string validate_error_buf;
-} // namespace
-
+// Buffer thread_local em g_validate_error_buf (namespace anônimo acima do
+// extern "C"; thread_local std::string não pode ficar dentro de extern "C").
 int32_t ggql_engine_validate(GgqlEngineHandle /*engine*/,
                              const char* query,
                              GgqlParseResult* out) {
@@ -467,44 +567,14 @@ int32_t ggql_engine_validate(GgqlEngineHandle /*engine*/,
         return 0;
     }
     out->valid = false;
-    validate_error_buf = std::move(parsed.error());
-    out->error_message = validate_error_buf.c_str();
+    g_validate_error_buf = std::move(parsed.error());
+    out->error_message = g_validate_error_buf.c_str();
     return 1;
 }
 
 // ── Round 2.E (2026-05-20): schema introspection ─────────────────────────────
-// Espelha src/query/query_planner.cpp:58-65 (detail::k*Columns). Em refactor
-// futuro vale extrair para include/ggql/query/entity_columns.hpp e compartilhar.
-namespace {
-
-// Nomes de entidade reconhecidos pela linguagem (canônicos em maiúsculas).
-// TIP e REPEAT compartilham kNodeColumns no planner.
-static const char* const kEntityNames[] = {
-    "SEGMENT", "EDGE", "PATH", "BUBBLE", "TIP", "REPEAT"
-};
-static constexpr int32_t kEntityCount = sizeof(kEntityNames) / sizeof(kEntityNames[0]);
-
-static const char* const kSegmentCols[] = {"id", "name", "length", "read_count", "depth"};
-static const char* const kEdgeCols[]    = {"from_id", "to_id", "to_orient"};
-static const char* const kPathCols[]    = {"id", "name", "node_count", "length"};
-static const char* const kBubbleCols[]  = {"source", "sink", "branch_count",
-                                           "internal_node_count", "has_cycles"};
-static const char* const kNodeCols[]    = {"id", "in_degree", "out_degree"};
-
-// Compara dois identificadores ASCII case-insensitive (sem locale).
-[[nodiscard]] static bool ascii_iequal(std::string_view a, std::string_view b) noexcept {
-    if (a.size() != b.size()) { return false; }
-    for (size_t i = 0; i < a.size(); ++i) {
-        char ca = a[i], cb = b[i];
-        if (ca >= 'a' && ca <= 'z') { ca = static_cast<char>(ca - 32); }
-        if (cb >= 'a' && cb <= 'z') { cb = static_cast<char>(cb - 32); }
-        if (ca != cb) { return false; }
-    }
-    return true;
-}
-
-} // namespace
-
+// Statics (kEntityNames, kSegmentColsC, …) e ascii_iequal estão no namespace
+// anônimo acima do extern "C" (template/constexpr exigem C++ linkage).
 const char* const* ggql_engine_list_entities(int32_t* out_count) {
     if (out_count) { *out_count = kEntityCount; }
     return kEntityNames;
@@ -516,24 +586,24 @@ const char* const* ggql_engine_describe_entity(const char* entity_name,
     if (!entity_name) { return nullptr; }
     const std::string_view name{entity_name};
     if (ascii_iequal(name, "SEGMENT")) {
-        if (out_count) { *out_count = static_cast<int32_t>(std::size(kSegmentCols)); }
-        return kSegmentCols;
+        if (out_count) { *out_count = static_cast<int32_t>(kSegmentColsC.size()); }
+        return kSegmentColsC.data();
     }
     if (ascii_iequal(name, "EDGE")) {
-        if (out_count) { *out_count = static_cast<int32_t>(std::size(kEdgeCols)); }
-        return kEdgeCols;
+        if (out_count) { *out_count = static_cast<int32_t>(kEdgeColsC.size()); }
+        return kEdgeColsC.data();
     }
     if (ascii_iequal(name, "PATH")) {
-        if (out_count) { *out_count = static_cast<int32_t>(std::size(kPathCols)); }
-        return kPathCols;
+        if (out_count) { *out_count = static_cast<int32_t>(kPathColsC.size()); }
+        return kPathColsC.data();
     }
     if (ascii_iequal(name, "BUBBLE")) {
-        if (out_count) { *out_count = static_cast<int32_t>(std::size(kBubbleCols)); }
-        return kBubbleCols;
+        if (out_count) { *out_count = static_cast<int32_t>(kBubbleColsC.size()); }
+        return kBubbleColsC.data();
     }
     if (ascii_iequal(name, "TIP") || ascii_iequal(name, "REPEAT")) {
-        if (out_count) { *out_count = static_cast<int32_t>(std::size(kNodeCols)); }
-        return kNodeCols;
+        if (out_count) { *out_count = static_cast<int32_t>(kNodeColsC.size()); }
+        return kNodeColsC.data();
     }
     return nullptr;
 }
@@ -604,6 +674,12 @@ GgqlResultHandle ggql_engine_execute(
         w->last_error = "engine não inicializado corretamente";
         return nullptr;
     }
+    // Round 3.F: reset do cancel flag para esta query. Round 3.G: instala
+    // override de cap (se setado). ScopedContext garante restore.
+    w->cancel_requested.store(false, std::memory_order_release);
+    ggql::query::ctx::ScopedContext qctx(
+        &w->cancel_requested,
+        w->max_total_hits_override.load(std::memory_order_acquire));
     auto exec = planner_snap->execute(parsed.value());
     if (!exec) {
         w->last_error = std::move(exec.error());

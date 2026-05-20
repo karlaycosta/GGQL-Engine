@@ -10,11 +10,14 @@
 #include "ggql/query/query_planner.hpp"
 
 #include "ggql/ingest/metadata_store.hpp"
+#include "ggql/query/entity_columns.hpp"
+#include "ggql/query/query_context.hpp"
 #include "ggql/storage/fm_index.hpp"
 #include "ggql/storage/topology.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <cmath>
 #include <cstdlib>      // std::getenv, std::strtoull (kMaxTotalHitsCount env override)
@@ -38,6 +41,11 @@ static constexpr size_t kMaxTotalHitsCountDefault = 1'000'000;
 // quer counts globais exatos. Valores não-numéricos ou ≤0 caem no default.
 // Avaliado uma vez por processo (function-local static) — caching trivial.
 [[nodiscard]] static size_t kMaxTotalHitsCount() {
+    // Round 3.G (2026-05-20): override per-engine via
+    // ggql_engine_set_max_total_hits() vence sobre env var.
+    if (const auto o = ggql::query::ctx::max_total_hits_override(); o > 0) {
+        return o;
+    }
     static const size_t cap = []() -> size_t {
         if (const char* env = std::getenv("GGQL_MAX_TOTAL_HITS"); env && *env) {
             char* end = nullptr;
@@ -51,18 +59,62 @@ static constexpr size_t kMaxTotalHitsCountDefault = 1'000'000;
     return cap;
 }
 
+// Round 3.F/G: storage thread_local + implementação dos getters/setters
+// declarados em include/ggql/query/query_context.hpp.
+namespace {
+thread_local std::atomic<bool>* g_cancel_token = nullptr;
+thread_local std::size_t g_max_total_hits_override = 0;
+} // namespace
+
+} // namespace ggql
+
+namespace ggql::query::ctx {
+
+void set_cancel_token(std::atomic<bool>* p) noexcept {
+    ggql::g_cancel_token = p;
+}
+
+void set_max_total_hits_override(std::size_t cap) noexcept {
+    ggql::g_max_total_hits_override = cap;
+}
+
+bool cancel_requested() noexcept {
+    auto* p = ggql::g_cancel_token;
+    return p && p->load(std::memory_order_relaxed);
+}
+
+std::size_t max_total_hits_override() noexcept {
+    return ggql::g_max_total_hits_override;
+}
+
+ScopedContext::ScopedContext(std::atomic<bool>* cancel,
+                             std::size_t max_hits_override) noexcept
+    : prev_cancel_(ggql::g_cancel_token),
+      prev_max_hits_(ggql::g_max_total_hits_override) {
+    ggql::g_cancel_token = cancel;
+    ggql::g_max_total_hits_override = max_hits_override;
+}
+
+ScopedContext::~ScopedContext() noexcept {
+    ggql::g_cancel_token = prev_cancel_;
+    ggql::g_max_total_hits_override = prev_max_hits_;
+}
+
+} // namespace ggql::query::ctx
+
+namespace ggql {
+
 // ── helpers internos ─────────────────────────────────────────────────────────
 
 namespace detail {
 
-static constexpr std::array<std::string_view, 3> kNodeColumns = {"id", "in_degree", "out_degree"};
-static constexpr std::array<std::string_view, 5> kBubbleColumns = {
-    "source", "sink", "branch_count", "internal_node_count", "has_cycles"};
-static constexpr std::array<std::string_view, 5> kSegmentColumns = {"id", "name", "length",
-                                                                    "read_count", "depth"};
-static constexpr std::array<std::string_view, 3> kEdgeColumns = {"from_id", "to_id", "to_orient"};
-static constexpr std::array<std::string_view, 4> kPathColumns = {"id", "name", "node_count",
-                                                                 "length"};
+// Refactor 2026-05-20: fonte única em include/ggql/query/entity_columns.hpp.
+// Aliases preservados para minimizar churn no resto deste arquivo.
+using ggql::query::kNodeColumns;
+using ggql::query::kBubbleColumns;
+using ggql::query::kSegmentColumns;
+using ggql::query::kEdgeColumns;
+using ggql::query::kPathColumns;
 
 [[nodiscard]] static std::string value_to_string(const Value& v) {
     return std::visit(
@@ -353,6 +405,13 @@ struct Paginator {
 
     [[nodiscard]] Decision advance(QueryResult& result) noexcept {
         ++result.total_hits;
+        // Round 3.F (2026-05-20): cancelamento cooperativo. Checa antes dos
+        // caps — caller setou via ggql_engine_cancel; aborta com Stop.
+        // Custo: 1 load thread_local + 1 atomic_load relaxed (~ns) por hit.
+        if (ggql::query::ctx::cancel_requested()) {
+            result.cancelled = true;
+            return Decision::Stop;
+        }
         if (!unbounded_count && result.total_hits > kMaxTotalHitsCount()) {
             result.total_hits_truncated = true;
             return Decision::Stop;

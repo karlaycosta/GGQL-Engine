@@ -83,6 +83,7 @@ struct QueryResult {
     size_t                   total_hits = 0;
     bool   total_hits_truncated = false;  // true se total_hits parou em kMaxTotalHitsCount
     bool   safety_limit_hit     = false;  // true se sem LIMIT explícito e > kSafetyHardLimit
+    bool   cancelled            = false;  // Round 3.F: scan abortado via cancel_token cooperativo
 
     /// Formata como tabela ASCII alinhada (útil para REPL / debug).
     [[nodiscard]] std::string format_table() const;

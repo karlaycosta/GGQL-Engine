@@ -265,6 +265,77 @@ const char* const* ggql_engine_list_entities(int32_t* out_count);
 const char* const* ggql_engine_describe_entity(const char* entity_name,
                                                int32_t* out_count);
 
+// ── Cancelamento cooperativo (Round 3.F, 2026-05-20) ─────────────────────────
+//
+// Sinaliza a query atualmente em execução neste engine para abortar. Seguro
+// chamar de qualquer thread (típico: thread UI). A query worker checa o
+// flag em pontos de checkpoint (Paginator::advance, ~ns por iteração) e
+// retorna o resultado parcial acumulado até ali.
+//
+// Comportamento:
+//   - Se nenhuma query estiver rodando, o próximo execute observa o flag e
+//     pode abortar imediatamente. ggql_engine_execute reseta o flag no
+//     começo de cada chamada.
+//   - O result retornado por uma query cancelada é VÁLIDO mas parcial.
+//     ggql_result_total_hits dá quantos hits foram contados até o cancel.
+//   - SEARCH KMER em datasets grandes: aborta no próximo `advance()` do
+//     pagintor (não interrompe o search_kmer interno do FM-Index — para
+//     interrupção mais fina, ver roadmap).
+//
+// No-op se engine == NULL.
+void ggql_engine_cancel(GgqlEngineHandle engine);
+
+// ── Cap per-engine de total_hits (Round 3.G, 2026-05-20) ─────────────────────
+//
+// Sobrescreve o teto `kMaxTotalHitsCount` (default 1.000.000 ou
+// GGQL_MAX_TOTAL_HITS) somente para queries deste engine. `cap == 0`
+// restaura o default.
+//
+// Após o Round 1.#4 (count estrutural não trunca), este cap só morde:
+//   - SEARCH KMER (proteção I-1/I-7 DoS preservada)
+//   - Queries com WHERE complexo que aborta antes do count completo
+//
+// No-op se engine == NULL.
+void ggql_engine_set_max_total_hits(GgqlEngineHandle engine, uint64_t cap);
+
+// ── Execução streaming via callback paginado (Round 3.H, 2026-05-20) ─────────
+//
+// Conveniência sobre ggql_engine_execute: re-executa em páginas até esgotar
+// o resultado ou o callback pedir parada. Útil quando o consumer não quer
+// gerenciar offset manualmente e o resultado total é grande (chm13:
+// FIND SEGMENT RETURN id,name = 4,29M linhas).
+//
+// NÃO é "true streaming" — internamente paga 1 execute por página (cada
+// uma materializa até `page_size` linhas). O ganho é UX (1 chamada vs N)
+// e memória limitada (nunca mais de `page_size` linhas vivas ao mesmo
+// tempo). True streaming exigiria refactor do planner; ver §H roadmap.
+//
+// O callback recebe:
+//   - result: GgqlResultHandle válido pelo tempo desta linha
+//             (acesse via ggql_result_cell_*; row=`row_in_page`)
+//   - row_in_page: índice [0, ggql_result_row_count(result))
+//   - global_row: índice 0-based desde o início da query (atravessa páginas)
+//   - user_data: passado opaco
+// Retorne `false` para parar (linhas restantes não serão emitidas).
+//
+// Retorna o total de linhas emitidas (após callback retornar true), ou:
+//   -1: argumentos inválidos
+//   -2: erro de parse/execução (consulte ggql_engine_last_error)
+typedef bool (*GgqlRowCallback)(
+    GgqlResultHandle result,
+    int32_t row_in_page,
+    int64_t global_row,
+    void* user_data
+);
+
+int64_t ggql_engine_execute_streaming(
+    GgqlEngineHandle engine,
+    const char* query,
+    uint32_t page_size,         // 0 → default 1024
+    GgqlRowCallback cb,
+    void* user_data
+);
+
 // ── Execução de query ──────────────────────────────────────────────────────────
 
 // Executa uma query GGQL com paginação.

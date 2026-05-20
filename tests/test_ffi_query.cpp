@@ -154,6 +154,114 @@ int main() {
         if (r) { ggql_result_free(r); }
     }
 
+    // ── 10. Round 2.D: ggql_engine_validate parse-only ───────────────────────
+    {
+        GgqlParseResult pr{};
+        // queries válidas
+        check(ggql_engine_validate(eng, "FIND SEGMENT", &pr) == 0 && pr.valid,
+              "validate: FIND SEGMENT");
+        check(ggql_engine_validate(eng,
+              "FIND SEGMENT WHERE length > 1000 AND depth >= 3 RETURN id, name",
+              &pr) == 0 && pr.valid, "validate: composite WHERE");
+        check(ggql_engine_validate(eng, "SEARCH KMER \"ACGT\" RETURN id", &pr) == 0
+              && pr.valid, "validate: SEARCH KMER");
+        check(ggql_engine_validate(eng, "FIND BUBBLE RETURN source, sink", &pr) == 0
+              && pr.valid, "validate: FIND BUBBLE");
+        check(ggql_engine_validate(eng, "FIND SEGMENT WHERE length <> 100", &pr) == 0
+              && pr.valid, "validate: SQL-92 <>");
+        // queries inválidas
+        check(ggql_engine_validate(eng, "FIND XYZZY", &pr) == 1 && !pr.valid &&
+              pr.error_message != nullptr && *pr.error_message != '\0',
+              "validate: FIND XYZZY rejeitado com mensagem");
+        check(ggql_engine_validate(eng, "FIND SEGMENT WHERE length >", &pr) == 1
+              && !pr.valid, "validate: WHERE quebrado");
+        check(ggql_engine_validate(eng, "NOT A QUERY AT ALL", &pr) == 1 && !pr.valid,
+              "validate: lixo total");
+        // args inválidos
+        check(ggql_engine_validate(eng, nullptr, &pr) == -1, "validate: query NULL");
+        check(ggql_engine_validate(eng, "FIND SEGMENT", nullptr) == -1, "validate: out NULL");
+    }
+
+    // ── 11. Round 2.E: list_entities ──────────────────────────────────────────
+    {
+        int32_t n = 0;
+        const char* const* ents = ggql_engine_list_entities(&n);
+        check(ents != nullptr && n == 6, "list_entities: 6 entidades");
+        check(std::strcmp(ents[0], "SEGMENT") == 0, "list_entities[0] = SEGMENT");
+        check(std::strcmp(ents[1], "EDGE")    == 0, "list_entities[1] = EDGE");
+        check(std::strcmp(ents[2], "PATH")    == 0, "list_entities[2] = PATH");
+        check(std::strcmp(ents[3], "BUBBLE")  == 0, "list_entities[3] = BUBBLE");
+        check(std::strcmp(ents[4], "TIP")     == 0, "list_entities[4] = TIP");
+        check(std::strcmp(ents[5], "REPEAT")  == 0, "list_entities[5] = REPEAT");
+    }
+
+    // ── 12. Round 2.E: describe_entity ────────────────────────────────────────
+    {
+        int32_t n = 0;
+        const char* const* cols;
+
+        cols = ggql_engine_describe_entity("SEGMENT", &n);
+        check(cols && n == 5 && std::strcmp(cols[0], "id") == 0 &&
+              std::strcmp(cols[1], "name") == 0 &&
+              std::strcmp(cols[4], "depth") == 0, "describe SEGMENT");
+
+        cols = ggql_engine_describe_entity("EDGE", &n);
+        check(cols && n == 3 && std::strcmp(cols[0], "from_id") == 0,
+              "describe EDGE");
+
+        cols = ggql_engine_describe_entity("PATH", &n);
+        check(cols && n == 4 && std::strcmp(cols[2], "node_count") == 0,
+              "describe PATH");
+
+        cols = ggql_engine_describe_entity("BUBBLE", &n);
+        check(cols && n == 5 && std::strcmp(cols[0], "source") == 0 &&
+              std::strcmp(cols[4], "has_cycles") == 0, "describe BUBBLE");
+
+        cols = ggql_engine_describe_entity("TIP", &n);
+        check(cols && n == 3 && std::strcmp(cols[1], "in_degree") == 0,
+              "describe TIP");
+
+        cols = ggql_engine_describe_entity("REPEAT", &n);
+        check(cols && n == 3, "describe REPEAT (mesma shape de TIP)");
+
+        // case-insensitive
+        cols = ggql_engine_describe_entity("segment", &n);
+        check(cols && n == 5, "describe case-insensitive (segment)");
+
+        // entidade desconhecida → NULL, count = 0
+        cols = ggql_engine_describe_entity("XYZZY", &n);
+        check(cols == nullptr && n == 0, "describe XYZZY → NULL");
+
+        // arg NULL
+        cols = ggql_engine_describe_entity(nullptr, &n);
+        check(cols == nullptr, "describe NULL arg → NULL");
+    }
+
+    // ── 13. Round 1.B: ggql_engine_capabilities ──────────────────────────────
+    {
+        GgqlEngineCapabilities caps{};
+        check(ggql_engine_capabilities(eng, &caps) == 0, "capabilities rc=0");
+        check(caps.has_metadata, "caps: has_metadata=true");
+        check(caps.has_topology, "caps: has_topology=true (§3.bis)");
+        check(caps.has_fm_index, "caps: has_fm_index=true (SM tem fm_index.bin)");
+        check(caps.segment_count > 0, "caps: segment_count > 0");
+        check(caps.edge_count    > 0, "caps: edge_count > 0");
+        // args inválidos
+        check(ggql_engine_capabilities(nullptr, &caps) == -1, "caps engine NULL");
+        check(ggql_engine_capabilities(eng, nullptr) == -1, "caps out NULL");
+    }
+
+    // ── 14. FIND BUBBLE via FFI — regressão do bug do move ctor (commit 5d9c8a5) ─
+    //   Pré-fix: optional<GfaCsrTopology>.emplace(std::move(topo)) descartava
+    //   snarls_ → FIND BUBBLE retornava 0 silencioso. Garantir > 0.
+    {
+        GgqlResultHandle r = ggql_engine_execute(eng, "FIND BUBBLE", 1, 0);
+        check(r != nullptr, "FIND BUBBLE via FFI deve executar");
+        check(ggql_result_total_hits(r) > 0,
+              "FIND BUBBLE total_hits > 0 (regressão move ctor — bug fix 5d9c8a5)");
+        ggql_result_free(r);
+    }
+
     // ── 9. Destroi engine ──────────────────────────────────────────────────────
     ggql_engine_destroy(eng);
 
