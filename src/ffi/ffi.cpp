@@ -107,7 +107,12 @@ struct EventBridge {
 // é preferível a UB silencioso atravessando boundary.
 void dispatch_bridge(const cli::Event& ev, void* user) noexcept {
     auto* b = static_cast<EventBridge*>(user);
-    GgqlEvent out;
+    // thread_local: alguns consumers (Dart NativeCallable.listener) processam
+    // o GgqlEvent assincronamente — o ponteiro precisa permanecer válido após
+    // este callback retornar. Variável thread_local persiste pela vida da
+    // thread. Consumers síncronos (Python ctypes, Dart isolateLocal) não
+    // são afetados.
+    thread_local GgqlEvent out;
     std::memset(&out, 0, sizeof(out));
 
     out.kind = static_cast<int32_t>(ev.kind);

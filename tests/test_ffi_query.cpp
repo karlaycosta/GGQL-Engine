@@ -12,10 +12,13 @@
 
 #include "ffi/ffi.h"
 
+#include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 
 static const char* get_idx() {
     const char* env = std::getenv("GGQL_TEST_IDX");
@@ -260,6 +263,162 @@ int main() {
         check(ggql_result_total_hits(r) > 0,
               "FIND BUBBLE total_hits > 0 (regressão move ctor — bug fix 5d9c8a5)");
         ggql_result_free(r);
+    }
+
+    // ── 15. Round 3.F: ggql_engine_cancel ─────────────────────────────────────
+    {
+        // engine NULL é no-op (não deve crashar)
+        ggql_engine_cancel(nullptr);
+
+        // Cancel armado antes de execute: o execute reseta o flag no início
+        // (ffi.cpp linha ~684), então a query roda completa. Apenas garante
+        // que cancel não corrompe o engine.
+        ggql_engine_cancel(eng);
+        GgqlResultHandle r0 = ggql_engine_execute(
+            eng, "FIND SEGMENT RETURN id, name, length", 5, 0);
+        check(r0 != nullptr, "execute pós-cancel armado deve funcionar");
+        check(ggql_result_row_count(r0) == 5,
+              "execute pós-cancel armado: flag foi resetado, query roda normal");
+        ggql_result_free(r0);
+
+        // Baseline sem cancel concorrente: SEARCH KMER "AA" varre muitas
+        // posições em chm13_subset_sm. Capturar hits para comparar com cancel.
+        // (Mantemos cap default — total_hits pode truncar em 1M, mas o ponto
+        // do teste é comparar relativo.)
+        GgqlResultHandle baseline = ggql_engine_execute(
+            eng, "SEARCH KMER \"AA\" RETURN id", 100, 0);
+        check(baseline != nullptr, "SEARCH KMER baseline deve executar");
+        const int64_t baseline_hits = ggql_result_total_hits(baseline);
+        ggql_result_free(baseline);
+
+        // Cancel concorrente: thread dispara cancel após pequeno delay.
+        // O check é cooperativo (Paginator::advance), então a query aborta
+        // a partir do próximo hit observado pelo planner. Resultado é
+        // VÁLIDO (handle não-NULL) mas potencialmente parcial.
+        std::atomic<bool> cancel_fired{false};
+        std::thread canceller([&]() {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+            ggql_engine_cancel(eng);
+            cancel_fired.store(true);
+        });
+        GgqlResultHandle rc = ggql_engine_execute(
+            eng, "SEARCH KMER \"AA\" RETURN id", 100, 0);
+        canceller.join();
+        check(cancel_fired.load(), "cancel thread executou");
+        check(rc != nullptr, "execute cancelado retorna handle válido (parcial)");
+        // total_hits parcial deve ser <= baseline (cooperativo: pode terminar
+        // antes do cancel chegar se a query for muito rápida; aceitar igualdade).
+        const int64_t cancel_hits = ggql_result_total_hits(rc);
+        check(cancel_hits <= baseline_hits,
+              "cancel: total_hits parcial <= baseline");
+        ggql_result_free(rc);
+    }
+
+    // ── 16. Round 3.G: ggql_engine_set_max_total_hits ─────────────────────────
+    {
+        // engine NULL é no-op
+        ggql_engine_set_max_total_hits(nullptr, 100);
+
+        // Cap baixo trunca SEARCH KMER (Round 1.#4: count estrutural não
+        // trunca; este cap morde KMER e queries WHERE complexas).
+        // Paginator::advance incrementa total_hits ANTES de checar > cap, então
+        // o valor final ao parar é cap+1.
+        ggql_engine_set_max_total_hits(eng, 5);
+        GgqlResultHandle r_cap = ggql_engine_execute(
+            eng, "SEARCH KMER \"AA\" RETURN id", 100, 0);
+        check(r_cap != nullptr, "SEARCH KMER com cap=5 deve executar");
+        check(ggql_result_total_hits(r_cap) <= 6,
+              "cap=5: total_hits <= cap+1 = 6");
+        check(ggql_result_total_truncated(r_cap),
+              "cap=5: total_truncated = true");
+        ggql_result_free(r_cap);
+
+        // cap=0 restaura o default
+        ggql_engine_set_max_total_hits(eng, 0);
+        GgqlResultHandle r_def = ggql_engine_execute(
+            eng, "SEARCH KMER \"AA\" RETURN id", 100, 0);
+        check(r_def != nullptr, "SEARCH KMER pós-reset deve executar");
+        check(ggql_result_total_hits(r_def) > 6,
+              "cap=0: total_hits > 6 (default ~1M, não trunca em 6)");
+        ggql_result_free(r_def);
+    }
+
+    // ── 17. Round 3.H: ggql_engine_execute_streaming ──────────────────────────
+    {
+        // Args inválidos → -1
+        check(ggql_engine_execute_streaming(nullptr, "FIND SEGMENT", 10,
+                  [](GgqlResultHandle, int32_t, int64_t, void*) { return true; },
+                  nullptr) == -1,
+              "streaming: engine NULL → -1");
+        check(ggql_engine_execute_streaming(eng, nullptr, 10,
+                  [](GgqlResultHandle, int32_t, int64_t, void*) { return true; },
+                  nullptr) == -1,
+              "streaming: query NULL → -1");
+        check(ggql_engine_execute_streaming(eng, "FIND SEGMENT", 10,
+                  nullptr, nullptr) == -1,
+              "streaming: cb NULL → -1");
+
+        // Total esperado: FIND SEGMENT WHERE length > 10000 retorna N linhas.
+        // Streaming page_size=10 deve emitir exatamente N (re-executa em
+        // páginas até esgotar; o "natural end" é página com row_count <
+        // page_size).
+        const char* q = "FIND SEGMENT WHERE length > 10000 RETURN id, name, length";
+        GgqlResultHandle full = ggql_engine_execute(eng, q, 1'000'000, 0);
+        check(full != nullptr, "streaming: baseline execute deve funcionar");
+        const int64_t expected = ggql_result_row_count(full);
+        ggql_result_free(full);
+        check(expected > 0,
+              "streaming: baseline tem linhas (necessário para o teste fazer sentido)");
+
+        struct CountState { int64_t rows = 0; int64_t last_global = -1; };
+        CountState st;
+        auto counter = [](GgqlResultHandle r, int32_t row_in_page,
+                          int64_t global_row, void* ud) -> bool {
+            auto* s = static_cast<CountState*>(ud);
+            ++s->rows;
+            // global_row deve ser monotônico (cada página soma row_in_page+offset)
+            if (global_row != s->last_global + 1) {
+                std::fprintf(stderr, "streaming: global_row não-monotônico: "
+                             "esperado %lld, recebido %lld\n",
+                             (long long)(s->last_global + 1),
+                             (long long)global_row);
+                std::exit(1);
+            }
+            s->last_global = global_row;
+            // Acessar célula só para garantir que o handle ainda é válido
+            (void)ggql_result_cell_int(r, row_in_page, 0);
+            return true;
+        };
+        const int64_t emitted = ggql_engine_execute_streaming(eng, q, 10,
+                                                              counter, &st);
+        check(emitted == expected,
+              "streaming: total emitido == row_count do execute completo");
+        check(st.rows == expected,
+              "streaming: callback contou tudo");
+
+        // Callback que para na 3ª linha. Contrato (ffi.cpp:513-519): a linha
+        // cujo cb retornou false NÃO conta em `total_emitted`. Logo cb é
+        // chamado 3x mas o retorno é 2 (as duas que retornaram true).
+        struct StopState { int64_t rows = 0; };
+        StopState sst;
+        auto stopper = [](GgqlResultHandle, int32_t, int64_t global_row,
+                          void* ud) -> bool {
+            auto* s = static_cast<StopState*>(ud);
+            ++s->rows;
+            return global_row < 2;  // true em 0,1 → false em 2 (para no 3º call)
+        };
+        const int64_t partial = ggql_engine_execute_streaming(eng, q, 10,
+                                                              stopper, &sst);
+        check(partial == 2,
+              "streaming: cb false na 3ª linha → retorno = 2 (linha do false não conta)");
+        check(sst.rows == 3, "streaming: callback chamado 3 vezes antes de stop");
+
+        // page_size=0 usa default 1024
+        st = {};
+        const int64_t emitted_def = ggql_engine_execute_streaming(eng, q, 0,
+                                                                  counter, &st);
+        check(emitted_def == expected,
+              "streaming: page_size=0 usa default e emite tudo");
     }
 
     // ── 9. Destroi engine ──────────────────────────────────────────────────────

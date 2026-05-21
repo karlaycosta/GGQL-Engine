@@ -69,22 +69,154 @@ target_compile_options(ggql_core PRIVATE
 )
 target_link_libraries(ggql_core PUBLIC fmt::fmt)
 
-# ── Allocator: jemalloc ──────────────────────────────────────────────────────
-# jemalloc substitui o malloc/free do glibc para o processo inteiro. Em
-# workloads alloc-heavy como o gBWT build (DynamicGBWT cria/libera milhoes
-# de small vectors em multiplas threads), jemalloc venceu glibc/mimalloc/
-# tbbmalloc/tcmalloc no nosso bench:
+# ── Allocator ────────────────────────────────────────────────────────────────
+# Allocators sao escolhidos por target porque tem requisitos diferentes:
 #
-#   chm13_subset_100w (8 threads):
-#     glibc:    5.60 s · 2.14 GB · 2.86 M nos/s  (baseline)
-#     jemalloc: 3.47 s · 1.38 GB · 4.62 M nos/s  (-38% wall, -36% RSS, +62% throughput)
+#   - Binarios standalone (ggql_repl, bench_*): jemalloc-system por
+#     padrao. Linkado no main executable, faz interposition de malloc/
+#     free do processo no startup. Maior throughput. Initial-Exec TLS
+#     funciona porque o allocator entra no processo desde o startup.
 #
-# REQUIRED falha o build se libjemalloc nao estiver disponivel — instale
-# com `sudo apt install libjemalloc-dev` (Ubuntu/Debian) ou
-# `brew install jemalloc` (macOS). Em Windows o suporte e limitado;
-# considere mimalloc como alternativa nesses ambientes.
-find_library(JEMALLOC_LIB NAMES jemalloc REQUIRED)
-message(STATUS "Found jemalloc: ${JEMALLOC_LIB}")
+#   - libggql_ffi.so: mimalloc por padrao. .so eh carregada via dlopen
+#     pelo consumer (Dart NativeCallable, Python ctypes). Jemalloc nesse
+#     cenario causa SIGABRT ("free(): invalid pointer") porque ja existem
+#     ponteiros alocados pelo consumer via glibc malloc — e jemalloc, ao
+#     fazer interposition tardia, recebe esses frees sem conseguir
+#     reconhece-los. Mimalloc tem fallback automatico para libc free em
+#     ponteiros nao-mimalloc; dlopen-safe sem LD_PRELOAD.
+#
+# Bench (chm13_subset_100w, 8 threads, bench_gbwt, mediana de 4 runs):
+#   glibc:           5.60 s · 2.14 GB · 2.86 M nos/s  (baseline historico)
+#   jemalloc-system: 2.70 s · 2.86 GB · 5.94 M nos/s  (-52% Fase 5, +108%)
+#   jemalloc-vendor: 2.88 s · 2.86 GB · 5.57 M nos/s  (-2% vs system, TLS dinamico)
+#   mimalloc:        2.82 s · 3.08 GB · 5.70 M nos/s  (-4% vs system, +7% RSS)
+#
+# Variaveis:
+#   -DGGQL_ALLOCATOR     = jemalloc-system|jemalloc|mimalloc|glibc
+#                          (binarios standalone; default: jemalloc-system)
+#   -DGGQL_FFI_ALLOCATOR = jemalloc-system|mimalloc|glibc
+#                          (libggql_ffi.so; default: mimalloc)
+#                          ATENCAO: 'jemalloc' (vendor) NAO esta disponivel aqui
+#                          porque causa SIGABRT em dlopen contexts.
+#                          'jemalloc-system' exige LD_PRELOAD do consumer
+#                          (fragil; evite).
+#
+# Sub-opcoes:
+#   - jemalloc-system (default bins): libjemalloc_pic.a do apt (sudo apt
+#     install libjemalloc-dev). Initial-Exec TLS. Funciona em bins porque
+#     o allocator entra no processo desde o startup.
+#   - jemalloc (vendor): fallback quando jemalloc-system nao esta
+#     disponivel (p.ex. CI Docker minimal sem apt). Baixado em build-time
+#     via ExternalProject_Add (jemalloc 5.3.0 do GitHub) com
+#     --disable-initial-exec-tls. ~6% mais lento que system.
+#   - mimalloc (default ffi): libmimalloc.so.2 (sudo apt install
+#     libmimalloc2.0). TLS general-dynamic, dlopen-safe.
+#   - glibc: sem allocator extra. Baseline.
+
+set(GGQL_ALLOCATOR "jemalloc-system" CACHE STRING
+    "Allocator for standalone binaries (jemalloc-system|jemalloc|mimalloc|glibc)")
+set_property(CACHE GGQL_ALLOCATOR PROPERTY STRINGS
+    jemalloc-system jemalloc mimalloc glibc)
+
+set(GGQL_FFI_ALLOCATOR "mimalloc" CACHE STRING
+    "Allocator for libggql_ffi.so (mimalloc recommended for dlopen-safety)")
+set_property(CACHE GGQL_FFI_ALLOCATOR PROPERTY STRINGS
+    jemalloc-system mimalloc glibc)
+
+if(GGQL_FFI_ALLOCATOR STREQUAL "jemalloc")
+    message(FATAL_ERROR
+        "GGQL_FFI_ALLOCATOR=jemalloc (vendor) crasha em dlopen contexts "
+        "(SIGABRT por interposicao de malloc). Use mimalloc (default), "
+        "jemalloc-system (com LD_PRELOAD), ou glibc.")
+endif()
+
+# Macros que materializam cada allocator UMA UNICA VEZ, mesmo se bin e ffi
+# escolherem o mesmo (guardas internos).
+
+macro(_ggql_ensure_jemalloc_vendor)
+    if(NOT TARGET jemalloc_vendor_lib)
+        include(ExternalProject)
+        set(_jvp ${CMAKE_BINARY_DIR}/_deps/jemalloc)
+        set(_jvl ${_jvp}/lib/libjemalloc_pic.a)
+        ExternalProject_Add(jemalloc_vendor
+            URL https://github.com/jemalloc/jemalloc/releases/download/5.3.0/jemalloc-5.3.0.tar.bz2
+            URL_HASH SHA256=2db82d1e7119df3e71b7640219b6dfe84789bc0537983c3b7ac4f7189aecfeaa
+            PREFIX ${_jvp}
+            CONFIGURE_COMMAND <SOURCE_DIR>/configure
+                --prefix=<INSTALL_DIR>
+                --disable-initial-exec-tls
+                --with-jemalloc-prefix=
+                --disable-shared
+                --enable-static
+                CC=${CMAKE_C_COMPILER}
+                CXX=${CMAKE_CXX_COMPILER}
+                CFLAGS=-fPIC
+                CXXFLAGS=-fPIC
+            BUILD_COMMAND make -j
+            INSTALL_COMMAND make install
+            BUILD_BYPRODUCTS ${_jvl}
+            LOG_DOWNLOAD ON LOG_CONFIGURE ON LOG_BUILD ON LOG_INSTALL ON
+        )
+        add_library(jemalloc_vendor_lib STATIC IMPORTED)
+        set_target_properties(jemalloc_vendor_lib PROPERTIES
+            IMPORTED_LOCATION ${_jvl})
+        add_dependencies(jemalloc_vendor_lib jemalloc_vendor)
+    endif()
+endmacro()
+
+macro(_ggql_ensure_jemalloc_system)
+    if(NOT DEFINED _GGQL_JEMALLOC_SYS_LIB)
+        find_library(_GGQL_JEMALLOC_SYS_LIB
+            NAMES libjemalloc_pic.a jemalloc REQUIRED)
+    endif()
+endmacro()
+
+macro(_ggql_ensure_mimalloc)
+    if(NOT DEFINED _GGQL_MIMALLOC_LIB)
+        # Debian/Ubuntu nao distribui mimalloc estatico — usar .so dinamica.
+        # Aceita o nome canonico (com .so symlink do -dev) ou o versionado
+        # (libmimalloc.so.2, presente sem o -dev).
+        find_library(_GGQL_MIMALLOC_LIB
+            NAMES mimalloc libmimalloc.so.2
+            HINTS /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu
+            REQUIRED)
+    endif()
+endmacro()
+
+function(_ggql_resolve_allocator choice out_var)
+    if(choice STREQUAL "jemalloc")
+        _ggql_ensure_jemalloc_vendor()
+        set(${out_var} jemalloc_vendor_lib PARENT_SCOPE)
+    elseif(choice STREQUAL "jemalloc-system")
+        _ggql_ensure_jemalloc_system()
+        set(${out_var} ${_GGQL_JEMALLOC_SYS_LIB} PARENT_SCOPE)
+    elseif(choice STREQUAL "mimalloc")
+        _ggql_ensure_mimalloc()
+        set(${out_var} ${_GGQL_MIMALLOC_LIB} PARENT_SCOPE)
+    elseif(choice STREQUAL "glibc")
+        set(${out_var} "" PARENT_SCOPE)
+    else()
+        message(FATAL_ERROR
+            "Allocator '${choice}' invalido. "
+            "Use jemalloc|jemalloc-system|mimalloc|glibc.")
+    endif()
+endfunction()
+
+_ggql_resolve_allocator(${GGQL_ALLOCATOR} GGQL_BIN_ALLOCATOR_LIB)
+_ggql_resolve_allocator(${GGQL_FFI_ALLOCATOR} GGQL_FFI_ALLOCATOR_LIB)
+message(STATUS "Allocator (binaries): ${GGQL_ALLOCATOR}")
+message(STATUS "Allocator (libggql_ffi.so): ${GGQL_FFI_ALLOCATOR}")
+
+# jemalloc-system na FFI causa cannot-allocate-TLS / SIGABRT em dlopen
+# tardio. Avise o desenvolvedor que precisa LD_PRELOAD no consumer.
+if(GGQL_FFI_ALLOCATOR STREQUAL "jemalloc-system")
+    message(WARNING
+        "GGQL_FFI_ALLOCATOR=jemalloc-system usa Initial-Exec TLS. "
+        "Consumers que dlopen libggql_ffi.so (Flutter, Python ctypes) "
+        "precisam LD_PRELOAD=libjemalloc.so.2 OU vao crashar com "
+        "'cannot allocate memory in static TLS block' / SIGABRT. "
+        "Default 'mimalloc' resolve isso automaticamente.")
+endif()
 
 # ── Camada 1 — ggql_storage (CSR + FM-Index + PathStorage + GbwtBackend) ─────
 add_library(ggql_storage STATIC
@@ -99,7 +231,9 @@ target_compile_options(ggql_storage PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
     -funroll-loops -ftree-vectorize -fomit-frame-pointer
 )
-target_link_libraries(ggql_storage PUBLIC ggql_core sdsl gbwt libsais tbb gomp pthread ${JEMALLOC_LIB})
+# Allocator nao linkado aqui — cada consumer final (executavel ou .so)
+# linka seu proprio via GGQL_BIN_ALLOCATOR_LIB / GGQL_FFI_ALLOCATOR_LIB.
+target_link_libraries(ggql_storage PUBLIC ggql_core sdsl gbwt libsais tbb gomp pthread)
 
 # ── Camada 2 — ggql_ingest (parser GFA; depende de Storage) ──────────────────
 add_library(ggql_ingest STATIC
@@ -129,7 +263,7 @@ target_compile_options(ggql_repl PRIVATE
     -O3 -flto=auto -march=native -fopenmp
 )
 target_link_options(ggql_repl PRIVATE -flto=auto)
-target_link_libraries(ggql_repl PRIVATE ggql_query)
+target_link_libraries(ggql_repl PRIVATE ggql_query ${GGQL_BIN_ALLOCATOR_LIB})
 
 # ── bench_gbwt ─────────────────────────────────────────
 # Benchmark vg-equivalent: remapeia IDs MPHF → sequenciais por componente,
@@ -140,7 +274,7 @@ target_compile_options(bench_gbwt PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
 )
 target_link_options(bench_gbwt PRIVATE -flto=auto)
-target_link_libraries(bench_gbwt PRIVATE ggql_ingest)
+target_link_libraries(bench_gbwt PRIVATE ggql_ingest ${GGQL_BIN_ALLOCATOR_LIB})
 
 # bench_snarl — microbenchmark isolado do snarl_decomposition::find_all_snarls.
 add_executable(bench_snarl tools/bench_snarl.cpp)
@@ -149,7 +283,7 @@ target_compile_options(bench_snarl PRIVATE
     -funroll-loops -ftree-vectorize
 )
 target_link_options(bench_snarl PRIVATE -flto=auto)
-target_link_libraries(bench_snarl PRIVATE ggql_storage)
+target_link_libraries(bench_snarl PRIVATE ggql_storage ${GGQL_BIN_ALLOCATOR_LIB})
 
 # bench_metadata — isola tempo de load() e queries de GfaMetadataStore.
 add_executable(bench_metadata tools/bench_metadata.cpp)
@@ -157,7 +291,7 @@ target_compile_options(bench_metadata PRIVATE
     -O3 -flto=auto -march=native
 )
 target_link_options(bench_metadata PRIVATE -flto=auto)
-target_link_libraries(bench_metadata PRIVATE ggql_ingest)
+target_link_libraries(bench_metadata PRIVATE ggql_ingest ${GGQL_BIN_ALLOCATOR_LIB})
 
 # bench_topology — isola tempo de GfaCsrTopology::load() e save().
 add_executable(bench_topology tools/bench_topology.cpp)
@@ -165,7 +299,7 @@ target_compile_options(bench_topology PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
 )
 target_link_options(bench_topology PRIVATE -flto=auto)
-target_link_libraries(bench_topology PRIVATE ggql_storage)
+target_link_libraries(bench_topology PRIVATE ggql_storage ${GGQL_BIN_ALLOCATOR_LIB})
 
 # bench_graph_algorithms — mede build_path_stats, path_nodes,
 # make_component_remap e find_bubbles em isolamento.
@@ -174,7 +308,7 @@ target_compile_options(bench_graph_algorithms PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
 )
 target_link_options(bench_graph_algorithms PRIVATE -flto=auto)
-target_link_libraries(bench_graph_algorithms PRIVATE ggql_ingest)
+target_link_libraries(bench_graph_algorithms PRIVATE ggql_ingest ${GGQL_BIN_ALLOCATOR_LIB})
 
 # bench_fm_index — mede compute_payload_hash, search_kmer, load/save
 # isolados de GfaSequenceIndex.
@@ -183,7 +317,7 @@ target_compile_options(bench_fm_index PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
 )
 target_link_options(bench_fm_index PRIVATE -flto=auto)
-target_link_libraries(bench_fm_index PRIVATE ggql_storage)
+target_link_libraries(bench_fm_index PRIVATE ggql_storage ${GGQL_BIN_ALLOCATOR_LIB})
 
 
 
@@ -195,7 +329,7 @@ target_compile_options(ggql_ffi PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fPIC
 )
 target_link_options(ggql_ffi PRIVATE -flto=auto)
-target_link_libraries(ggql_ffi PRIVATE ggql_query)
+target_link_libraries(ggql_ffi PRIVATE ggql_query ${GGQL_FFI_ALLOCATOR_LIB})
 
 # ── Testes unitários do ingestor (ARCH-5) ────────────────────────────────────
 add_subdirectory(tests)

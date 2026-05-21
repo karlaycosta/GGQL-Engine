@@ -1,8 +1,13 @@
 # Integração FFI: Flutter e Python
 
-**Última atualização:** 2026-05-20 (após Rounds 1–3 do refinamento FFI;
-ver `docs/ffi_refinement_plan.md` para histórico e medições).
-**Branch:** `ffi/refine-load-and-introspection` (`a931bda` HEAD).
+**Última atualização:** 2026-05-21 (sincroniza struct `GgqlIngestStats`
+nos exemplos Dart/Python com o header — remove `elapsed_gbwt_insert_s`
+e `elapsed_gbwt_compress_s`, que foram suprimidos no commit `bf9b8fd`
+"BREAKING ABI da FFI"; corrige contagens na tabela de cobertura.
+Histórico anterior: 2026-05-20 — Rounds 1–3 do refinamento FFI + fix
+`thread_local` em `dispatch_bridge` para `NativeCallable.listener`; ver
+`docs/ffi_refinement_plan.md`).
+**Branch:** `ffi/refine-load-and-introspection`.
 
 A camada `ggql_ffi` expõe o motor C++ via **C ABI estável**, o que a torna
 consumível por qualquer linguagem capaz de chamar símbolos de biblioteca
@@ -15,12 +20,12 @@ as armadilhas específicas de cada plataforma.
 
 | Bloco | Símbolos | Documentado em |
 |---|---|---|
-| Ingest (legacy + perfil + granular) | `ggql_ingestor_*` (5) + `ggql_profile_*` (2) + `GgqlIngestStats`/`GgqlEvent` | §2.2–§2.4 (Flutter), §3.1–§3.4 (Python) |
+| Ingest (legacy + perfil + granular) | `ggql_ingestor_*` (6) + `ggql_profile_*` (2) + `GgqlIngestStats`/`GgqlEvent` | §2.2–§2.4 (Flutter), §3.1–§3.4 (Python) |
 | Engine lifecycle | `ggql_engine_{load,create,destroy,last_error}` | §6.1 |
 | Query execução | `ggql_engine_{execute,execute_streaming}` | §6.2, §6.7 |
 | Introspecção | `ggql_engine_{capabilities,validate,list_entities,describe_entity}` | §6.3–§6.5 |
 | Controle de runtime | `ggql_engine_{cancel,set_max_total_hits}` | §6.6 |
-| Resultado | `ggql_result_*` (8) + `GgqlCellType` | §6.2 |
+| Resultado | `ggql_result_*` (11) + `GgqlCellType` | §6.2 |
 
 ---
 
@@ -79,8 +84,6 @@ final class GgqlIngestStats extends Struct {
   @Double() external double elapsedMetadataS;
   @Double() external double elapsedTopologyS;
   @Double() external double elapsedGbwtS;
-  @Double() external double elapsedGbwtInsertS;
-  @Double() external double elapsedGbwtCompressS;
   @Double() external double elapsedFmIndexS;
   @Double() external double gbwtCpuAvgS;
   @Double() external double gbwtCpuMaxS;
@@ -232,11 +235,107 @@ output: 'lib/src/ggql_bindings.dart'
 headers:
   entry-points:
     - 'include/ffi/ggql_ffi.h'
+silence-enum-warning: true   # GgqlCellType/GgqlIngestProfile
 ```
 
 ```bash
 dart run ffigen --config ffigen.yaml
 ```
+
+### 2.5 Bundling via Dart Hooks (estável desde Dart 3.10)
+
+Em vez de copiar manualmente a `.so` para cada plataforma, registre a
+`libggql_ffi.so` produzida pelo CMake do engine como `CodeAsset` via um
+`hook/build.dart`. O Flutter então a copia para o bundle automaticamente
+(em Linux: `build/linux/<arch>/<mode>/bundle/lib/libggql_ffi.so`).
+
+`pubspec.yaml`:
+```yaml
+dependencies:
+  ffi: ^2.2.0
+  hooks: ^2.0.0
+  code_assets: ^1.1.0
+
+dev_dependencies:
+  ffigen: ^19.0.0
+```
+
+`hook/build.dart` (apontando para o `build/` do engine via env var):
+```dart
+import 'dart:io';
+import 'package:code_assets/code_assets.dart';
+import 'package:hooks/hooks.dart';
+
+void main(List<String> args) async {
+  await build(args, (input, output) async {
+    final libFile = _resolveLib(input);
+    if (!libFile.existsSync()) {
+      throw Exception('libggql_ffi.so não encontrada em ${libFile.path}.');
+    }
+    output.assets.code.add(
+      CodeAsset(
+        package: input.packageName,
+        name: 'libggql_ffi',
+        linkMode: DynamicLoadingBundled(),
+        file: libFile.uri,
+      ),
+    );
+  });
+}
+
+File _resolveLib(BuildInput input) {
+  final env = Platform.environment;
+  if ((env['GGQL_FFI_LIB'] ?? '').isNotEmpty) {
+    return File(env['GGQL_FFI_LIB']!);
+  }
+  if ((env['GGQL_ENGINE_DIR'] ?? '').isNotEmpty) {
+    return File('${env['GGQL_ENGINE_DIR']}/build/libggql_ffi.so');
+  }
+  final pkgRoot = input.packageRoot.toFilePath();
+  return File('$pkgRoot../../c++/ggql_engine/build/libggql_ffi.so');
+}
+```
+
+O hook não recompila o engine — apenas referencia a `.so` já produzida
+pelo `cmake --build build --target ggql_ffi`. Em runtime, `DynamicLibrary
+.open('libggql_ffi.so')` resolve via o bundle do Flutter.
+
+### 2.6 Caveats em Linux desktop
+
+**Allocator + dlopen** (resolvido em 2026-05-21): historicamente
+`libggql_ffi.so` era linkada contra `libjemalloc` estático, o que causava
+dois problemas em `dlopen()` tardio (Dart `flutter test`, Python ctypes):
+
+1. `cannot allocate memory in static TLS block` (Initial-Exec TLS do
+   jemalloc não cabe no surplus do processo já iniciado).
+2. `free(): invalid pointer` SIGABRT — jemalloc fazia interposition de
+   `free()` no processo inteiro, mas ponteiros já alocados via glibc
+   malloc pelo consumer (Dart/Python) caíam no `je_free()` que não os
+   reconhecia.
+
+**Fix**: o CMakeLists separa o allocator por target:
+- Binários standalone (`ggql_repl`, `bench_*`) → jemalloc-vendor (perf
+  máxima).
+- `libggql_ffi.so` → **mimalloc** (TLS general-dynamic + fallback
+  automático para `free()` da libc em ponteiros não-mimalloc).
+
+Consequência: **nenhum `LD_PRELOAD` é necessário** para `flutter run`,
+`flutter test`, ou Python ctypes consumindo `libggql_ffi.so`.
+
+Override (em geral desnecessário): `cmake -DGGQL_FFI_ALLOCATOR=glibc`
+desabilita o allocator próprio da .so. Para `jemalloc-system` (ainda
+exige LD_PRELOAD), use `-DGGQL_FFI_ALLOCATOR=jemalloc-system` apenas em
+deploys server-only onde a .so não é dlopened.
+
+**`NativeCallable.listener` é assíncrono** — o handler Dart roda **após**
+o callback nativo retornar. Antes do fix de 2026-05-20, `GgqlEvent` em
+`dispatch_bridge` era stack-local, gerando ponteiro inválido quando o
+handler eventualmente acessava `evPtr.ref` (sintoma: `kind`=garbage). O
+engine agora usa `thread_local GgqlEvent out;`, mantendo o struct vivo
+pela duração da thread. Strings `text`/`detail` ainda apontam para
+buffers `thread_local` que são reusados entre emissões da mesma thread —
+para fidelidade total, leia apenas campos POD (kind, phase_number,
+percent, eta_s, rate_mbs) ou copie do lado C++.
 
 ---
 
@@ -270,8 +369,6 @@ class GgqlIngestStats(ctypes.Structure):
         ("elapsed_metadata_s",    ctypes.c_double),
         ("elapsed_topology_s",    ctypes.c_double),
         ("elapsed_gbwt_s",        ctypes.c_double),
-        ("elapsed_gbwt_insert_s", ctypes.c_double),
-        ("elapsed_gbwt_compress_s", ctypes.c_double),
         ("elapsed_fm_index_s",    ctypes.c_double),
         ("gbwt_cpu_avg_s",        ctypes.c_double),
         ("gbwt_cpu_max_s",        ctypes.c_double),
@@ -792,6 +889,14 @@ por linha, para se o callback retorna `false`. **Não é true streaming**
 quando o resultado total é grande (chm13 `FIND SEGMENT` = 4,29M
 linhas) e o consumer não quer gerenciar offset.
 
+> **Semântica do retorno**: o valor retornado é o número de linhas para
+> as quais o callback retornou `true`. A linha que dispara o stop
+> (callback retorna `false`) NÃO é contada — só é contado se o cb
+> tiver retornado `true` para ela. Logo, para "parar após processar N
+> linhas", retorne `true` em todas e mantenha o contador no
+> `user_data`; ou retorne `false` na linha N+1, ficando com retorno
+> = N.
+
 ```c
 typedef bool (*GgqlRowCallback)(GgqlResultHandle, int32_t row_in_page,
                                 int64_t global_row, void* user_data);
@@ -879,3 +984,525 @@ dos casos):
 Para o histórico completo de implementação (medições antes/depois,
 bugs descobertos via tests, decisões de design), ver
 **`docs/ffi_refinement_plan.md`** §6–§8.
+
+---
+
+## 8. Smoke tests para validação Flutter (Rounds 2–3)
+
+Sequência de validação manual para o cliente Flutter exercitar as
+Rounds 2 e 3 da FFI. A ordem vai do mais barato/seguro (introspecção
+pura, sem rodar query) ao mais complexo (cancel concorrente), de modo
+que uma falha cedo limita o escopo do diagnóstico. Round 1 (ingest +
+load lazy) já está validada em produção (`project_ffi_flutter_validated`).
+
+### 8.1 Setup
+
+| Item | Valor |
+|---|---|
+| `.so` esperada | `libggql_ffi.so` (Linux/Android) ou `.dylib`/`.dll` |
+| Símbolos exportados | 31 (confirmar com `nm -D --defined-only libggql_ffi.so \| grep -c ' T ggql_'`) |
+| Idx de teste recomendado | `data/chm13_subset_sm.gfa.idx` (≈131k segmentos, tem fm_index + topology + gBWT + snarls — exercita todos os blocos) |
+| Pré-requisito Linux | Nenhum — `libggql_ffi.so` usa mimalloc, dlopen-safe (ver §2.6) |
+
+Antes de cada passo: `final eng = lib.load(idxPath.toNativeUtf8());`
+`check(eng != nullptr);`. Ao final: `lib.destroy(eng);`.
+
+### 8.2 Sequência (8 passos)
+
+**Passo 1 — `list_entities` (Round 2.E)**
+- Chame `ggql_engine_list_entities(&n)`. Esperado: `n == 6`, array
+  na ordem `['SEGMENT','EDGE','PATH','BUBBLE','TIP','REPEAT']`.
+- Regressão: ponteiro NULL ou `n != 6` indica que `kEntityNames` em
+  `src/ffi/ffi.cpp` divergiu — a lista é canônica.
+
+**Passo 2 — `describe_entity` (Round 2.E)**
+- `describe_entity("SEGMENT", &n)` → `n == 5`, colunas começando em
+  `id`, terminando em `depth`.
+- `describe_entity("BUBBLE", &n)` → `n == 5`, primeira coluna
+  `source`, última `has_cycles`.
+- `describe_entity("segment", &n)` → case-insensitive, `n == 5`.
+- `describe_entity("XYZZY", &n)` → retorna `nullptr`, `n == 0`.
+- Regressão: usar esses nomes para popular um `DataGrid` no app —
+  qualquer column-name mismatch surge aqui.
+
+**Passo 3 — `validate` (Round 2.D)**
+- `validate(eng, "FIND SEGMENT", &pr)` → retorno `0`, `pr.valid ==
+  true`, `pr.error_message == nullptr`.
+- `validate(eng, "FIND XYZZY", &pr)` → retorno `1`, `pr.valid ==
+  false`, `pr.error_message != nullptr` (copie imediatamente — é
+  `thread_local`).
+- `validate(eng, nullptr, &pr)` → retorno `-1`.
+- Regressão: chame `validate` a cada keystroke num REPL/IDE — não
+  deve adicionar lag perceptível (~µs).
+
+**Passo 4 — `capabilities` (Round 1.B, ainda dentro do mesmo run)**
+- `capabilities(eng, &caps)` → retorno `0`. Para chm13_subset_sm:
+  `has_metadata=true`, `has_topology=true`, `has_fm_index=true`,
+  `segment_count > 0`, `edge_count > 0`.
+- Use o resultado para cinzar botões na UI: "Buscar k-mer" só se
+  `has_fm_index`, "Bolhas" só se `has_snarls`.
+- Regressão: idx sem `fm_index.bin` deve dar `has_fm_index=false`
+  sem falhar.
+
+**Passo 5 — `execute` baseline (sanidade do path normal)**
+- `execute(eng, "FIND SEGMENT WHERE length > 10000 RETURN id, name,
+  length", 5, 0)` → handle não-NULL, `row_count == 5` (em
+  chm13_subset_sm; varia por idx).
+- Itere as 5 linhas e leia via `cell_type` + `cell_int`/`cell_string`.
+- Esse passo confirma que o caminho `execute → result_*` funciona
+  antes de partir pro streaming.
+
+**Passo 6 — `execute_streaming` (Round 3.H)**
+- Conte um baseline com `execute(..., 1_000_000, 0)` → `row_count =
+  N`.
+- Rode `execute_streaming(..., page_size=10, cb, ud)` com `cb` que
+  retorna `true` sempre e incrementa um contador. Esperado: retorno
+  da função `== N`, contador `== N`, `global_row` monotônico
+  crescente sem saltos.
+- Rode de novo com `cb` que retorna `false` na linha `global_row ==
+  2`. Esperado: retorno `== 2`, `cb` chamado 3 vezes. **A linha que
+  retornou `false` NÃO conta no retorno** (ver §6.7 — semântica do
+  retorno).
+- `execute_streaming(..., page_size=0, ...)` → usa default 1024, mesmo
+  resultado do baseline.
+- Regressão para o cliente Flutter: o Isolate que consome o stream
+  deve mapear `cb` para `SendPort.send(row)` e aceitar `stop` da UI.
+
+**Passo 7 — `set_max_total_hits` (Round 3.G)**
+- `set_max_total_hits(eng, 5)`. Rode `execute(eng, "SEARCH KMER
+  \"AA\" RETURN id", 100, 0)`. Esperado: `total_hits <= 6` (cap+1
+  porque `++total_hits` ocorre antes do check), `total_truncated ==
+  true`.
+- `set_max_total_hits(eng, 0)`. Rode a mesma query. Esperado:
+  `total_hits > 6` (default ~1M).
+- `set_max_total_hits(nullptr, 100)` deve ser no-op (não crashar).
+- Regressão: cap só morde `SEARCH KMER` e queries WHERE complexas
+  pós-Round 1.#4 — `FIND SEGMENT` puro NÃO trunca em 5 mesmo com
+  cap=5.
+
+**Passo 8 — `cancel` concorrente (Round 3.F)**
+- Capture baseline: `execute(eng, "SEARCH KMER \"AA\" RETURN id",
+  100, 0)` → `baseline_hits`.
+- Dispare uma thread/Isolate que dorme ~50µs e chama
+  `cancel(eng)`. Rode `execute` da mesma query no main. Esperado:
+  retorno é handle válido (não-NULL), `total_hits <= baseline_hits`.
+  Em queries muito rápidas a thread pode chegar tarde — aceitar
+  igualdade.
+- `cancel(eng)` ANTES de `execute` é resetado no início da query
+  (ffi.cpp:684). Logo: `cancel` armado pré-`execute` → próximo run
+  completo normal. Esse é o comportamento correto (evita cancel
+  "preso" entre queries) e contraria a redação do §6.6 ("o próximo
+  execute observa o flag e pode abortar imediatamente") — atualizar
+  ou aceitar essa divergência.
+- `cancel(nullptr)` é no-op.
+- Regressão Flutter: handle do engine compartilhado entre Isolates
+  via `Pointer<Void>.address`; UI envia "cancel" ao Isolate worker,
+  que chama `cancel(eng)`.
+
+### 8.3 Critérios de regressão
+
+| Sintoma | Suspeita primária |
+|---|---|
+| `list_entities` devolve `n != 6` | `kEntityNames` em `ffi.cpp` divergiu de `entity_columns.hpp` |
+| `describe_entity` retorna ponteiros que segfault ao ler | Build com sanitizer diferente; rebuild limpo |
+| `validate` aceita query nonsense | `grammar::parse_ggql` regrediu |
+| `capabilities.has_fm_index=false` num idx com `fm_index.bin` | `cache_dir_for_fm` não populado em `engine_load` |
+| `execute_streaming` retorno `!= N` para callback sempre-true | Off-by-one no `total_emitted` da ffi |
+| `set_max_total_hits` não trunca | `ScopedContext` não instala override (ffi.cpp:685) |
+| `cancel` concorrente nunca para | `cancel_requested` não está sendo lido em `Paginator::advance` |
+
+> Após a sequência completa, atualize a memória do projeto
+> (`project_ffi_flutter_validated`) com a data e quaisquer
+> divergências encontradas para histórico de regressões.
+
+### 8.4 Esqueleto `flutter test`
+
+Coloque em `test/ffi/smoke_round23_test.dart` no projeto Flutter.
+Assume bindings gerados via `ffigen` num arquivo
+`lib/src/ggql_bindings.dart` com a classe `GgqlBindings` (padrão).
+Adapte os nomes se você renomeou.
+
+Linux: rode com `GGQL_TEST_IDX=/path/to/chm13_subset_sm.gfa.idx
+flutter test test/ffi/`. `LD_PRELOAD` não é mais necessário desde
+2026-05-21 (`libggql_ffi.so` usa mimalloc, dlopen-safe; ver §2.6).
+
+```dart
+import 'dart:ffi';
+import 'dart:io';
+import 'dart:isolate';
+
+import 'package:ffi/ffi.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:<seu_pkg>/src/ggql_bindings.dart';
+
+void main() {
+  late DynamicLibrary lib;
+  late GgqlBindings g;
+  late Pointer<Void> eng;
+
+  setUpAll(() {
+    final libPath = Platform.environment['GGQL_FFI_LIB']
+        ?? 'libggql_ffi.so';
+    lib = DynamicLibrary.open(libPath);
+    g   = GgqlBindings(lib);
+
+    final idx = Platform.environment['GGQL_TEST_IDX']
+        ?? (throw StateError('defina GGQL_TEST_IDX'));
+    final p = idx.toNativeUtf8();
+    eng = g.ggql_engine_load(p.cast()).cast();
+    malloc.free(p);
+    expect(eng.address, isNot(0), reason: 'engine_load deve devolver handle');
+  });
+
+  tearDownAll(() {
+    g.ggql_engine_destroy(eng.cast());
+  });
+
+  // Passo 1
+  test('list_entities → 6 entidades canônicas', () {
+    final n = calloc<Int32>();
+    final arr = g.ggql_engine_list_entities(n);
+    expect(n.value, 6);
+    expect(arr[0].cast<Utf8>().toDartString(), 'SEGMENT');
+    expect(arr[3].cast<Utf8>().toDartString(), 'BUBBLE');
+    expect(arr[5].cast<Utf8>().toDartString(), 'REPEAT');
+    calloc.free(n);
+  });
+
+  // Passo 2
+  test('describe_entity (SEGMENT, BUBBLE, case-insensitive, NULL)', () {
+    final n = calloc<Int32>();
+    final seg = g.ggql_engine_describe_entity('SEGMENT'.toNativeUtf8().cast(), n);
+    expect(n.value, 5);
+    expect(seg[0].cast<Utf8>().toDartString(), 'id');
+    expect(seg[4].cast<Utf8>().toDartString(), 'depth');
+
+    final bub = g.ggql_engine_describe_entity('BUBBLE'.toNativeUtf8().cast(), n);
+    expect(n.value, 5);
+    expect(bub[0].cast<Utf8>().toDartString(), 'source');
+    expect(bub[4].cast<Utf8>().toDartString(), 'has_cycles');
+
+    g.ggql_engine_describe_entity('segment'.toNativeUtf8().cast(), n);
+    expect(n.value, 5, reason: 'case-insensitive');
+
+    final none = g.ggql_engine_describe_entity('XYZZY'.toNativeUtf8().cast(), n);
+    expect(none.address, 0);
+    expect(n.value, 0);
+    calloc.free(n);
+  });
+
+  // Passo 3
+  test('validate aceita queries válidas e recusa inválidas', () {
+    final pr = calloc<GgqlParseResult>();
+
+    var rc = g.ggql_engine_validate(eng.cast(),
+        'FIND SEGMENT'.toNativeUtf8().cast(), pr);
+    expect(rc, 0);
+    expect(pr.ref.valid, true);
+
+    rc = g.ggql_engine_validate(eng.cast(),
+        'FIND XYZZY'.toNativeUtf8().cast(), pr);
+    expect(rc, 1);
+    expect(pr.ref.valid, false);
+    expect(pr.ref.error_message.address, isNot(0));
+
+    rc = g.ggql_engine_validate(eng.cast(), nullptr, pr);
+    expect(rc, -1);
+    calloc.free(pr);
+  });
+
+  // Passo 4
+  test('capabilities reflete metadata/topology/fm_index', () {
+    final caps = calloc<GgqlEngineCapabilities>();
+    expect(g.ggql_engine_capabilities(eng.cast(), caps), 0);
+    expect(caps.ref.has_metadata, true);
+    expect(caps.ref.has_topology, true);
+    expect(caps.ref.has_fm_index, true);
+    expect(caps.ref.segment_count, greaterThan(0));
+    calloc.free(caps);
+  });
+
+  // Passo 5
+  test('execute baseline: FIND SEGMENT WHERE length > 10000 LIMIT 5', () {
+    final q = 'FIND SEGMENT WHERE length > 10000 RETURN id, name, length';
+    final r = g.ggql_engine_execute(eng.cast(), q.toNativeUtf8().cast(), 5, 0);
+    expect(r.address, isNot(0));
+    expect(g.ggql_result_row_count(r), 5);
+    expect(g.ggql_result_col_count(r), 3);
+    g.ggql_result_free(r);
+  });
+
+  // Passo 6
+  test('execute_streaming: callback emite todas as linhas; false para', () {
+    final q = 'FIND SEGMENT WHERE length > 10000 RETURN id, name, length';
+    final baseline = g.ggql_engine_execute(eng.cast(),
+        q.toNativeUtf8().cast(), 1000000, 0);
+    final expectedRows = g.ggql_result_row_count(baseline);
+    g.ggql_result_free(baseline);
+    expect(expectedRows, greaterThan(2));
+
+    // Callback que conta tudo
+    int count = 0;
+    int lastGlobal = -1;
+    final cb = NativeCallable<
+        Bool Function(Pointer<Void>, Int32, Int64, Pointer<Void>)>.isolateLocal(
+      (Pointer<Void> r, int rowInPage, int global, Pointer<Void> ud) {
+        expect(global, lastGlobal + 1, reason: 'global_row monotônico');
+        lastGlobal = global;
+        ++count;
+        return true;
+      },
+      exceptionalReturn: false,
+    );
+    final emitted = g.ggql_engine_execute_streaming(eng.cast(),
+        q.toNativeUtf8().cast(), 10, cb.nativeFunction, nullptr);
+    expect(emitted, expectedRows);
+    expect(count, expectedRows);
+    cb.close();
+
+    // Callback que para na 3ª linha (global_row == 2)
+    int callCount = 0;
+    final stopper = NativeCallable<
+        Bool Function(Pointer<Void>, Int32, Int64, Pointer<Void>)>.isolateLocal(
+      (Pointer<Void> r, int rowInPage, int global, Pointer<Void> ud) {
+        ++callCount;
+        return global < 2;
+      },
+      exceptionalReturn: false,
+    );
+    final partial = g.ggql_engine_execute_streaming(eng.cast(),
+        q.toNativeUtf8().cast(), 10, stopper.nativeFunction, nullptr);
+    expect(partial, 2, reason: 'linha que retornou false não conta');
+    expect(callCount, 3);
+    stopper.close();
+  });
+
+  // Passo 7
+  test('set_max_total_hits trunca SEARCH KMER e restaura', () {
+    g.ggql_engine_set_max_total_hits(eng.cast(), 5);
+    var r = g.ggql_engine_execute(eng.cast(),
+        'SEARCH KMER "AA" RETURN id'.toNativeUtf8().cast(), 100, 0);
+    expect(g.ggql_result_total_hits(r), lessThanOrEqualTo(6));  // cap+1
+    expect(g.ggql_result_total_truncated(r), true);
+    g.ggql_result_free(r);
+
+    g.ggql_engine_set_max_total_hits(eng.cast(), 0);
+    r = g.ggql_engine_execute(eng.cast(),
+        'SEARCH KMER "AA" RETURN id'.toNativeUtf8().cast(), 100, 0);
+    expect(g.ggql_result_total_hits(r), greaterThan(6));
+    g.ggql_result_free(r);
+  });
+
+  // Passo 8 — cancel concorrente via Isolate
+  test('cancel cooperativo aborta SEARCH KMER em outra thread', () async {
+    final qPtr = 'SEARCH KMER "AA" RETURN id'.toNativeUtf8().cast<Char>();
+    final baseline = g.ggql_engine_execute(eng.cast(), qPtr, 100, 0);
+    final baselineHits = g.ggql_result_total_hits(baseline);
+    g.ggql_result_free(baseline);
+
+    // Dispara cancel em ~50µs via Future.microtask
+    final engAddr = eng.address;
+    Future.microtask(() async {
+      await Future.delayed(const Duration(microseconds: 50));
+      g.ggql_engine_cancel(Pointer<Void>.fromAddress(engAddr).cast());
+    });
+    final r = g.ggql_engine_execute(eng.cast(), qPtr, 100, 0);
+    expect(r.address, isNot(0), reason: 'cancel devolve handle parcial');
+    expect(g.ggql_result_total_hits(r), lessThanOrEqualTo(baselineHits));
+    g.ggql_result_free(r);
+
+    // cancel(NULL) é no-op
+    g.ggql_engine_cancel(nullptr);
+  });
+}
+```
+
+### 8.5 Esqueleto da tela de debug no app
+
+Widget standalone para ter um "smoke runner" dentro do app durante
+desenvolvimento. Útil para exercitar Isolate/UI thread (algo que o
+`flutter test` headless não cobre).
+
+```dart
+import 'dart:async';
+import 'dart:ffi';
+import 'package:flutter/material.dart';
+import 'package:ffi/ffi.dart';
+import 'package:<seu_pkg>/src/ggql_bindings.dart';
+
+class _Step {
+  final String name;
+  final Future<void> Function() run;
+  _Step(this.name, this.run);
+}
+
+enum _Status { pending, running, ok, fail }
+
+class FfiSmokeScreen extends StatefulWidget {
+  final String idxPath;
+  final GgqlBindings g;
+  const FfiSmokeScreen({super.key, required this.idxPath, required this.g});
+
+  @override
+  State<FfiSmokeScreen> createState() => _FfiSmokeScreenState();
+}
+
+class _FfiSmokeScreenState extends State<FfiSmokeScreen> {
+  late Pointer<Void> _eng;
+  final Map<String, (_Status, String)> _results = {};
+  late final List<_Step> _steps;
+
+  @override
+  void initState() {
+    super.initState();
+    final p = widget.idxPath.toNativeUtf8();
+    _eng = widget.g.ggql_engine_load(p.cast()).cast();
+    malloc.free(p);
+    _steps = _buildSteps();
+    for (final s in _steps) { _results[s.name] = (_Status.pending, ''); }
+  }
+
+  @override
+  void dispose() {
+    widget.g.ggql_engine_destroy(_eng.cast());
+    super.dispose();
+  }
+
+  List<_Step> _buildSteps() => [
+    _Step('1. list_entities', () async {
+      final n = calloc<Int32>();
+      try {
+        final arr = widget.g.ggql_engine_list_entities(n);
+        if (n.value != 6) throw 'esperado 6, recebido ${n.value}';
+        final first = arr[0].cast<Utf8>().toDartString();
+        if (first != 'SEGMENT') throw 'esperado SEGMENT, recebido $first';
+      } finally { calloc.free(n); }
+    }),
+    _Step('2. describe_entity SEGMENT', () async {
+      final n = calloc<Int32>();
+      try {
+        final cols = widget.g.ggql_engine_describe_entity(
+            'SEGMENT'.toNativeUtf8().cast(), n);
+        if (n.value != 5) throw 'esperado 5 cols, recebido ${n.value}';
+        if (cols[0].cast<Utf8>().toDartString() != 'id') {
+          throw 'esperado id, recebido ${cols[0].cast<Utf8>().toDartString()}';
+        }
+      } finally { calloc.free(n); }
+    }),
+    _Step('3. validate (OK + falha)', () async {
+      final pr = calloc<GgqlParseResult>();
+      try {
+        var rc = widget.g.ggql_engine_validate(_eng.cast(),
+            'FIND SEGMENT'.toNativeUtf8().cast(), pr);
+        if (rc != 0 || !pr.ref.valid) throw 'FIND SEGMENT rejeitado';
+        rc = widget.g.ggql_engine_validate(_eng.cast(),
+            'FIND XYZZY'.toNativeUtf8().cast(), pr);
+        if (rc != 1 || pr.ref.valid) throw 'FIND XYZZY aceito incorretamente';
+      } finally { calloc.free(pr); }
+    }),
+    _Step('4. capabilities', () async {
+      final caps = calloc<GgqlEngineCapabilities>();
+      try {
+        if (widget.g.ggql_engine_capabilities(_eng.cast(), caps) != 0) {
+          throw 'capabilities rc != 0';
+        }
+        if (!caps.ref.has_metadata || !caps.ref.has_topology) {
+          throw 'metadata/topology ausente';
+        }
+      } finally { calloc.free(caps); }
+    }),
+    _Step('5. execute baseline', () async {
+      final q = 'FIND SEGMENT WHERE length > 10000 RETURN id, name, length';
+      final r = widget.g.ggql_engine_execute(
+          _eng.cast(), q.toNativeUtf8().cast(), 5, 0);
+      try {
+        if (widget.g.ggql_result_row_count(r) != 5) {
+          throw 'row_count != 5';
+        }
+      } finally { widget.g.ggql_result_free(r); }
+    }),
+    _Step('6. execute_streaming', () async {
+      // Mantenha curto na UI; flutter test cobre os detalhes.
+      final q = 'FIND SEGMENT WHERE length > 10000 RETURN id, name, length';
+      int count = 0;
+      final cb = NativeCallable<
+          Bool Function(Pointer<Void>, Int32, Int64, Pointer<Void>)>.isolateLocal(
+        (a, b, c, d) { ++count; return true; },
+        exceptionalReturn: false,
+      );
+      final emitted = widget.g.ggql_engine_execute_streaming(_eng.cast(),
+          q.toNativeUtf8().cast(), 10, cb.nativeFunction, nullptr);
+      cb.close();
+      if (emitted != count) throw 'emitted ($emitted) != count ($count)';
+    }),
+    _Step('7. set_max_total_hits cap=5', () async {
+      widget.g.ggql_engine_set_max_total_hits(_eng.cast(), 5);
+      final r = widget.g.ggql_engine_execute(_eng.cast(),
+          'SEARCH KMER "AA" RETURN id'.toNativeUtf8().cast(), 100, 0);
+      try {
+        if (widget.g.ggql_result_total_hits(r) > 6) throw 'cap não respeitado';
+        if (!widget.g.ggql_result_total_truncated(r)) throw 'truncated=false';
+      } finally {
+        widget.g.ggql_result_free(r);
+        widget.g.ggql_engine_set_max_total_hits(_eng.cast(), 0);
+      }
+    }),
+    _Step('8. cancel concorrente', () async {
+      final qPtr = 'SEARCH KMER "AA" RETURN id'.toNativeUtf8().cast<Char>();
+      final addr = _eng.address;
+      unawaited(Future.delayed(const Duration(microseconds: 50), () {
+        widget.g.ggql_engine_cancel(Pointer<Void>.fromAddress(addr).cast());
+      }));
+      final r = widget.g.ggql_engine_execute(_eng.cast(), qPtr, 100, 0);
+      if (r.address == 0) throw 'cancel devolveu NULL';
+      widget.g.ggql_result_free(r);
+    }),
+  ];
+
+  Future<void> _runAll() async {
+    for (final s in _steps) {
+      setState(() => _results[s.name] = (_Status.running, ''));
+      try {
+        await s.run();
+        setState(() => _results[s.name] = (_Status.ok, 'OK'));
+      } catch (e) {
+        setState(() => _results[s.name] = (_Status.fail, e.toString()));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('FFI smoke (Round 2/3)')),
+    body: ListView(children: [
+      Padding(
+        padding: const EdgeInsets.all(12),
+        child: ElevatedButton(
+          onPressed: _runAll,
+          child: const Text('Rodar sequência'),
+        ),
+      ),
+      for (final s in _steps)
+        ListTile(
+          leading: switch (_results[s.name]!.$1) {
+            _Status.pending => const Icon(Icons.circle_outlined),
+            _Status.running => const SizedBox(
+              width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)),
+            _Status.ok      => const Icon(Icons.check_circle, color: Colors.green),
+            _Status.fail    => const Icon(Icons.error, color: Colors.red),
+          },
+          title: Text(s.name),
+          subtitle: _results[s.name]!.$2.isEmpty ? null
+              : Text(_results[s.name]!.$2,
+                  style: const TextStyle(fontFamily: 'monospace')),
+        ),
+    ]),
+  );
+}
+```
+
+Uso:
+```dart
+Navigator.push(context, MaterialPageRoute(builder: (_) =>
+    FfiSmokeScreen(idxPath: '/path/to/chm13_subset_sm.gfa.idx', g: bindings)));
+```
