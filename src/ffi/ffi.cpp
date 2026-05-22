@@ -98,12 +98,26 @@ static constexpr uint32_t kFfiDefaultLimit = 100;
 // ── Ponte cli::Event → GgqlEvent ─────────────────────────────────────────────
 // Buffer local p/ copiar string_views em C-strings NULL-terminadas
 // (as views do cli não garantem terminação em nul).
+//
+// C1 (Round 4 / 2026-05-22): arena CIRCULAR de N slots em vez de um buffer
+// único reusado. Motivação: NativeCallable.listener (Dart) processa eventos
+// em microtask DEPOIS do callback C retornar — antes do fix o handler
+// async lia garbage quando outro evento sobrescrevia text_buf/detail_buf
+// no intervalo. Pool de N=16 dá margem segura: emit avança o slot, slot N-16
+// só é reusado após 16 emits subsequentes. Cliente que processa em <16
+// callbacks de atraso lê string consistente.
+//
+// Janela de race residual: se >=16 eventos forem emitidos antes do
+// consumer processar, slot 0 é sobrescrito. Em prática ingest emite
+// ~10 eventos/s e Dart processa microtask em ~ms — efetivamente seguro.
+// True streaming-safe exigiria heap alloc + ack do consumer (ABI break).
 struct EventBridge {
     GgqlEventCallback fn;
     void* user_data;
-    // Buffers reusáveis por chamada — evita alocação por evento.
-    std::string text_buf;
-    std::string detail_buf;
+    static constexpr size_t kArenaSize = 16;
+    std::array<std::string, kArenaSize> text_arena;
+    std::array<std::string, kArenaSize> detail_arena;
+    size_t arena_idx = 0;
 };
 
 // noexcept enforça que o boundary FFI nunca propague exceção C++ para o
@@ -122,13 +136,20 @@ void dispatch_bridge(const cli::Event& ev, void* user) noexcept {
     out.kind = static_cast<int32_t>(ev.kind);
     out.phase_number = ev.phase_number;
 
-    if (!ev.text.empty()) {
-        b->text_buf.assign(ev.text.data(), ev.text.size());
-        out.text = b->text_buf.c_str();
-    }
-    if (!ev.detail.empty()) {
-        b->detail_buf.assign(ev.detail.data(), ev.detail.size());
-        out.detail = b->detail_buf.c_str();
+    // C1: arena circular. Consome 1 slot por evento com strings; out.text/
+    // detail apontam para o slot atual, que sobrevive por kArenaSize-1
+    // eventos antes de ser reusado.
+    if (!ev.text.empty() || !ev.detail.empty()) {
+        const size_t slot = b->arena_idx % EventBridge::kArenaSize;
+        ++b->arena_idx;
+        if (!ev.text.empty()) {
+            b->text_arena[slot].assign(ev.text.data(), ev.text.size());
+            out.text = b->text_arena[slot].c_str();
+        }
+        if (!ev.detail.empty()) {
+            b->detail_arena[slot].assign(ev.detail.data(), ev.detail.size());
+            out.detail = b->detail_arena[slot].c_str();
+        }
     }
 
     out.percent = ev.percent;
@@ -292,8 +313,28 @@ GgqlIngestStats do_ingest_ffi(
         stats.error_message = last_error_message.c_str();
     }
 
-    // Remove o hook global antes de retornar para não vazar a referência.
+    // E3 (Round 4 / 2026-05-22): emite SEMPRE um evento terminal (Ok ou
+    // Fail) antes de remover o hook. Garantia documentada no header:
+    // "o último evento emitido antes de ingest_*() retornar é
+    // GGQL_EV_OK (kind=6) ou GGQL_EV_FAIL (kind=7) top-level".
+    // Consumer pode usar como sentinela para fechar callbacks/streams
+    // sem precisar de `Future.delayed(Nms)` mágico para drenar a fila.
+    //
+    // Disparado via dispatch_bridge diretamente (não via cli::set/clear)
+    // para garantir ordem: terminal vem POR ÚLTIMO mesmo se o ingest já
+    // emitiu seus próprios Ok/Fail durante a execução. Consumer detecta
+    // pelo `text == "__ggql_ingest_done__"` (sentinela específico,
+    // evita colisão com Ok/Fail intermediários gerados pelo cli::).
     if (event_cb) {
+        cli::Event terminal{};
+        terminal.kind = stats.success ? cli::EventKind::Ok
+                                      : cli::EventKind::Fail;
+        terminal.text = std::string_view{"__ggql_ingest_done__"};
+        terminal.detail = stats.success
+            ? std::string_view{}
+            : std::string_view{stats.error_message ? stats.error_message
+                                                   : "ingest_failed"};
+        dispatch_bridge(terminal, &bridge);
         cli::clear_event_callback();
     }
 

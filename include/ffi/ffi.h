@@ -42,8 +42,23 @@ typedef struct {
 // chamado na thread que gerou o evento — o consumidor é responsável por
 // marshalling para a thread da UI.
 //
-// As strings `text` e `detail` SÓ são válidas durante a chamada. Copie se
-// precisar reter (ex.: Flutter converte via toDartString() imediatamente).
+// LIFETIME das strings (atualizado Round 4 / 2026-05-22):
+//   - `text` e `detail` ficam válidas por até 16 emits subsequentes na
+//     MESMA thread (arena circular interna). Consumer assíncrono — ex.
+//     Dart NativeCallable.listener — pode processar com segurança desde
+//     que não atrase mais de 16 eventos.
+//   - Para retenção indefinida, copie imediatamente (toDartString(),
+//     bytes do ctypes.c_char_p, etc.).
+//
+// TERMINAL EVENT (E3 — garantia desde 2026-05-22):
+//   - O último evento emitido antes de qualquer ggql_ingestor_ingest_*()
+//     retornar é SEMPRE GGQL_EV_OK (sucesso) ou GGQL_EV_FAIL (erro)
+//     top-level, com `text == "__ggql_ingest_done__"`. Em falha,
+//     `detail` traz a mensagem de erro (mesma string de
+//     GgqlIngestStats.error_message).
+//   - Consumer pode usar esse evento como sentinela para fechar callbacks/
+//     streams com segurança — não precisa de delays/timeouts mágicos
+//     para drenar a fila de eventos pendentes.
 
 typedef enum {
     GGQL_EV_PHASE_START = 1, // text = título; phase_number >= 0 ou -1 quando ausente
