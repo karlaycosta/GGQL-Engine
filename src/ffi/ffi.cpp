@@ -275,13 +275,18 @@ int32_t do_ingest_ffi(
         return -1;
     }
 
-    // Instala a ponte de eventos (thread_local p/ não vazar entre chamadas
-    // paralelas em threads diferentes; o dispatcher em cli:: é atômico).
+    // Instala a ponte de eventos. C3b (2026-05-22): usa set_event_callback_tl
+    // (não-global) para que ingests paralelos em threads distintas tenham
+    // canais de eventos isolados, sem race no slot global de cli::. O
+    // EventBridge já era thread_local; agora o cli:: também respeita esse
+    // escopo. Threads OpenMP internas (parse/build paralelo) que herdam
+    // este worker e emitem cli::ok/fail/phase caem no fallback global —
+    // hoje sem callback (cliente filtra de qualquer forma).
     thread_local EventBridge bridge;
     if (event_cb) {
         bridge.fn = event_cb;
         bridge.user_data = user_data;
-        cli::set_event_callback(&dispatch_bridge, &bridge);
+        cli::set_event_callback_tl(&dispatch_bridge, &bridge);
     }
 
     try {
@@ -354,7 +359,7 @@ int32_t do_ingest_ffi(
             : std::string_view{out_stats->error_message ? out_stats->error_message
                                                         : "ingest_failed"};
         dispatch_bridge(terminal, &bridge);
-        cli::clear_event_callback();
+        cli::clear_event_callback_tl();
     }
 
     return out_stats->success ? 0 : 1;
@@ -547,6 +552,23 @@ const char* ggql_engine_last_error(GgqlEngineHandle engine) {
     return g_last_engine_error.c_str();
 }
 
+// E2 (Fase 6 / 2026-05-22): copy-out API. Semântica strlcpy.
+size_t ggql_engine_last_error_into(GgqlEngineHandle engine,
+                                   char* out,
+                                   size_t cap) {
+    const std::string& src =
+        engine ? g_last_engine_error : engine_create_error;
+    const size_t src_len = src.size();
+
+    if (!out || cap == 0) {
+        return src_len;  // sondagem — caller dimensiona com retorno + 1
+    }
+    const size_t to_copy = (src_len < cap - 1) ? src_len : (cap - 1);
+    std::memcpy(out, src.data(), to_copy);
+    out[to_copy] = '\0';
+    return src_len;  // caller checa `retorno >= cap` para detectar truncamento
+}
+
 // Round 3.F (2026-05-20): cancel cooperativo.
 void ggql_engine_cancel(GgqlEngineHandle engine) {
     if (!engine) { return; }
@@ -699,11 +721,16 @@ const char* const* ggql_engine_describe_entity(const char* entity_name,
     return nullptr;
 }
 
-GgqlResultHandle ggql_engine_execute(
+// C8 (Fase 6 / 2026-05-22): variante de execute com cap per-query.
+// cap == 0 → usa engine-level via max_total_hits_override (compat com
+//             ggql_engine_execute legado).
+// cap > 0  → cap inline, sobrescreve engine-level só nesta chamada.
+GgqlResultHandle ggql_engine_execute_with_cap(
     GgqlEngineHandle engine,
     const char*      query_str,
     uint32_t         limit,
-    uint32_t         offset
+    uint32_t         offset,
+    uint64_t         cap
 ) {
     if (!engine || !query_str) { return nullptr; }
     auto* w = reinterpret_cast<GgqlEngineWrapper*>(engine);
@@ -766,12 +793,14 @@ GgqlResultHandle ggql_engine_execute(
         (void)w;
         return nullptr;
     }
-    // Round 3.F: reset do cancel flag para esta query. Round 3.G: instala
-    // override de cap (se setado). ScopedContext garante restore.
+    // Round 3.F: reset do cancel flag para esta query. Round 3.G + C8: instala
+    // cap (per-query se cap > 0, senão usa engine-level override).
+    // ScopedContext garante restore.
     w->cancel_requested.store(false, std::memory_order_release);
-    ggql::query::ctx::ScopedContext qctx(
-        &w->cancel_requested,
-        w->max_total_hits_override.load(std::memory_order_acquire));
+    const std::size_t effective_cap = (cap > 0)
+        ? static_cast<std::size_t>(cap)
+        : w->max_total_hits_override.load(std::memory_order_acquire);
+    ggql::query::ctx::ScopedContext qctx(&w->cancel_requested, effective_cap);
     auto exec = planner_snap->execute(parsed.value());
     if (!exec) {
         g_last_engine_error = std::move(exec.error());
@@ -780,6 +809,16 @@ GgqlResultHandle ggql_engine_execute(
 
     auto* r = new GgqlResultWrapper{std::move(exec.value())};
     return reinterpret_cast<GgqlResultHandle>(r);
+}
+
+// API legada: delega para execute_with_cap com cap=0 (usa engine-level).
+GgqlResultHandle ggql_engine_execute(
+    GgqlEngineHandle engine,
+    const char*      query_str,
+    uint32_t         limit,
+    uint32_t         offset
+) {
+    return ggql_engine_execute_with_cap(engine, query_str, limit, offset, 0);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

@@ -291,10 +291,22 @@ std::atomic<unsigned> g_event_seq{0};
 std::atomic<EventCallback> g_event_cb{nullptr};
 std::atomic<void*> g_event_user{nullptr};
 
+// C3b (Round 4 Fase 6 / 2026-05-22): override por thread. Quando setado,
+// prevalece sobre o slot global em `dispatch()`. Permite ingests paralelos
+// em threads distintas terem callbacks isolados sem race no global.
+thread_local EventCallback g_event_cb_tl = nullptr;
+thread_local void* g_event_user_tl = nullptr;
+
 // noexcept: todas as operações (atomic loads/fence, this_thread::yield, e
 // o callback via typedef noexcept após B2) são noexcept. Documenta o
 // contrato e permite chamada de contextos noexcept.
 void dispatch(const Event& ev) noexcept {
+    // C3b: TL prevalece. Sem atomic — variável thread_local não tem race.
+    if (EventCallback tl = g_event_cb_tl; tl != nullptr) {
+        tl(ev, g_event_user_tl);
+        return;
+    }
+    // Fallback global via seqlock (comportamento original).
     EventCallback cb = nullptr;
     void* user = nullptr;
     while (true) {
@@ -708,6 +720,17 @@ void clear_event_callback() noexcept {
     g_event_cb.store(nullptr, std::memory_order_relaxed);
     g_event_user.store(nullptr, std::memory_order_relaxed);
     g_event_seq.fetch_add(1, std::memory_order_release);
+}
+
+// C3b: TL setter — sem atomic, escrita simples no thread_local.
+void set_event_callback_tl(EventCallback cb, void* user_data) noexcept {
+    g_event_cb_tl = cb;
+    g_event_user_tl = user_data;
+}
+
+void clear_event_callback_tl() noexcept {
+    g_event_cb_tl = nullptr;
+    g_event_user_tl = nullptr;
 }
 
 // ─── Formatadores ────────────────────────────────────────────────────────────

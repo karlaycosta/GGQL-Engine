@@ -189,4 +189,17 @@ using EventCallback = void (*)(const Event& ev, void* user_data) noexcept;
 void set_event_callback(EventCallback cb, void* user_data) noexcept;
 void clear_event_callback() noexcept;
 
+// C3b (Round 4 Fase 6 / 2026-05-22): variante thread_local. Permite que
+// múltiplos consumidores (ex.: ingests paralelos em threads distintas)
+// instalem callbacks isolados sem race no slot global. `dispatch()` prefere
+// o TL da thread atual; cai no global se TL for nullptr.
+//
+// Caso de uso típico: FFI ingest agora usa set_event_callback_tl para que
+// cada chamada de ggql_ingestor_ingest_* em sua thread tenha seu próprio
+// canal de eventos. Threads OpenMP internas (parser/build paralelo) que
+// não setam TL próprio caem no global — preserve back-compat para
+// consumers legados que setavam o global e esperam vê-lo em qualquer thread.
+void set_event_callback_tl(EventCallback cb, void* user_data) noexcept;
+void clear_event_callback_tl() noexcept;
+
 } // namespace ggql::cli

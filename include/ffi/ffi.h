@@ -294,6 +294,28 @@ void ggql_engine_destroy(GgqlEngineHandle engine);
 // ggql_engine_create, ggql_engine_execute). Válida até a próxima chamada FFI.
 const char* ggql_engine_last_error(GgqlEngineHandle engine);
 
+// ── Copy-out API para last_error (E2 / Fase 6, 2026-05-22) ───────────────────
+//
+// Copia a mensagem de erro para um buffer ownership-do-caller. Elimina a
+// dependência do thread_local interno do engine — útil para wrappers
+// idiomáticos (Dart, Python) que querem isolar o ciclo de vida do buffer
+// da próxima chamada FFI feita pela mesma thread.
+//
+// Semântica (à la strlcpy do BSD):
+//   - Retorna o número de bytes da mensagem, SEM contar '\0'.
+//   - Sempre escreve '\0' em out[min(cap-1, len)] quando cap > 0 e out != NULL.
+//   - Trunca se cap < len+1. Caller detecta truncamento com `retorno >= cap`.
+//   - out == NULL OU cap == 0 → não escreve nada; retorna len (sondagem
+//     de tamanho — caller pode dimensionar buffer com retorno + 1).
+//
+// engine == NULL → lê do buffer engine_create_error thread_local (mensagens
+//   de ggql_engine_load / ggql_engine_create que falharam).
+// engine != NULL → lê do g_last_engine_error thread_local (mensagens de
+//   ggql_engine_execute, lazy-load do FM-Index, etc.).
+size_t ggql_engine_last_error_into(GgqlEngineHandle engine,
+                                   char* out,
+                                   size_t cap);
+
 // ── Introspecção de capabilities (Round 1.B, 2026-05-20) ──────────────────────
 //
 // Permite ao consumer descobrir o que este engine pode fazer SEM rodar uma
@@ -454,6 +476,28 @@ GgqlResultHandle ggql_engine_execute(
     const char*      query,
     uint32_t         limit,
     uint32_t         offset
+);
+
+// ── Variante com cap per-query (C8 / Fase 6, 2026-05-22) ──────────────────────
+//
+// Igual a ggql_engine_execute, mas passa `cap` (override per-query do
+// kMaxTotalHitsCount) inline em vez de via ggql_engine_set_max_total_hits.
+// Resolve a limitação de cap per-engine em paralelismo: cada thread pode
+// chamar execute_with_cap com seu próprio cap sem afetar outras queries.
+//
+// cap == 0 → usa o cap engine-level setado via set_max_total_hits (ou o
+//             default ~1M se nenhum foi setado). Equivalente a chamar
+//             ggql_engine_execute.
+// cap > 0  → cap per-query, sobrescreve engine-level e default.
+//
+// Após Round 1.#4 do engine, counts estruturais não truncam — este cap
+// só morde SEARCH KMER e queries WHERE complexas (proteção DoS).
+GgqlResultHandle ggql_engine_execute_with_cap(
+    GgqlEngineHandle engine,
+    const char*      query,
+    uint32_t         limit,
+    uint32_t         offset,
+    uint64_t         cap
 );
 
 // ── Metadados do resultado ─────────────────────────────────────────────────────
