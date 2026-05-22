@@ -206,7 +206,8 @@ extern "C" {
 
 GgqlIngestorHandle ggql_ingestor_create() {
     try {
-        return new GfaIngestorMmapParallel();
+        // E1 (Fase 4): cast explícito porque handle é opaque struct typedef.
+        return reinterpret_cast<GgqlIngestorHandle>(new GfaIngestorMmapParallel());
     } catch (...) {
         return nullptr;
     }
@@ -214,13 +215,13 @@ GgqlIngestorHandle ggql_ingestor_create() {
 
 void ggql_ingestor_destroy(GgqlIngestorHandle handle) {
     if (handle) {
-        delete static_cast<GfaIngestorMmapParallel*>(handle);
+        delete reinterpret_cast<GfaIngestorMmapParallel*>(handle);
     }
 }
 
 void ggql_ingestor_reset(GgqlIngestorHandle handle) {
     if (handle) {
-        static_cast<GfaIngestorMmapParallel*>(handle)->reset();
+        reinterpret_cast<GfaIngestorMmapParallel*>(handle)->reset();
     }
 }
 
@@ -229,7 +230,7 @@ void ggql_ingestor_reset(GgqlIngestorHandle handle) {
 // longo (HPRC ~24min). Worker checa em checkpoints entre fases.
 void ggql_ingestor_cancel(GgqlIngestorHandle handle) {
     if (!handle) { return; }
-    static_cast<GfaIngestorMmapParallel*>(handle)->cancel();
+    reinterpret_cast<GfaIngestorMmapParallel*>(handle)->cancel();
 }
 
 // thread_local evita que múltiplas chamadas FFI simultâneas em threads
@@ -274,7 +275,7 @@ GgqlIngestStats do_ingest_ffi(
     }
 
     try {
-        auto* ingestor = static_cast<GfaIngestorMmapParallel*>(handle);
+        auto* ingestor = reinterpret_cast<GfaIngestorMmapParallel*>(handle);
         auto result = ingestor->ingest(
             std::string(filepath),
             num_threads,
@@ -484,7 +485,7 @@ GgqlEngineHandle ggql_engine_load(const char* cache_dir) {
             &w->metadata,
             /*seq_index=*/nullptr
         );
-        return w;
+        return reinterpret_cast<GgqlEngineHandle>(w);
     } catch (const std::exception& e) {
         engine_create_error = std::string("ggql_engine_load: ") + e.what();
         return nullptr;
@@ -501,7 +502,7 @@ GgqlEngineHandle ggql_engine_create(GgqlIngestorHandle ingestor, const char* cac
     }
     try {
         auto* w = new GgqlEngineWrapper();
-        w->topology = static_cast<GfaIngestorMmapParallel*>(ingestor)->topology();
+        w->topology = reinterpret_cast<GfaIngestorMmapParallel*>(ingestor)->topology();
         w->metadata.load(std::string(cache_dir));
         // #1A FFI: FM-Index lazy (mesma motivação de ggql_engine_load).
         w->cache_dir_for_fm = std::string(cache_dir);
@@ -510,7 +511,7 @@ GgqlEngineHandle ggql_engine_create(GgqlIngestorHandle ingestor, const char* cac
             &w->metadata,
             /*seq_index=*/nullptr
         );
-        return w;
+        return reinterpret_cast<GgqlEngineHandle>(w);
     } catch (const std::exception& e) {
         engine_create_error = std::string("ggql_engine_create: ") + e.what();
         return nullptr;
@@ -521,7 +522,7 @@ GgqlEngineHandle ggql_engine_create(GgqlIngestorHandle ingestor, const char* cac
 }
 
 void ggql_engine_destroy(GgqlEngineHandle engine) {
-    delete static_cast<GgqlEngineWrapper*>(engine);
+    delete reinterpret_cast<GgqlEngineWrapper*>(engine);
 }
 
 const char* ggql_engine_last_error(GgqlEngineHandle engine) {
@@ -536,14 +537,14 @@ const char* ggql_engine_last_error(GgqlEngineHandle engine) {
 // Round 3.F (2026-05-20): cancel cooperativo.
 void ggql_engine_cancel(GgqlEngineHandle engine) {
     if (!engine) { return; }
-    auto* w = static_cast<GgqlEngineWrapper*>(engine);
+    auto* w = reinterpret_cast<GgqlEngineWrapper*>(engine);
     w->cancel_requested.store(true, std::memory_order_release);
 }
 
 // Round 3.G (2026-05-20): cap per-engine.
 void ggql_engine_set_max_total_hits(GgqlEngineHandle engine, uint64_t cap) {
     if (!engine) { return; }
-    auto* w = static_cast<GgqlEngineWrapper*>(engine);
+    auto* w = reinterpret_cast<GgqlEngineWrapper*>(engine);
     w->max_total_hits_override.store(static_cast<std::size_t>(cap),
                                      std::memory_order_release);
 }
@@ -565,7 +566,7 @@ int64_t ggql_engine_execute_streaming(
     bool keep_going = true;
     while (keep_going) {
         // Cancel checado entre páginas (e dentro do execute via Paginator).
-        if (static_cast<GgqlEngineWrapper*>(engine)
+        if (reinterpret_cast<GgqlEngineWrapper*>(engine)
               ->cancel_requested.load(std::memory_order_acquire)) {
             break;
         }
@@ -593,7 +594,7 @@ int64_t ggql_engine_execute_streaming(
 int32_t ggql_engine_capabilities(GgqlEngineHandle engine,
                                  GgqlEngineCapabilities* out) {
     if (!engine || !out) { return -1; }
-    auto* w = static_cast<GgqlEngineWrapper*>(engine);
+    auto* w = reinterpret_cast<GgqlEngineWrapper*>(engine);
     *out = {};
     // Metadata sempre carregado em load/create se chegamos a um handle válido.
     out->has_metadata = true;
@@ -684,7 +685,7 @@ GgqlResultHandle ggql_engine_execute(
     uint32_t         offset
 ) {
     if (!engine || !query_str) { return nullptr; }
-    auto* w = static_cast<GgqlEngineWrapper*>(engine);
+    auto* w = reinterpret_cast<GgqlEngineWrapper*>(engine);
 
     // #1A FFI (2026-05-20): lazy-load do FM-Index na primeira KMER.
     // Fast-path com atomic load (relaxed→acquire só na 1ª travessia).
@@ -757,7 +758,7 @@ GgqlResultHandle ggql_engine_execute(
     }
 
     auto* r = new GgqlResultWrapper{std::move(exec.value())};
-    return r;
+    return reinterpret_cast<GgqlResultHandle>(r);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -766,32 +767,32 @@ GgqlResultHandle ggql_engine_execute(
 
 int64_t ggql_result_row_count(GgqlResultHandle result) {
     if (!result) { return 0; }
-    return static_cast<int64_t>(static_cast<GgqlResultWrapper*>(result)->result.row_count);
+    return static_cast<int64_t>(reinterpret_cast<GgqlResultWrapper*>(result)->result.row_count);
 }
 
 int64_t ggql_result_col_count(GgqlResultHandle result) {
     if (!result) { return 0; }
-    return static_cast<int64_t>(static_cast<GgqlResultWrapper*>(result)->result.columns.size());
+    return static_cast<int64_t>(reinterpret_cast<GgqlResultWrapper*>(result)->result.columns.size());
 }
 
 int64_t ggql_result_total_hits(GgqlResultHandle result) {
     if (!result) { return 0; }
-    return static_cast<int64_t>(static_cast<GgqlResultWrapper*>(result)->result.total_hits);
+    return static_cast<int64_t>(reinterpret_cast<GgqlResultWrapper*>(result)->result.total_hits);
 }
 
 bool ggql_result_total_truncated(GgqlResultHandle result) {
     if (!result) { return false; }
-    return static_cast<GgqlResultWrapper*>(result)->result.total_hits_truncated;
+    return reinterpret_cast<GgqlResultWrapper*>(result)->result.total_hits_truncated;
 }
 
 bool ggql_result_safety_limit_hit(GgqlResultHandle result) {
     if (!result) { return false; }
-    return static_cast<GgqlResultWrapper*>(result)->result.safety_limit_hit;
+    return reinterpret_cast<GgqlResultWrapper*>(result)->result.safety_limit_hit;
 }
 
 const char* ggql_result_col_name(GgqlResultHandle result, int32_t col) {
     if (!result) { return nullptr; }
-    const auto& cols = static_cast<GgqlResultWrapper*>(result)->result.columns;
+    const auto& cols = reinterpret_cast<GgqlResultWrapper*>(result)->result.columns;
     if (col < 0 || static_cast<size_t>(col) >= cols.size()) { return nullptr; }
     return cols[static_cast<size_t>(col)].c_str();
 }
@@ -810,7 +811,7 @@ static inline const Value* get_cell(const GgqlResultWrapper* w, int32_t row, int
 
 GgqlCellType ggql_result_cell_type(GgqlResultHandle result, int32_t row, int32_t col) {
     if (!result) { return GGQL_TYPE_NULL; }
-    const Value* v = get_cell(static_cast<GgqlResultWrapper*>(result), row, col);
+    const Value* v = get_cell(reinterpret_cast<GgqlResultWrapper*>(result), row, col);
     if (!v) { return GGQL_TYPE_NULL; }
     if (std::holds_alternative<int64_t>(*v))    { return GGQL_TYPE_INT;    }
     if (std::holds_alternative<double>(*v))     { return GGQL_TYPE_DOUBLE; }
@@ -820,27 +821,27 @@ GgqlCellType ggql_result_cell_type(GgqlResultHandle result, int32_t row, int32_t
 
 int64_t ggql_result_cell_int(GgqlResultHandle result, int32_t row, int32_t col) {
     if (!result) { return 0; }
-    const Value* v = get_cell(static_cast<GgqlResultWrapper*>(result), row, col);
+    const Value* v = get_cell(reinterpret_cast<GgqlResultWrapper*>(result), row, col);
     if (!v || !std::holds_alternative<int64_t>(*v)) { return 0; }
     return std::get<int64_t>(*v);
 }
 
 double ggql_result_cell_double(GgqlResultHandle result, int32_t row, int32_t col) {
     if (!result) { return 0.0; }
-    const Value* v = get_cell(static_cast<GgqlResultWrapper*>(result), row, col);
+    const Value* v = get_cell(reinterpret_cast<GgqlResultWrapper*>(result), row, col);
     if (!v || !std::holds_alternative<double>(*v)) { return 0.0; }
     return std::get<double>(*v);
 }
 
 const char* ggql_result_cell_string(GgqlResultHandle result, int32_t row, int32_t col) {
     if (!result) { return nullptr; }
-    const Value* v = get_cell(static_cast<GgqlResultWrapper*>(result), row, col);
+    const Value* v = get_cell(reinterpret_cast<GgqlResultWrapper*>(result), row, col);
     if (!v || !std::holds_alternative<std::string>(*v)) { return nullptr; }
     return std::get<std::string>(*v).c_str();
 }
 
 void ggql_result_free(GgqlResultHandle result) {
-    delete static_cast<GgqlResultWrapper*>(result);
+    delete reinterpret_cast<GgqlResultWrapper*>(result);
 }
 
 } // extern "C"

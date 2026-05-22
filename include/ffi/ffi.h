@@ -10,7 +10,17 @@ extern "C" {
 #endif
 
 // Opaque handles
-typedef void* GgqlIngestorHandle;
+//
+// E1 / Fase 4 (Round 4 / 2026-05-22): opaque struct typedef em vez de
+// void* genérico. Compilador C/C++ rejeita silenciosamente a passagem
+// de um Result onde um Engine é esperado (e vice-versa) — antes esses
+// erros passavam sem warning porque todos eram apenas void*. As structs
+// nunca têm definição completa (forward declaration somente); são
+// usadas apenas como tipos opacos para distinguir handles. Sem mudança
+// de ABI runtime — ponteiros opacos continuam idênticos em layout.
+// Consumers via ffigen recebem tipos Dart distintos (Pointer<GgqlIngestor>
+// em vez de Pointer<Void>) — type-safety propagada para o lado Dart.
+typedef struct GgqlIngestor_* GgqlIngestorHandle;
 
 // Result Structs for IngestStatsParallel
 typedef struct {
@@ -208,8 +218,9 @@ void ggql_ingestor_cancel(GgqlIngestorHandle handle);
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // Handles opacos para o engine e para resultados de query.
-typedef void* GgqlEngineHandle;
-typedef void* GgqlResultHandle;
+// E1 / Fase 4: opaque struct typedef — ver nota em GgqlIngestorHandle.
+typedef struct GgqlEngine_* GgqlEngineHandle;
+typedef struct GgqlResult_* GgqlResultHandle;
 
 // Tipos de célula retornados por ggql_result_cell_type().
 typedef enum {
