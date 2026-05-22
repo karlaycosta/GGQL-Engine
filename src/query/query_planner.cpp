@@ -650,6 +650,243 @@ std::expected<QueryResult, std::string> QueryPlanner::execute(const GgqlQuery& q
         query);
 }
 
+// ── QueryCursor — implementação (C7 / 2026-05-22) ───────────────────────────
+//
+// Estratégia: cada backend "cursor-friendly" expõe uma generator function
+// (`std::generator<Value>`) que emite valores célula-por-célula em ordem
+// row-major. O QueryCursor agrupa em linhas (ncols por linha) e materializa
+// page_size linhas por `next()`. Generator preserva ponto de execução entre
+// chamadas — true O(N) cumulativo.
+//
+// Restrições da implementação atual:
+//   - Apenas FIND SEGMENT full-scan (sem caminhos rápidos de índice).
+//   - Outros backends + caminhos rápidos retornam erro semântico em
+//     execute_cursor() — caller cai em execute()/execute_streaming() legados.
+
+namespace {
+
+// C7: generator de Value para FIND SEGMENT full-scan.
+// Emite ncols células consecutivas por segmento que satisfaz o WHERE.
+// Cancel cooperativo: respeita ctx::cancel_requested() entre segmentos.
+// Cap (kMaxTotalHitsCount): não aplicado aqui — segmentos são bounded
+// pelo domínio (~#segs), igual ao path unbounded_count do execute legado.
+// IMPORTANTE: q deve ser passado por VALUE (não const ref). Corrotinas
+// std::generator capturam args por value internamente, mas se signature
+// usar referência, o slot interno guarda PONTEIRO para o caller — que
+// pode ser temporary destruído antes do generator executar lazy.
+std::generator<Value> plan_segments_cursor_gen(
+    const QueryPlanner* planner,
+    FindQuery q,  // by-value: generator owns own copy
+    const GfaMetadataStore* metadata,
+    const GfaSequenceIndex* seq_index,
+    std::vector<std::string> cols,
+    KmerCache kmer_cache
+) {
+    const KmerCache* cache_ptr = kmer_cache.empty() ? nullptr : &kmer_cache;
+    const auto emitters = detail::map_segment_cols(cols);
+
+    bool needs_name = std::ranges::contains(cols, "name");
+    bool where_depth = false, where_rc = false;
+    if (q.where) {
+        for (const auto& cond : q.where->conditions) {
+            if (const auto* cc = std::get_if<CompareCondition>(&cond)) {
+                if (cc->field == "name")       { needs_name = true; }
+                if (cc->field == "depth")      { where_depth = true; }
+                if (cc->field == "read_count") { where_rc = true; }
+            }
+        }
+    }
+    const bool ret_rc = std::ranges::contains(cols, "read_count");
+    const bool ret_dp = std::ranges::contains(cols, "depth");
+
+    RowFields row;
+
+    for (size_t id = 0; id < metadata->size(); ++id) {
+        if (ggql::query::ctx::cancel_requested()) {
+            co_return;
+        }
+        const int64_t len = static_cast<int64_t>(metadata->length(id));
+
+        // WHERE filter (mesma lógica do plan_segments full-scan).
+        if (q.where) {
+            const int32_t rc_raw = where_rc ? metadata->read_count(id) : -1;
+            const float dp_raw = where_depth ? metadata->depth(id) : -1.f;
+            row.count = 0;
+            row.insert("id", int64_t(id));
+            row.insert("length", len);
+            if (where_rc) {
+                row.insert("read_count",
+                           rc_raw >= 0 ? Value{int64_t(rc_raw)} : Value{std::string{"NULL"}});
+            }
+            if (where_depth) {
+                row.insert("depth",
+                           dp_raw >= 0.f ? Value{double(dp_raw)} : Value{std::string{"NULL"}});
+            }
+            if (needs_name) {
+                row.insert("name", std::string(metadata->original_id(id)));
+            }
+            if (!planner->eval_where(*q.where, row, cache_ptr)) {
+                continue;
+            }
+        }
+
+        // Emite ncols células consecutivas para esta linha.
+        const int32_t rc_out = ret_rc ? metadata->read_count(id) : -1;
+        const float dp_out = ret_dp ? metadata->depth(id) : -1.f;
+        for (const auto e : emitters) {
+            switch (e) {
+                case detail::SegmentCol::Id:
+                    co_yield Value{int64_t(id)};
+                    break;
+                case detail::SegmentCol::Length:
+                    co_yield Value{len};
+                    break;
+                case detail::SegmentCol::Name:
+                    co_yield Value{std::string(metadata->original_id(id))};
+                    break;
+                case detail::SegmentCol::ReadCount:
+                    co_yield (rc_out >= 0 ? Value{int64_t(rc_out)}
+                                          : Value{std::string{"NULL"}});
+                    break;
+                case detail::SegmentCol::Depth:
+                    co_yield (dp_out >= 0.f ? Value{double(dp_out)}
+                                            : Value{std::string{"NULL"}});
+                    break;
+            }
+        }
+    }
+    (void)seq_index;  // não usado aqui; cache já foi pré-computado
+}
+
+}  // namespace
+
+struct QueryCursor::Impl {
+    using GenT = std::generator<Value>;
+    using IterT = decltype(std::declval<GenT&>().begin());
+
+    GenT gen;
+    std::optional<IterT> it;     // lazy: inicializado na primeira next()
+    std::vector<std::string> columns;
+    size_t ncols;
+    bool exhausted = false;
+    uint64_t total_emitted = 0;
+
+    Impl(GenT g, std::vector<std::string> cols, size_t nc)
+        : gen(std::move(g))
+        , columns(std::move(cols))
+        , ncols(nc) {}
+
+    void ensure_started() {
+        if (!it.has_value()) {
+            it.emplace(gen.begin());
+        }
+    }
+
+    bool at_end() const {
+        // std::generator usa default_sentinel — iterator compara contra ele.
+        return *it == std::default_sentinel;
+    }
+};
+
+QueryCursor::QueryCursor(std::generator<Value> gen,
+                         std::vector<std::string> columns,
+                         size_t ncols)
+    : pimpl_(std::make_unique<Impl>(std::move(gen), std::move(columns), ncols)) {}
+
+QueryCursor::~QueryCursor() = default;
+QueryCursor::QueryCursor(QueryCursor&&) noexcept = default;
+QueryCursor& QueryCursor::operator=(QueryCursor&&) noexcept = default;
+
+std::expected<QueryResult, std::string> QueryCursor::next(uint32_t page_size) {
+    QueryResult result;
+    result.columns = pimpl_->columns;
+    if (pimpl_->exhausted || page_size == 0) {
+        return result;  // 0 linhas
+    }
+    pimpl_->ensure_started();
+    result.flat.reserve(static_cast<size_t>(page_size) * pimpl_->ncols);
+
+    for (uint32_t row = 0; row < page_size; ++row) {
+        // Lê ncols células para formar 1 row.
+        for (size_t c = 0; c < pimpl_->ncols; ++c) {
+            if (pimpl_->at_end()) {
+                pimpl_->exhausted = true;
+                if (c == 0) {
+                    // Fim limpo entre rows.
+                    result.total_hits = pimpl_->total_emitted;
+                    return result;
+                }
+                // Fim no meio de uma row — generator quebrou contrato.
+                return std::unexpected{
+                    "QueryCursor: generator exhausted mid-row (bug interno)"};
+            }
+            result.flat.emplace_back(std::move(**pimpl_->it));
+            ++(*pimpl_->it);
+        }
+        ++result.row_count;
+        ++pimpl_->total_emitted;
+    }
+    result.total_hits = pimpl_->total_emitted;
+    return result;
+}
+
+bool QueryCursor::exhausted() const noexcept {
+    return pimpl_->exhausted;
+}
+uint64_t QueryCursor::total_emitted() const noexcept {
+    return pimpl_->total_emitted;
+}
+std::span<const std::string> QueryCursor::columns() const noexcept {
+    return pimpl_->columns;
+}
+
+std::expected<std::unique_ptr<QueryCursor>, std::string>
+QueryPlanner::execute_cursor(const GgqlQuery& query) const {
+    // C7.1: apenas FIND SEGMENT full-scan suportado.
+    const auto* find = std::get_if<FindQuery>(&query);
+    if (!find) {
+        return std::unexpected{
+            "cursor: apenas FIND SEGMENT suportado em C7.1 "
+            "(SEARCH KMER pendente em C7.x — use execute_streaming)"};
+    }
+    if (find->entity != EntityType::SEGMENT) {
+        return std::unexpected{
+            "cursor: backend não suportado em C7.1 "
+            "(apenas FIND SEGMENT; outros backends em C7.2+)"};
+    }
+    if (!metadata_) {
+        return std::unexpected{
+            "FIND SEGMENT requer GfaMetadataStore instanciado"};
+    }
+    if (auto err = detail::validate_query(*find, detail::kSegmentColumns)) {
+        return std::unexpected{*err};
+    }
+
+    // Pré-computa KmerCache se WHERE tem ContainsKmer (não pode rodar
+    // dentro do generator — generator é lazy).
+    KmerCache kmer_cache;
+    if (find->where && seq_index_) {
+        for (const auto& cond : find->where->conditions) {
+            if (const auto* ck = std::get_if<ContainsKmerCondition>(&cond)) {
+                auto& ids_set = kmer_cache[ck->kmer];
+                for (uint64_t pos : seq_index_->search_kmer(ck->kmer)) {
+                    if (auto sid = metadata_->segment_id_from_offset(pos)) {
+                        ids_set.insert(*sid);
+                    }
+                }
+            }
+        }
+    }
+
+    auto cols = detail::resolve_return_fields(find->return_fields,
+                                              detail::kSegmentColumns);
+    const size_t ncols = cols.size();
+    auto gen = plan_segments_cursor_gen(this, *find, metadata_, seq_index_,
+                                        cols, std::move(kmer_cache));
+    return std::make_unique<QueryCursor>(std::move(gen),
+                                         std::move(cols), ncols);
+}
+
 std::expected<QueryResult, std::string> QueryPlanner::execute_find(const FindQuery& q) const {
     switch (q.entity) {
         case EntityType::TIP:

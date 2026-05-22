@@ -18,6 +18,8 @@
 
 #include <array>
 #include <expected>
+#include <generator>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -106,6 +108,35 @@ class QueryPlanner {
 
     [[nodiscard]] std::expected<QueryResult, std::string> execute(const GgqlQuery& query) const;
 
+    // C7 / Fase 7+ (2026-05-22): cursor-style streaming. Mantém estado de
+    // iteração entre páginas — não re-parseia/re-planeja a query nem repete
+    // o "skip" interno (que tornava execute_streaming O(N²) cumulativo).
+    //
+    // ESCOPO ATUAL (C7.1): apenas FIND SEGMENT em modo full-scan. Caminhos
+    // rápidos (name/length/depth index) e demais backends (EDGE/PATH/TIP/
+    // REPEAT/BUBBLE/SEARCH KMER) retornam std::unexpected("cursor: backend
+    // não suportado — use execute() ou execute_streaming()"). Refactor
+    // incremental por backend nas fases C7.2+.
+    //
+    // Uso típico (C++):
+    //   auto cursor = planner.execute_cursor(parsed_ast);
+    //   if (!cursor) return cursor.error();
+    //   while (true) {
+    //       auto page = (*cursor)->next(1024);
+    //       if (!page) return page.error();
+    //       if (page->row_count == 0) break;  // fim
+    //       process(*page);
+    //   }
+    [[nodiscard]] std::expected<std::unique_ptr<class QueryCursor>, std::string>
+        execute_cursor(const GgqlQuery& query) const;
+
+    // C7: público para uso por generators de cursor que vivem em
+    // namespace anônimo no .cpp. Não-API estável — consumers externos
+    // devem usar execute() / execute_cursor().
+    [[nodiscard]] bool eval_where(const WhereClause& wc, const RowFields& row,
+                                  const KmerCache* kmer_cache = nullptr,
+                                  const CrossesCache* crosses_cache = nullptr) const noexcept;
+
   private:
     [[nodiscard]] std::expected<QueryResult, std::string> execute_find(const FindQuery& q) const;
     [[nodiscard]] std::expected<QueryResult, std::string> execute_search_kmer(const SearchKmerQuery& q) const;
@@ -122,9 +153,6 @@ class QueryPlanner {
     [[nodiscard]] bool eval_condition(const ConditionExpr& cond, const RowFields& row,
                                       const KmerCache* kmer_cache = nullptr,
                                       const CrossesCache* crosses_cache = nullptr) const noexcept;
-    [[nodiscard]] bool eval_where(const WhereClause& wc, const RowFields& row,
-                                  const KmerCache* kmer_cache = nullptr,
-                                  const CrossesCache* crosses_cache = nullptr) const noexcept;
 
     [[nodiscard]] static bool compare_values(const Value& lhs, Operator op,
                                              const Value& rhs) noexcept;
@@ -132,6 +160,54 @@ class QueryPlanner {
     const GfaCsrTopology*   topology_  = nullptr;
     const GfaMetadataStore* metadata_  = nullptr;
     const GfaSequenceIndex* seq_index_ = nullptr;
+
+};
+
+// ─── QueryCursor (C7 / 2026-05-22) ────────────────────────────────────────────
+//
+// Cursor stateful para streaming verdadeiro (true O(N) cumulativo, sem
+// re-parse e sem re-execução com offset crescente). Implementado via
+// `std::generator<Value>` por baixo do capô — cada `co_yield` emite uma
+// célula (Value), o cursor agrupa em linhas baseado em ncols.
+//
+// ESCOPO ATUAL (C7.1): apenas FIND SEGMENT full-scan. Backends adicionais
+// virão em C7.2+.
+//
+// Lifetime: o cursor mantém referência ao QueryPlanner (não-proprietário) —
+// destruir o planner antes de exaurir o cursor é UB. O Cursor é movível mas
+// não copiável (generator não é copiável).
+class QueryCursor {
+public:
+    // Construção via QueryPlanner::execute_cursor(). Caller não constrói
+    // diretamente em uso normal.
+    QueryCursor(std::generator<Value> gen,
+                std::vector<std::string> columns,
+                size_t ncols);
+    ~QueryCursor();
+
+    QueryCursor(const QueryCursor&)            = delete;
+    QueryCursor& operator=(const QueryCursor&) = delete;
+    QueryCursor(QueryCursor&&) noexcept;
+    QueryCursor& operator=(QueryCursor&&) noexcept;
+
+    // Materializa até `page_size` linhas. Retorna QueryResult com
+    // row_count <= page_size; row_count < page_size indica fim do stream
+    // (próxima chamada também retorna 0 linhas).
+    [[nodiscard]] std::expected<QueryResult, std::string>
+        next(uint32_t page_size);
+
+    // True se o generator está esgotado (próxima next() retorna 0 linhas).
+    [[nodiscard]] bool exhausted() const noexcept;
+
+    // Total cumulativo de linhas emitidas desde construção do cursor.
+    [[nodiscard]] uint64_t total_emitted() const noexcept;
+
+    // Esquema da query (colunas) — constante por cursor.
+    [[nodiscard]] std::span<const std::string> columns() const noexcept;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> pimpl_;
 };
 
 } // namespace ggql

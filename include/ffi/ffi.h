@@ -478,6 +478,54 @@ GgqlResultHandle ggql_engine_execute(
     uint32_t         offset
 );
 
+// ── Cursor stateful streaming (C7 / 2026-05-22) ───────────────────────────────
+//
+// True streaming via std::generator no engine. Mantém estado de iteração
+// entre páginas — não re-parseia/re-planeja a query nem repete o skip
+// interno (que tornava ggql_engine_execute_streaming O(N²) cumulativo).
+//
+// ESCOPO ATUAL (C7.1): apenas `FIND SEGMENT` em full-scan (sem caminhos
+// rápidos de index — name/length/depth). Outros backends e SEARCH KMER
+// retornam NULL com last_error setado — caller cai em
+// ggql_engine_execute() ou ggql_engine_execute_streaming() legados.
+// Refactor incremental por backend em C7.2+.
+//
+// Uso típico (C):
+//   GgqlCursorHandle c = ggql_engine_execute_cursor(eng, "FIND SEGMENT");
+//   if (!c) { /* lê ggql_engine_last_error(eng) */ return; }
+//   while (1) {
+//       GgqlResultHandle page = ggql_cursor_next(c, 1024);
+//       if (!page) break;  // erro
+//       int64_t rows = ggql_result_row_count(page);
+//       if (rows == 0) { ggql_result_free(page); break; }  // fim
+//       /* processa page */
+//       ggql_result_free(page);
+//   }
+//   ggql_cursor_destroy(c);
+//
+// O cursor mantém referência ao engine — destruir o engine antes de
+// ggql_cursor_destroy é UB.
+typedef struct GgqlCursor_* GgqlCursorHandle;
+
+// Cria cursor para a query. Retorna NULL em erro (mensagem em
+// ggql_engine_last_error). NULL também se backend/forma não suportada
+// pela versão atual (C7.1: só FIND SEGMENT full-scan).
+GgqlCursorHandle ggql_engine_execute_cursor(GgqlEngineHandle engine,
+                                            const char*      query);
+
+// Materializa até `page_size` linhas. Retorna handle não-NULL mesmo no
+// fim do stream (row_count == 0 indica esgotamento). NULL em erro.
+// O chamador DEVE liberar com ggql_result_free().
+GgqlResultHandle ggql_cursor_next(GgqlCursorHandle cursor, uint32_t page_size);
+
+// Total cumulativo de linhas emitidas por este cursor desde criação.
+int64_t ggql_cursor_total_emitted(GgqlCursorHandle cursor);
+
+// true se o generator está esgotado (próxima next() vai retornar 0 linhas).
+bool ggql_cursor_exhausted(GgqlCursorHandle cursor);
+
+void ggql_cursor_destroy(GgqlCursorHandle cursor);
+
 // ── Variante com cap per-query (C8 / Fase 6, 2026-05-22) ──────────────────────
 //
 // Igual a ggql_engine_execute, mas passa `cap` (override per-query do

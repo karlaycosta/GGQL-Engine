@@ -811,6 +811,102 @@ GgqlResultHandle ggql_engine_execute_with_cap(
     return reinterpret_cast<GgqlResultHandle>(r);
 }
 
+// ── Cursor stateful (C7 / 2026-05-22) ───────────────────────────────────────
+//
+// Wrapper FFI ao redor de ggql::QueryCursor. Mantém shared_ptr ao planner
+// snapshot (necessário porque o lazy fm-index reload pode trocar o planner;
+// cursor segura uma versão estável).
+struct GgqlCursorWrapper {
+    std::shared_ptr<QueryPlanner> planner_snap;  // mantém vivo enquanto cursor existe
+    std::unique_ptr<ggql::QueryCursor> cursor;
+};
+
+GgqlCursorHandle ggql_engine_execute_cursor(
+    GgqlEngineHandle engine,
+    const char*      query_str
+) {
+    if (!engine || !query_str) { return nullptr; }
+    auto* w = reinterpret_cast<GgqlEngineWrapper*>(engine);
+
+    // Lazy FM-Index load (mesma lógica do execute).
+    if (query_needs_fm(query_str) &&
+        !w->fm_attempted.load(std::memory_order_acquire)) {
+        std::call_once(w->fm_load_once, [w]() {
+            if (auto r = w->fm_index.load(w->cache_dir_for_fm); r) {
+                if (w->fm_index.is_loaded()) {
+                    auto new_planner = std::make_shared<QueryPlanner>(
+                        w->topology, &w->metadata, &w->fm_index);
+                    std::lock_guard lk(w->planner_mutex);
+                    w->planner = std::move(new_planner);
+                }
+            } else {
+                g_last_engine_error = std::string("fm_index: ") + r.error();
+            }
+            w->fm_attempted.store(true, std::memory_order_release);
+        });
+    }
+
+    auto parsed = grammar::parse_ggql(query_str);
+    if (!parsed) {
+        g_last_engine_error = std::move(parsed.error());
+        return nullptr;
+    }
+
+    std::shared_ptr<QueryPlanner> planner_snap;
+    {
+        std::lock_guard lk(w->planner_mutex);
+        planner_snap = w->planner;
+    }
+    if (!planner_snap) {
+        g_last_engine_error = "engine não inicializado corretamente";
+        return nullptr;
+    }
+    // Reset cancel flag (cursor honra cancel via ctx::cancel_requested).
+    w->cancel_requested.store(false, std::memory_order_release);
+    ggql::query::ctx::ScopedContext qctx(
+        &w->cancel_requested,
+        w->max_total_hits_override.load(std::memory_order_acquire));
+
+    auto cur = planner_snap->execute_cursor(parsed.value());
+    if (!cur) {
+        g_last_engine_error = std::move(cur.error());
+        return nullptr;
+    }
+
+    auto* cw = new GgqlCursorWrapper{
+        .planner_snap = std::move(planner_snap),
+        .cursor       = std::move(cur.value()),
+    };
+    return reinterpret_cast<GgqlCursorHandle>(cw);
+}
+
+GgqlResultHandle ggql_cursor_next(GgqlCursorHandle cursor, uint32_t page_size) {
+    if (!cursor) { return nullptr; }
+    auto* cw = reinterpret_cast<GgqlCursorWrapper*>(cursor);
+    auto page = cw->cursor->next(page_size);
+    if (!page) {
+        g_last_engine_error = std::move(page.error());
+        return nullptr;
+    }
+    auto* r = new GgqlResultWrapper{std::move(page.value())};
+    return reinterpret_cast<GgqlResultHandle>(r);
+}
+
+int64_t ggql_cursor_total_emitted(GgqlCursorHandle cursor) {
+    if (!cursor) { return 0; }
+    return static_cast<int64_t>(
+        reinterpret_cast<GgqlCursorWrapper*>(cursor)->cursor->total_emitted());
+}
+
+bool ggql_cursor_exhausted(GgqlCursorHandle cursor) {
+    if (!cursor) { return true; }
+    return reinterpret_cast<GgqlCursorWrapper*>(cursor)->cursor->exhausted();
+}
+
+void ggql_cursor_destroy(GgqlCursorHandle cursor) {
+    delete reinterpret_cast<GgqlCursorWrapper*>(cursor);
+}
+
 // API legada: delega para execute_with_cap com cap=0 (usa engine-level).
 GgqlResultHandle ggql_engine_execute(
     GgqlEngineHandle engine,
