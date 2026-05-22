@@ -56,6 +56,12 @@ typedef struct {
 //     top-level, com `text == "__ggql_ingest_done__"`. Em falha,
 //     `detail` traz a mensagem de erro (mesma string de
 //     GgqlIngestStats.error_message).
+//   - GARANTIA DE UNICIDADE: a sentinela "__ggql_ingest_done__" é emitida
+//     EXATAMENTE UMA VEZ por chamada de ingest, no fim. Eventos
+//     intermediários (PhaseStart/StepOk/Progress/...) NUNCA usam essa
+//     string em `text`. Validado empiricamente em tiny.gfa (1 evento) e
+//     chm13_subset_sm.gfa (6 eventos, 1 sentinela). Consumer pode contar
+//     com "primeiro match da sentinela = terminal" sem ambiguidade.
 //   - Consumer pode usar esse evento como sentinela para fechar callbacks/
 //     streams com segurança — não precisa de delays/timeouts mágicos
 //     para drenar a fila de eventos pendentes.
