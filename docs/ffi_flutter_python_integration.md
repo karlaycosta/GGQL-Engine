@@ -1,12 +1,24 @@
 # Integração FFI: Flutter e Python
 
-**Última atualização:** 2026-05-21 (sincroniza struct `GgqlIngestStats`
-nos exemplos Dart/Python com o header — remove `elapsed_gbwt_insert_s`
-e `elapsed_gbwt_compress_s`, que foram suprimidos no commit `bf9b8fd`
-"BREAKING ABI da FFI"; corrige contagens na tabela de cobertura.
-Histórico anterior: 2026-05-20 — Rounds 1–3 do refinamento FFI + fix
-`thread_local` em `dispatch_bridge` para `NativeCallable.listener`; ver
-`docs/ffi_refinement_plan.md`).
+**Última atualização:** 2026-05-22 — Round 4 do refinamento FFI
+entregue em 7 fases (commits `28051f0`, `7f8fd41`, `d623a57`, `049ab65`,
+`0a39dca`, `fa754ab`, `5c85b89`, `94cf808`). Mudanças BREAKING vs versões
+anteriores: (1) `GgqlIngestStats`, `GgqlEngineCapabilities`,
+`GgqlParseResult` ganharam `size_t struct_size` como **primeiro campo**;
+(2) as 3 funções `ggql_ingestor_ingest*` retornam `int32_t` + recebem
+`GgqlIngestStats* out_stats` em vez de retornar struct por valor;
+(3) handles passaram a usar opaque struct typedef
+(`typedef struct GgqlEngine_* GgqlEngineHandle`). Novos símbolos:
+`ggql_ingestor_cancel`, `ggql_engine_execute_with_cap`,
+`ggql_engine_last_error_into`, cursor stateful (`GgqlCursorHandle`,
+`ggql_engine_execute_cursor`, `ggql_cursor_*`). Total: 31 → **39 símbolos**
+FFI exportados. Para histórico granular, ver
+`docs/ffi_problemas_round4.md` §7 (auditoria das 10 issues + decisões
+implementadas) e `ggql_ui/docs/ffi_conflitos_coordenacao.md`
+(coordenação cliente↔engine em 7 fases).
+Histórico anterior: 2026-05-21 — sincroniza struct `GgqlIngestStats`
+nos exemplos Dart/Python; 2026-05-20 — Rounds 1–3 do refinamento FFI
+(`docs/ffi_refinement_plan.md`).
 **Branch:** `ffi/refine-load-and-introspection`.
 
 A camada `ggql_ffi` expõe o motor C++ via **C ABI estável**, o que a torna
@@ -20,12 +32,17 @@ as armadilhas específicas de cada plataforma.
 
 | Bloco | Símbolos | Documentado em |
 |---|---|---|
-| Ingest (legacy + perfil + granular) | `ggql_ingestor_*` (6) + `ggql_profile_*` (2) + `GgqlIngestStats`/`GgqlEvent` | §2.2–§2.4 (Flutter), §3.1–§3.4 (Python) |
-| Engine lifecycle | `ggql_engine_{load,create,destroy,last_error}` | §6.1 |
-| Query execução | `ggql_engine_{execute,execute_streaming}` | §6.2, §6.7 |
+| Ingest (legacy + perfil + granular + cancel) | `ggql_ingestor_*` (7 — inclui `ggql_ingestor_cancel`) + `ggql_profile_*` (2) + `GgqlIngestStats`/`GgqlEvent` | §2.2–§2.4 (Flutter), §3.1–§3.4 (Python) |
+| Engine lifecycle | `ggql_engine_{load,create,destroy,last_error,last_error_into}` | §6.1, §6.8 |
+| Query execução | `ggql_engine_{execute,execute_with_cap,execute_streaming}` | §6.2, §6.6, §6.7 |
 | Introspecção | `ggql_engine_{capabilities,validate,list_entities,describe_entity}` | §6.3–§6.5 |
 | Controle de runtime | `ggql_engine_{cancel,set_max_total_hits}` | §6.6 |
 | Resultado | `ggql_result_*` (11) + `GgqlCellType` | §6.2 |
+| **Cursor stateful** (C7.1) | `GgqlCursorHandle` + `ggql_engine_execute_cursor` + `ggql_cursor_{next,total_emitted,exhausted,destroy}` | §6.9 |
+
+**Total exportado:** 39 símbolos (`nm -D --defined-only libggql_ffi.so \| grep -c ' T ggql_'`).
+
+**Convenção `struct_size` (BREAKING desde Round 4 Fase 5):** os 3 structs públicos (`GgqlIngestStats`, `GgqlEngineCapabilities`, `GgqlParseResult`) ganharam `size_t struct_size` como **primeiro campo**. O caller DEVE preencher `out->struct_size = sizeof(StructType)` antes de chamar qualquer função FFI que receba o struct como out-param. Engine valida e retorna `-2` se `struct_size < sizeof(...)`. Padrão de forward-compat: quando engine adicionar campo novo em versão futura, callers velhos passam `struct_size` menor e engine escreve só até o offset suportado (sem stomp).
 
 ---
 
@@ -62,6 +79,13 @@ libggql.so
 
 ### 2.2 Mapeamento de tipos
 
+> **Atualizado Round 4 / 2026-05-22:** `GgqlIngestStats` ganhou
+> `struct_size` como **primeiro campo**; assinatura de `ingest` mudou
+> para `int32_t f(..., GgqlIngestStats* outStats)` em vez de retornar
+> `GgqlIngestStats` por valor. Recomendamos **usar `ffigen` (§2.4)** que
+> gera tudo correto a partir de `ffi.h` — o snippet abaixo é só para
+> entender o layout.
+
 ```dart
 // ggql_ffi_bindings.dart
 
@@ -69,9 +93,18 @@ import 'dart:ffi';
 import 'dart:io';
 import 'package:ffi/ffi.dart';
 
+// ── Opaque handles (E1 / Fase 4) ──────────────────────────────────────────────
+// ffigen gera `final class GgqlIngestor_ extends Opaque {}` etc.
+// + `typedef GgqlIngestorHandle = Pointer<GgqlIngestor_>`. Tipos distintos
+// previnem type confusion (passar Result onde Engine é esperado).
+
 // ── Structs ───────────────────────────────────────────────────────────────────
 
 final class GgqlIngestStats extends Struct {
+  // ⚠ C5 / Fase 5: caller DEVE preencher antes da chamada FFI.
+  // Em Dart: `statsPtr.ref.struct_size = sizeOf<GgqlIngestStats>();`
+  @Size()   external int struct_size;
+
   @Uint64() external int segmentCount;
   @Uint64() external int linkCount;
   @Uint64() external int nodeCount;
@@ -116,15 +149,20 @@ typedef _DestroyDart   = void Function(Pointer<Void>);
 
 typedef _EventCbNative = Void Function(Pointer<GgqlEvent>, Pointer<Void>);
 
-typedef _IngestNative  = GgqlIngestStats Function(
+// C5 / Fase 5 (BREAKING): retorna Int32 status + out param GgqlIngestStats*.
+// Status: 0=ok, 1=fail (success=false + errorMessage preenchido),
+//        -1=NULL args, -2=struct_size insuficiente (recompile bindings).
+typedef _IngestNative  = Int32 Function(
   Pointer<Void>, Pointer<Utf8>, Int32, Double,
   Bool, Bool, Bool, Bool, Size, Bool, Pointer<Utf8>,
   Pointer<NativeFunction<_EventCbNative>>, Pointer<Void>,
+  Pointer<GgqlIngestStats>,  // ← novo out param
 );
-typedef _IngestDart    = GgqlIngestStats Function(
+typedef _IngestDart    = int Function(
   Pointer<Void>, Pointer<Utf8>, int, double,
   bool, bool, bool, bool, int, bool, Pointer<Utf8>,
   Pointer<NativeFunction<_EventCbNative>>, Pointer<Void>,
+  Pointer<GgqlIngestStats>,
 );
 
 // ── Loader ────────────────────────────────────────────────────────────────────
@@ -186,14 +224,24 @@ Future<GgqlIngestStats> ingestInBackground({
     final fp  = args['filepath'].toNativeUtf8();
     final cd  = args['cacheDir'].toNativeUtf8();
 
-    final stats = lib.ingest(
+    // C5 / Fase 5: aloca out-param + preenche struct_size obrigatório.
+    final statsPtr = calloc<GgqlIngestStats>();
+    statsPtr.ref.struct_size = sizeOf<GgqlIngestStats>();
+
+    final rc = lib.ingest(
       handle, fp, 4, 1.0,
       false, true, true, false, 0, false, cd,
       args['cbPtr'] as Pointer<NativeFunction<_EventCbNative>>,
       nullptr,
+      statsPtr,
     );
+    if (rc == -2) {
+      throw StateError('bindings desatualizados — regerar ffigen');
+    }
+    final stats = statsPtr.ref;  // copia campos POD imediatamente
 
     malloc.free(fp); malloc.free(cd);
+    calloc.free(statsPtr);
     lib.destroy(handle);
 
     // Envia resultado serializado de volta
@@ -357,7 +405,12 @@ _lib = ctypes.CDLL(str(_lib_path))
 import ctypes
 
 class GgqlIngestStats(ctypes.Structure):
+    # ⚠ C5 / Fase 5 (BREAKING): struct_size é o primeiro campo.
+    # Caller DEVE preencher ANTES de chamar ggql_ingestor_ingest*:
+    #     stats = GgqlIngestStats()
+    #     stats.struct_size = ctypes.sizeof(GgqlIngestStats)
     _fields_ = [
+        ("struct_size",           ctypes.c_size_t),
         ("segment_count",         ctypes.c_uint64),
         ("link_count",            ctypes.c_uint64),
         ("node_count",            ctypes.c_uint64),
@@ -407,22 +460,32 @@ _lib.ggql_ingestor_destroy.argtypes = [ctypes.c_void_p]
 _lib.ggql_ingestor_reset.restype  = None
 _lib.ggql_ingestor_reset.argtypes = [ctypes.c_void_p]
 
-_lib.ggql_ingestor_ingest.restype  = GgqlIngestStats
+# C5 / Fase 5 (BREAKING): retorna int32_t status + out param.
+#   0 = ok (out_stats preenchido com success=True)
+#   1 = falha semântica (success=False + error_message)
+#  -1 = NULL args
+#  -2 = struct_size insuficiente (recompile bindings)
+_lib.ggql_ingestor_ingest.restype  = ctypes.c_int32
 _lib.ggql_ingestor_ingest.argtypes = [
-    ctypes.c_void_p,   # handle
-    ctypes.c_char_p,   # filepath
-    ctypes.c_int,      # num_threads
-    ctypes.c_double,   # gamma
-    ctypes.c_bool,     # verbose
-    ctypes.c_bool,     # save_metadata
-    ctypes.c_bool,     # build_topology
-    ctypes.c_bool,     # build_fm_index
-    ctypes.c_size_t,   # max_gbwt_paths
-    ctypes.c_bool,     # keep_gbwt_tmp
-    ctypes.c_char_p,   # cache_dir
-    EventCallbackType, # event_cb (pode ser None → NULL)
-    ctypes.c_void_p,   # user_data
+    ctypes.c_void_p,                  # handle
+    ctypes.c_char_p,                  # filepath
+    ctypes.c_int,                     # num_threads
+    ctypes.c_double,                  # gamma
+    ctypes.c_bool,                    # verbose
+    ctypes.c_bool,                    # save_metadata
+    ctypes.c_bool,                    # build_topology
+    ctypes.c_bool,                    # build_fm_index
+    ctypes.c_size_t,                  # max_gbwt_paths
+    ctypes.c_bool,                    # keep_gbwt_tmp
+    ctypes.c_char_p,                  # cache_dir
+    EventCallbackType,                # event_cb (pode ser None → NULL)
+    ctypes.c_void_p,                  # user_data
+    ctypes.POINTER(GgqlIngestStats),  # out_stats (caller preenche struct_size)
 ]
+
+# C2 / Fase 3: cancel cooperativo do ingest (simétrico a engine_cancel).
+_lib.ggql_ingestor_cancel.restype  = None
+_lib.ggql_ingestor_cancel.argtypes = [ctypes.c_void_p]
 ```
 
 ### 3.3 API de alto nível
@@ -481,7 +544,11 @@ class GgqlIngestor:
                     on_progress(ev.percent, ev.eta_s)
             cb = EventCallbackType(_cb)
 
-        stats = _lib.ggql_ingestor_ingest(
+        # C5 / Fase 5: aloca struct + preenche struct_size obrigatório.
+        stats = GgqlIngestStats()
+        stats.struct_size = ctypes.sizeof(GgqlIngestStats)
+
+        rc = _lib.ggql_ingestor_ingest(
             self._handle,
             filepath.encode(),
             num_threads,
@@ -495,8 +562,13 @@ class GgqlIngestor:
             cache_dir.encode(),
             cb or EventCallbackType(0),
             None,
+            ctypes.byref(stats),
         )
 
+        if rc == -2:
+            raise RuntimeError("bindings desatualizados (struct_size insuficiente)")
+        if rc < 0:
+            raise RuntimeError(f"ingest: argumento inválido (rc={rc})")
         if not stats.success:
             msg = stats.error_message
             raise RuntimeError(msg.decode() if msg else "Erro desconhecido na ingestão")
@@ -646,7 +718,21 @@ GgqlEngineHandle ggql_engine_load(const char* cache_dir);                  // di
 GgqlEngineHandle ggql_engine_create(GgqlIngestorHandle, const char*);      // de ingestor vivo
 void             ggql_engine_destroy(GgqlEngineHandle);
 const char*      ggql_engine_last_error(GgqlEngineHandle);                 // thread_local
+size_t           ggql_engine_last_error_into(GgqlEngineHandle,             // C copy-out, ver §6.8
+                                             char* out, size_t cap);
 ```
+
+> **E1 / Fase 4 (Round 4):** `GgqlEngineHandle`, `GgqlIngestorHandle`,
+> `GgqlResultHandle`, `GgqlCursorHandle` são **opaque struct typedefs**
+> distintos (`typedef struct GgqlXxx_* GgqlXxxHandle`). Compilador C/C++
+> rejeita type confusion entre handles em compile time. Em Dart via
+> `ffigen`, vira `Pointer<GgqlXxx_>` (não mais `Pointer<Void>`).
+>
+> **C4a / Fase 1:** destruir o engine enquanto existem `GgqlResultHandle`
+> vivos obtidos dele é UB. Cells continuam legíveis após destroy (foram
+> movidas no `GgqlResultWrapper`), mas qualquer outra chamada FFI com o
+> handle do engine é UAF. **Consumer DEVE serializar**: libere todos os
+> Results antes de `ggql_engine_destroy`.
 
 > **Importante (Round 1.A)**: `ggql_engine_load` **NÃO carrega o
 > FM-Index** — defere para a primeira `SEARCH KMER` / `WHERE
@@ -689,6 +775,10 @@ finally:
 ```c
 GgqlResultHandle ggql_engine_execute(GgqlEngineHandle, const char* query,
                                      uint32_t limit, uint32_t offset);
+// C8 / Fase 6: variante com cap per-query (cap=0 usa engine-level). Ver §6.6.
+GgqlResultHandle ggql_engine_execute_with_cap(GgqlEngineHandle, const char* query,
+                                              uint32_t limit, uint32_t offset,
+                                              uint64_t cap);
 int64_t      ggql_result_row_count(GgqlResultHandle);
 int64_t      ggql_result_col_count(GgqlResultHandle);
 int64_t      ggql_result_total_hits(GgqlResultHandle);
@@ -737,10 +827,12 @@ FM-Index? gBWT? snarls? Quantos segmentos?
 
 ```c
 typedef struct {
+    size_t struct_size;  // ⚠ C5: caller seta = sizeof(GgqlEngineCapabilities)
     bool has_metadata, has_topology, has_fm_index, has_gbwt, has_snarls;
     uint64_t segment_count, edge_count, path_count;
 } GgqlEngineCapabilities;
 
+// Retorno: 0=ok, -1=NULL args, -2=struct_size insuficiente.
 int32_t ggql_engine_capabilities(GgqlEngineHandle, GgqlEngineCapabilities*);
 ```
 
@@ -751,6 +843,7 @@ funcionar" mesmo antes do lazy-load.
 ```python
 class Caps(ctypes.Structure):
     _fields_ = [
+        ('struct_size', ctypes.c_size_t),  # ⚠ C5: preencha antes de chamar
         ('has_metadata', ctypes.c_bool), ('has_topology', ctypes.c_bool),
         ('has_fm_index', ctypes.c_bool), ('has_gbwt', ctypes.c_bool),
         ('has_snarls',   ctypes.c_bool),
@@ -762,7 +855,10 @@ lib.ggql_engine_capabilities.argtypes = [ctypes.c_void_p, ctypes.POINTER(Caps)]
 lib.ggql_engine_capabilities.restype  = ctypes.c_int32
 
 caps = Caps()
-lib.ggql_engine_capabilities(eng, ctypes.byref(caps))
+caps.struct_size = ctypes.sizeof(Caps)  # C5: obrigatório
+rc = lib.ggql_engine_capabilities(eng, ctypes.byref(caps))
+if rc == -2:
+    raise RuntimeError("bindings desatualizados — recompile contra header atual")
 print(f"S={caps.segment_count} E={caps.edge_count} P={caps.path_count} "
       f"fm={caps.has_fm_index} gbwt={caps.has_gbwt} snarls={caps.has_snarls}")
 ```
@@ -779,6 +875,7 @@ Para REPL / IDE: marcar erro enquanto o usuário digita, sem executar.
 
 ```c
 typedef struct {
+    size_t struct_size;                // ⚠ C5: caller seta = sizeof(GgqlParseResult)
     bool valid;
     int32_t error_line, error_col;     // -1 atualmente (parser PEGTL)
     const char* error_message;         // thread_local; copie se reter
@@ -786,13 +883,15 @@ typedef struct {
 
 int32_t ggql_engine_validate(GgqlEngineHandle, const char* query,
                              GgqlParseResult* out);
-// retorno: 0 = parse OK; 1 = falhou (out preenchido); -1 = args inválidos
+// retorno: 0 = parse OK; 1 = falhou (out preenchido); -1 = args inválidos;
+//          -2 = struct_size insuficiente (recompile bindings)
 ```
 
 **Python:**
 ```python
 class ParseResult(ctypes.Structure):
-    _fields_ = [('valid', ctypes.c_bool),
+    _fields_ = [('struct_size', ctypes.c_size_t),  # ⚠ C5: preencha antes
+                ('valid', ctypes.c_bool),
                 ('error_line', ctypes.c_int32),
                 ('error_col',  ctypes.c_int32),
                 ('error_message', ctypes.c_char_p)]
@@ -801,8 +900,10 @@ lib.ggql_engine_validate.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
 lib.ggql_engine_validate.restype  = ctypes.c_int32
 
 pr = ParseResult()
+pr.struct_size = ctypes.sizeof(ParseResult)  # C5: obrigatório
 rc = lib.ggql_engine_validate(eng, b'FIND XYZZY', ctypes.byref(pr))
 # rc == 1, pr.valid == False, pr.error_message.decode() = "Erro de sintaxe..."
+# rc == -2 indica bindings desatualizados
 ```
 
 Custo: ~µs em queries comuns — pode rodar a cada keystroke sem lag.
@@ -839,11 +940,29 @@ cols = [cols_ptr[i].decode() for i in range(n.value)]
 **Caso de uso**: gerar campos de autocomplete num REPL, ou colunas de
 uma `DataGrid` em Flutter sem hardcoded strings.
 
-### 6.6 Cancel cooperativo + cap per-engine (Round 3.F + G)
+### 6.6 Cancel cooperativo + cap per-engine + cap per-query (Round 3.F + G; C2 + C8 do Round 4)
 
 ```c
 void ggql_engine_cancel(GgqlEngineHandle);
-void ggql_engine_set_max_total_hits(GgqlEngineHandle, uint64_t cap);  // 0 = default
+
+// C2 / Fase 3 (Round 4): cancel cooperativo do INGEST (simétrico ao acima).
+// Aborta entre checkpoints de fase (Fase 1 parse → Fase 6 snarls; Fase 7
+// Persistência intencionalmente sem checkpoint para não deixar cache parcial).
+// Granularidade: <1s para chegar no próximo checkpoint.
+void ggql_ingestor_cancel(GgqlIngestorHandle);
+
+// Cap per-engine (estado mutável). Próximas execute()/execute_with_cap()
+// com cap=0 vão usar este valor.
+void ggql_engine_set_max_total_hits(GgqlEngineHandle, uint64_t cap);  // 0 = default ~1M
+
+// C8 / Fase 6 (Round 4): cap per-query inline — sobrescreve cap engine-level
+// apenas nesta chamada. Resolve a limitação de cap per-engine em paralelismo:
+// cada thread pode usar seu próprio cap sem afetar outras queries.
+// cap == 0 → usa engine-level (equivale a ggql_engine_execute).
+// cap > 0  → cap inline.
+GgqlResultHandle ggql_engine_execute_with_cap(GgqlEngineHandle, const char* query,
+                                              uint32_t limit, uint32_t offset,
+                                              uint64_t cap);
 ```
 
 **Cancel** é cooperativo: a thread executando a query checa um
@@ -941,19 +1060,21 @@ with open('segments.csv', 'w') as f:
 UI consome como um `Stream<Map<String, Object?>>`. Cancelar = enviar
 "stop" → callback retorna `false` na próxima invocação.
 
-### 6.8 Ingest granular (Round 1.C)
+### 6.8 Ingest granular (Round 1.C; assinatura atualizada Round 4 Fase 5)
 
 Para casos fora dos 4 perfis nomeados (`PANGENOME`/`METAGENOMICS`/
 `ASSEMBLY`/`COMPARATIVE`):
 
 ```c
-GgqlIngestStats ggql_ingestor_ingest_granular(
+// C5 / Fase 5 (BREAKING): retorna int32_t status + out param.
+int32_t ggql_ingestor_ingest_granular(
     handle, filepath, num_threads, gamma, verbose,
     /*save_metadata=*/true, /*build_topology=*/true,
     /*build_fm_index=*/false,
     /*build_gbwt=*/false,   // ← antes acoplado a build_topology
     /*build_snarls=*/true,  // ← idem
-    max_gbwt_paths, keep_gbwt_tmp, cache_dir, event_cb, user_data);
+    max_gbwt_paths, keep_gbwt_tmp, cache_dir, event_cb, user_data,
+    out_stats);             // ← Round 4: caller preenche out_stats->struct_size
 ```
 
 Útil p.ex. para "topology + snarls sem gBWT" ou "gBWT sem snarls" —
@@ -961,42 +1082,214 @@ combinações inalcançáveis pelos perfis fixos. Eventos e
 `GgqlIngestStats` retornados são os mesmos da `ggql_ingestor_ingest`
 legada.
 
+### 6.9 Copy-out API para `last_error` (E2 / Fase 6 / 2026-05-22)
+
+Variante de `ggql_engine_last_error` que copia o erro para um buffer
+ownership-do-caller. Elimina a dependência do `thread_local` interno —
+útil para wrappers idiomáticos (Dart/Python) que queiram isolar o
+ciclo de vida do buffer da próxima chamada FFI feita pela mesma thread.
+
+```c
+// Semântica strlcpy do BSD:
+//   - Retorno = len(msg), SEM contar '\0'
+//   - Sempre escreve '\0' em out[min(cap-1, len)] quando cap > 0 e out != NULL
+//   - Caller detecta truncamento com `retorno >= cap`
+//   - out == NULL OU cap == 0 → não escreve nada; retorna len (sondagem
+//     de tamanho — caller pode dimensionar buffer com retorno + 1)
+// engine == NULL: lê de engine_create_error (load/create fail).
+// engine != NULL: lê de g_last_engine_error (execute fail).
+size_t ggql_engine_last_error_into(GgqlEngineHandle engine,
+                                   char* out, size_t cap);
+```
+
+**Python (two-pass strlcpy idiomático):**
+```python
+lib.ggql_engine_last_error_into.argtypes = [
+    ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t
+]
+lib.ggql_engine_last_error_into.restype = ctypes.c_size_t
+
+def engine_last_error(eng) -> str:
+    # 1º pass: sonda tamanho
+    needed = lib.ggql_engine_last_error_into(eng, None, 0)
+    if needed == 0:
+        return ""
+    # 2º pass: aloca e copia
+    buf = ctypes.create_string_buffer(needed + 1)
+    lib.ggql_engine_last_error_into(eng, buf, needed + 1)
+    return buf.value.decode('utf-8', errors='replace')
+```
+
+**Flutter (Dart):** análogo via `calloc<Char>(needed + 1)` + `toDartString()`.
+
+Trade-off: 2 chamadas FFI vs 1 (~µs extra), mas robusto contra
+mensagens longas e elimina race teórica com o `thread_local`. Cliente
+`ggql_ui` adotou este padrão em `_engineLastError(engine)` desde
+`ggql_engine@5c85b89` — ver `ggql_ui/docs/ffi_conflitos_coordenacao.md`
+§4.13.
+
+### 6.10 Cursor stateful streaming (C7.1 / Fase 7 / 2026-05-22)
+
+True streaming via `std::generator` (C++23 corrotinas). Mantém estado
+de iteração entre páginas — não re-parseia/re-planeja a query e não
+repete o skip interno (que tornava `execute_streaming` legado O(N²)
+cumulativo).
+
+**Escopo C7.1 (atual)**: apenas `FIND SEGMENT` full-scan. Outros
+backends + caminhos rápidos de SEGMENT (name/length/depth index)
+retornam NULL com `last_error` setado — caller cai em `execute()` ou
+`execute_streaming` legados. Refactor incremental por backend em C7.2+.
+
+```c
+typedef struct GgqlCursor_* GgqlCursorHandle;
+
+// Cria cursor para a query. Retorna NULL em erro (mensagem em
+// last_error). Também NULL se backend/forma não suportada nesta versão.
+GgqlCursorHandle ggql_engine_execute_cursor(GgqlEngineHandle, const char* query);
+
+// Materializa até `page_size` linhas. Retorna handle não-NULL mesmo no
+// fim do stream (row_count == 0 indica esgotamento). NULL em erro.
+// Chamador DEVE liberar com ggql_result_free().
+GgqlResultHandle ggql_cursor_next(GgqlCursorHandle, uint32_t page_size);
+
+int64_t ggql_cursor_total_emitted(GgqlCursorHandle);  // cumulativo desde criação
+bool    ggql_cursor_exhausted(GgqlCursorHandle);
+
+// Lifetime: cursor mantém shared_ptr ao planner snapshot. Engine
+// pode ser destruído antes do cursor (cursor mantém refs vivas).
+void    ggql_cursor_destroy(GgqlCursorHandle);
+```
+
+**Python — exportar para CSV row-a-row com cursor:**
+```python
+import csv
+
+lib.ggql_engine_execute_cursor.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+lib.ggql_engine_execute_cursor.restype  = ctypes.c_void_p
+lib.ggql_cursor_next.argtypes           = [ctypes.c_void_p, ctypes.c_uint32]
+lib.ggql_cursor_next.restype            = ctypes.c_void_p
+lib.ggql_cursor_destroy.argtypes        = [ctypes.c_void_p]
+lib.ggql_cursor_destroy.restype         = None
+
+cursor = lib.ggql_engine_execute_cursor(eng,
+    b'FIND SEGMENT WHERE length > 1000 RETURN id, name, length')
+if not cursor:
+    err = lib.ggql_engine_last_error(eng)
+    raise RuntimeError(err.decode())
+
+with open('segments.csv', 'w', newline='') as f:
+    w = csv.writer(f)
+    w.writerow(['id', 'name', 'length'])
+    while True:
+        page = lib.ggql_cursor_next(cursor, 4096)
+        rows = lib.ggql_result_row_count(page)
+        if rows == 0:
+            lib.ggql_result_free(page)
+            break
+        for i in range(rows):
+            w.writerow([
+                lib.ggql_result_cell_int(page, i, 0),
+                (lib.ggql_result_cell_string(page, i, 1) or b'').decode(),
+                lib.ggql_result_cell_int(page, i, 2),
+            ])
+        lib.ggql_result_free(page)
+lib.ggql_cursor_destroy(cursor)
+```
+
+**Flutter (Dart) — `Stream<List<Object?>>`** (não-implementado no cliente
+atual; padrão sugerido):
+```dart
+Stream<List<Object?>> executeStreaming(String query, {int pageSize = 1024}) async* {
+  final cursor = bindings.ggql_engine_execute_cursor(engineHandle, query.toNativeUtf8().cast());
+  if (cursor == nullptr) throw StateError('cursor: ${lastError()}');
+  try {
+    while (true) {
+      final page = bindings.ggql_cursor_next(cursor, pageSize);
+      final rows = bindings.ggql_result_row_count(page);
+      if (rows == 0) { bindings.ggql_result_free(page); break; }
+      for (var i = 0; i < rows; i++) {
+        yield _readRow(page, i);  // copia células Dart-side
+      }
+      bindings.ggql_result_free(page);
+    }
+  } finally {
+    bindings.ggql_cursor_destroy(cursor);
+  }
+}
+```
+
+**Quando usar cursor vs `execute()` direto:**
+- `execute()` materializa o resultado inteiro num único `GgqlResult` —
+  simples para queries com `LIMIT` pequeno (~< 10k linhas).
+- **Cursor** mantém pico de memória limitado por `page_size`. Use
+  quando o resultado total puder ser grande (chm13 `FIND SEGMENT` sem
+  LIMIT = 4,29M linhas) e o consumer processar row-a-row.
+- `execute_streaming` legado (callback paginado, §6.7) ainda funciona
+  para outros backends que C7.1 não cobre (EDGE/PATH/TIP/REPEAT/BUBBLE
+  + SEARCH KMER), mas é O(N²) cumulativo no skip. Migrar para cursor
+  conforme C7.2+ for entregando os outros backends.
+
 ---
 
 ## 7. Estado atual da API e roadmap
 
-Após Rounds 1–3, o C ABI cobre o ciclo completo de uso pós-ingest:
-ingest, lifecycle, query síncrona, paginação, streaming-paginado,
-introspecção de schema/capabilities, cancel cooperativo e cap
-per-engine. Total exposto: **31 símbolos** (`nm -D --defined-only
-libggql_ffi.so` para verificar).
+Após Rounds 1–3 + Round 4 (entregue em 7 fases ao longo de 2026-05-22),
+o C ABI cobre o ciclo completo de uso pós-ingest: ingest, lifecycle,
+query síncrona/paginada/streaming/cursor, introspecção (capabilities/
+validate/schema), cancel cooperativo (engine + ingest), cap per-engine
+e per-query, copy-out de erros, opaque struct typedefs e
+forward-compat via `struct_size`. Total exposto: **39 símbolos**
+(`nm -D --defined-only libggql_ffi.so | grep -c ' T ggql_'`).
 
-**Pendências de roadmap** (não-críticas — pagination/cancel cobrem 80%
-dos casos):
+**Endereçados no Round 4** (todos os 12 conflitos catalogados em
+`docs/ffi_problemas_round4.md` + `ggql_ui/docs/ffi_conflitos_coordenacao.md`):
 
-- **True streaming**: refactor do planner para emitir rows via callback
-  diretamente (em vez de materializar páginas). Médio porte; valor
-  baixo–médio.
+- ✅ `last_error` thread-safe (C9), doc cancel reset alinhada (C6),
+  lifecycle destroy documentado (C4a) — Fase 1
+- ✅ Arena per-event de 16 slots no `EventBridge` (C1), terminal Ok/Fail
+  garantido com sentinela `__ggql_ingest_done__` (E3) — Fase 2
+- ✅ `ggql_ingestor_cancel` simétrico ao engine_cancel (C2/P10) — Fase 3
+- ✅ Opaque struct typedef nos 3 handles (E1/P4) — Fase 4
+- ✅ `struct_size` em `GgqlIngestStats`/`GgqlEngineCapabilities`/
+  `GgqlParseResult` + refactor das 3 `ingest*` para out param (C5/P3,
+  BREAKING) — Fase 5
+- ✅ `execute_with_cap` (C8), `last_error_into` (E2), `cli::*_tl` (C3b),
+  C4b resolvido pelo wrapper Dart (materialização eager) — Fase 6
+- ✅ Cursor stateful via `std::generator` (C7.1 — FIND SEGMENT
+  full-scan) — Fase 7
+
+**Pendências de roadmap** (não-críticas):
+
+- **C7.2+** — porta dos demais backends (EDGE/PATH/TIP/REPEAT/BUBBLE/
+  SEARCH KMER) + caminhos rápidos de SEGMENT (name/length/depth index)
+  para o framework cursor. Refactor incremental por backend. Adiado
+  para Round 5+ — sem dor real reportada hoje.
 - **Boundary names em FIND BUBBLE**: hoje `RETURN source, sink` dá ID
   interno pós-remap — para o nome GFA original, join com
   `FIND SEGMENT RETURN id, name` (receita em `ggql_vs_vg.md §9.bis`).
   Gap do query layer, não FFI.
 - **Export de formato**: GGQL → GFA / FASTA / BED / JSON-Lines.
 - **Portabilidade macOS / ARM** (`L5` no plano).
-- **`size_t struct_size` em todos os structs**: padrão de detecção de
-  versão sem recompilar (proposto na versão anterior deste doc).
-  Adicionado, dá ao consumer flexibilidade vs uma lib mais nova.
+- **`ggql_engine_create` (factory a partir de ingestor in-memory)** já
+  existe na FFI, mas o cliente `ggql_ui` ainda não expõe `fromIngestor`
+  no wrapper Dart — sem demanda imediata (fluxo UI sempre passa pelo
+  disco via `.idx`).
 
-Para o histórico completo de implementação (medições antes/depois,
-bugs descobertos via tests, decisões de design), ver
-**`docs/ffi_refinement_plan.md`** §6–§8.
+Para histórico completo da implementação Round 4 (commits, medições,
+bugs descobertos durante refactor), ver **`docs/ffi_problemas_round4.md`**
+§7 "Histórico desta auditoria". Para coordenação cruzada com cliente
+Flutter (7 fases + 14 sub-integrações documentadas), ver
+**`ggql_ui/docs/ffi_conflitos_coordenacao.md`** §4.4–§4.14.
 
 ---
 
-## 8. Smoke tests para validação Flutter (Rounds 2–3)
+## 8. Smoke tests para validação Flutter (Rounds 2–3 + Round 4)
 
 Sequência de validação manual para o cliente Flutter exercitar as
-Rounds 2 e 3 da FFI. A ordem vai do mais barato/seguro (introspecção
+Rounds 2, 3 e 4 da FFI. **Atenção (Round 4):** todas as chamadas que
+recebem `GgqlIngestStats*` / `GgqlEngineCapabilities*` / `GgqlParseResult*`
+exigem que o caller preencha `struct_size = sizeof(StructType)` antes
+da chamada (cf. §6.3, §6.4, §6.8). Engine retorna `-2` se faltar. A ordem vai do mais barato/seguro (introspecção
 pura, sem rodar query) ao mais complexo (cancel concorrente), de modo
 que uma falha cedo limita o escopo do diagnóstico. Round 1 (ingest +
 load lazy) já está validada em produção (`project_ffi_flutter_validated`).
@@ -1006,7 +1299,7 @@ load lazy) já está validada em produção (`project_ffi_flutter_validated`).
 | Item | Valor |
 |---|---|
 | `.so` esperada | `libggql_ffi.so` (Linux/Android) ou `.dylib`/`.dll` |
-| Símbolos exportados | 31 (confirmar com `nm -D --defined-only libggql_ffi.so \| grep -c ' T ggql_'`) |
+| Símbolos exportados | 39 (após Round 4 / 2026-05-22; confirmar com `nm -D --defined-only libggql_ffi.so \| grep -c ' T ggql_'`) |
 | Idx de teste recomendado | `data/chm13_subset_sm.gfa.idx` (≈131k segmentos, tem fm_index + topology + gBWT + snarls — exercita todos os blocos) |
 | Pré-requisito Linux | Nenhum — `libggql_ffi.so` usa mimalloc, dlopen-safe (ver §2.6) |
 
