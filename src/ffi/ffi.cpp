@@ -51,7 +51,11 @@ struct GgqlEngineWrapper {
     std::atomic<bool> fm_attempted{false};
     mutable std::mutex planner_mutex;
     std::shared_ptr<QueryPlanner> planner;
-    std::string last_error;
+    // Round 4 (P1/C9 — 2026-05-22): last_error movido para `thread_local
+    // g_last_engine_error` no namespace anônimo. Evita race entre threads
+    // que chamam engine_execute concorrentemente no mesmo engine handle.
+    // O símbolo `last_error` deixou de existir no wrapper — leituras antigas
+    // via member access falham em build, forçando audit dos call sites.
     // Round 3.F: cancel cooperativo (checado em Paginator::advance via
     // ctx::cancel_requested). Reset no início de cada engine_execute.
     std::atomic<bool> cancel_requested{false};
@@ -396,6 +400,13 @@ const char* ggql_profile_name(GgqlIngestProfile p) {
 // thread_local para mensagens de erro de funções que não têm handle de engine.
 thread_local std::string engine_create_error;
 
+// Round 4 (P1/C9 — 2026-05-22): last_error por thread no caminho de query.
+// Antes era membro de GgqlEngineWrapper, com race entre threads
+// concorrentes no mesmo engine. Agora cada thread tem seu próprio buffer —
+// `ggql_engine_last_error()` retorna o erro da última chamada FFI feita
+// NESTA thread (regra "thread_local" já documentada em outros buffers).
+thread_local std::string g_last_engine_error;
+
 GgqlEngineHandle ggql_engine_load(const char* cache_dir) {
     if (!cache_dir) {
         engine_create_error = "cache_dir não pode ser NULL";
@@ -466,7 +477,11 @@ void ggql_engine_destroy(GgqlEngineHandle engine) {
 
 const char* ggql_engine_last_error(GgqlEngineHandle engine) {
     if (!engine) { return engine_create_error.c_str(); }
-    return static_cast<GgqlEngineWrapper*>(engine)->last_error.c_str();
+    // C9: lê do thread_local; ignora o handle (mantido na assinatura para
+    // simetria e possível evolução futura). Buffer escrito pela mesma thread
+    // em qualquer chamada FFI que falhou (execute, load lazy do FM-Index, …).
+    (void)engine;
+    return g_last_engine_error.c_str();
 }
 
 // Round 3.F (2026-05-20): cancel cooperativo.
@@ -639,7 +654,7 @@ GgqlResultHandle ggql_engine_execute(
                 // Corrupção/ausência: registra no last_error para o caller
                 // diagnosticar; planner segue com nullptr fm e SEARCH KMER
                 // retornará erro semântico.
-                w->last_error = std::string("fm_index: ") + r.error();
+                g_last_engine_error = std::string("fm_index: ") + r.error();
             }
             w->fm_attempted.store(true, std::memory_order_release);
         });
@@ -648,7 +663,7 @@ GgqlResultHandle ggql_engine_execute(
     // Parse da query
     auto parsed = grammar::parse_ggql(query_str);
     if (!parsed) {
-        w->last_error = std::move(parsed.error());
+        g_last_engine_error = std::move(parsed.error());
         return nullptr;
     }
 
@@ -676,7 +691,8 @@ GgqlResultHandle ggql_engine_execute(
         planner_snap = w->planner;
     }
     if (!planner_snap) {
-        w->last_error = "engine não inicializado corretamente";
+        g_last_engine_error = "engine não inicializado corretamente";
+        (void)w;
         return nullptr;
     }
     // Round 3.F: reset do cancel flag para esta query. Round 3.G: instala
@@ -687,7 +703,7 @@ GgqlResultHandle ggql_engine_execute(
         w->max_total_hits_override.load(std::memory_order_acquire));
     auto exec = planner_snap->execute(parsed.value());
     if (!exec) {
-        w->last_error = std::move(exec.error());
+        g_last_engine_error = std::move(exec.error());
         return nullptr;
     }
 

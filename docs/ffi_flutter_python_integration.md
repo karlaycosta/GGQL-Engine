@@ -849,9 +849,15 @@ void ggql_engine_set_max_total_hits(GgqlEngineHandle, uint64_t cap);  // 0 = def
 **Cancel** é cooperativo: a thread executando a query checa um
 `std::atomic<bool>` em cada hit (~ns overhead). Outra thread (tipicamente
 UI) chama `engine_cancel`; a query aborta e retorna **resultado
-parcial** (`total_hits` reflete o que foi contado até ali). O flag é
-**resetado no início de cada `engine_execute`** — armar cancel
-antecipadamente não bloqueia a próxima query.
+parcial** (`total_hits` reflete o que foi contado até ali).
+
+> **Comportamento exato do flag** (C6, alinhado em 2026-05-22): o
+> `cancel_requested` é **resetado no início de cada `engine_execute`**.
+> Armar `engine_cancel` quando nenhuma query está rodando é **no-op** —
+> o cancel só morde para a query atualmente em vôo. Design conservador:
+> evita cancel "preso" entre queries se o consumer esquecer de re-armar.
+> Para parar uma query, o `cancel` precisa ser chamado **enquanto** ela
+> roda (típico: thread A em `execute()`, thread B chama `cancel()`).
 
 **Python — botão "Cancelar" no notebook:**
 ```python

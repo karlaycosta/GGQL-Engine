@@ -189,6 +189,16 @@ GgqlEngineHandle ggql_engine_load(const char* cache_dir);
 GgqlEngineHandle ggql_engine_create(GgqlIngestorHandle ingestor, const char* cache_dir);
 
 // Destroi o engine. Não destrói o ingestor.
+//
+// LIFECYCLE (C4a, documentado em 2026-05-22): destruir o engine enquanto
+// existem GgqlResultHandle vivos obtidos dele é COMPORTAMENTO INDEFINIDO.
+// Embora `GgqlResultWrapper::result` retenha cópia (move) dos dados de
+// célula e portanto cells continuem legíveis após destroy do engine,
+// qualquer outra chamada FFI que use o handle do engine após destroy é
+// UAF. O consumer DEVE serializar: liberar todos os Results (via
+// `ggql_result_free`) antes de chamar `ggql_engine_destroy`. Em wrappers
+// idiomáticos (Dart/Python), use refcount / Finalizer para garantir essa
+// ordem automaticamente.
 void ggql_engine_destroy(GgqlEngineHandle engine);
 
 // Retorna a mensagem de erro da última chamada que falhou (ggql_engine_load,
@@ -273,9 +283,11 @@ const char* const* ggql_engine_describe_entity(const char* entity_name,
 // retorna o resultado parcial acumulado até ali.
 //
 // Comportamento:
-//   - Se nenhuma query estiver rodando, o próximo execute observa o flag e
-//     pode abortar imediatamente. ggql_engine_execute reseta o flag no
-//     começo de cada chamada.
+//   - ggql_engine_execute RESETA o flag cancel_requested no início de cada
+//     chamada. Logo, armar cancel quando nenhuma query está rodando é
+//     no-op — o cancel só morde para a query atualmente em vôo. Esse design
+//     conservador evita cancel "preso" entre queries (caso o consumer
+//     esqueça de re-armar entre execs).
 //   - O result retornado por uma query cancelada é VÁLIDO mas parcial.
 //     ggql_result_total_hits dá quantos hits foram contados até o cancel.
 //   - SEARCH KMER em datasets grandes: aborta no próximo `advance()` do
