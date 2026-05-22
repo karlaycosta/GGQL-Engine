@@ -9,6 +9,8 @@
 [![CMake](https://img.shields.io/badge/CMake-3.16%2B-064F8C?logo=cmake)](CMakeLists.txt)
 [![GCC](https://img.shields.io/badge/GCC-14%2B-A42E2B?logo=gnu)](https://gcc.gnu.org)
 [![Plataforma](https://img.shields.io/badge/plataforma-Linux-lightgrey?logo=linux)](https://kernel.org)
+[![FFI Round 4](https://img.shields.io/badge/FFI-Round%204%20%C2%B7%2039%20s%C3%ADmbolos-success)](docs/ffi_flutter_python_integration.md)
+[![Tests](https://img.shields.io/badge/CTest-16%20suites-blue)](tests/CMakeLists.txt)
 
 Um motor de consulta declarativa para grafos pangenômicos no **formato GFA**,
 projetado para genomas de **85 milhões de nós** (HPRC / CHM13). Expõe a
@@ -83,8 +85,18 @@ pelo menos três ferramentas distintas em um pipeline tradicional.
 - **Cache inteligente em disco.** A primeira ingestão grava `.idx/`; chamadas
   subsequentes carregam em milissegundos com validação por hash XXH64 +
   mtime/size.
-- **Integração multi-linguagem.** Além da REPL, expõe API C completa para
-  bindings em Dart/Flutter, Python (via `ctypes`), Rust, etc.
+- **Integração multi-linguagem madura.** Além da REPL, expõe **39 símbolos
+  C ABI** para bindings em Dart/Flutter, Python (via `ctypes`), Rust, etc.
+  API endurecida no Round 4 (2026-05-22, 9 commits em 7 fases): opaque
+  struct typedefs, `struct_size` para forward-compat, cursor stateful
+  (true O(N) streaming via `std::generator` C++23), `ingestor_cancel`
+  cooperativo, copy-out de erros, `event_callback` thread-local — tudo
+  documentado em [`docs/ffi_flutter_python_integration.md`](docs/ffi_flutter_python_integration.md).
+- **Allocator otimizado por target.** Binários standalone usam jemalloc
+  (perf máxima); `libggql_ffi.so` usa mimalloc (dlopen-safe, sem
+  `LD_PRELOAD` para Flutter/Python). Configurável via
+  `-DGGQL_ALLOCATOR=jemalloc-system|jemalloc|mimalloc|glibc` e
+  `-DGGQL_FFI_ALLOCATOR=mimalloc|jemalloc-system|glibc`.
 
 ---
 
@@ -325,14 +337,23 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
+### Opções CMake
+
+| Variável | Padrão | Valores | Efeito |
+|---|---|---|---|
+| `GGQL_ALLOCATOR` | `jemalloc-system` | `jemalloc-system` \| `jemalloc` (vendor) \| `mimalloc` \| `glibc` | Allocator dos binários standalone (`ggql_repl`, `bench_*`). jemalloc-system dá throughput máximo no gBWT (~5.94 M nós/s vs 2.86 M do glibc). |
+| `GGQL_FFI_ALLOCATOR` | `mimalloc` | `mimalloc` \| `jemalloc-system` \| `glibc` | Allocator da `libggql_ffi.so`. mimalloc é **dlopen-safe** — Flutter/Python carregam a `.so` sem precisar de `LD_PRELOAD`. |
+| `CMAKE_BUILD_TYPE` | `Release` | `Debug` \| `RelWithDebInfo` \| `MinSizeRel` | Debug desabilita LTO + adiciona símbolos. |
+
 ### Alvos disponíveis
 
 | Alvo | Descrição |
 |------|-----------|
 | `ggql_repl` | **REPL interativa** — entry point principal |
 | `bench_gbwt` | Benchmark de ingestão + construção gBWT |
-| `libggql_ffi.so` | Biblioteca compartilhada para bindings Dart/FFI |
-| `tests/test_*` | 10 testes CTest do projeto |
+| `bench_{snarl,fm_index,metadata,topology,graph_algorithms,path_storage}` | Microbench por componente |
+| `libggql_ffi.so` | Biblioteca compartilhada para bindings Dart/Python/FFI (**39 símbolos**) |
+| `tests/test_*` | **16 testes CTest** (incluindo `test_ffi_query`, `test_ffi_ingest_cancel`, `test_ffi_cursor` validando API Round 4) |
 
 ---
 
@@ -380,25 +401,55 @@ printf 'FIND TIP RETURN id;\n.quit\n' \
 ./build/bench_gbwt grafo.gfa 8 0 -p comp
 ```
 
-### Bindings C/Dart/FFI
+### Bindings C/Dart/FFI/Python
 
-A API C está em [`include/ffi/ffi.h`](include/ffi/ffi.h). Funções principais:
+A API C está em [`include/ffi/ffi.h`](include/ffi/ffi.h) — **39 símbolos
+exportados**. Guia completo de integração com Flutter (ffigen) e Python
+(ctypes/cffi) em
+[`docs/ffi_flutter_python_integration.md`](docs/ffi_flutter_python_integration.md).
 
 ```c
-// Ingestão clássica (todos os flags individualmente)
-GgqlIngestStats ggql_ingestor_ingest(...);
-
-// Ingestão por perfil (recomendado para clientes)
-GgqlIngestStats ggql_ingestor_ingest_with_profile(
+// ── Ingestão (Round 4 Fase 5 — BREAKING vs versões anteriores) ──────────────
+// Retorna int32_t status (0=ok, 1=fail, -1=NULL args, -2=struct_size
+// insuficiente) e preenche stats via out param. Caller DEVE preencher
+// out_stats->struct_size = sizeof(GgqlIngestStats) antes de chamar.
+GgqlIngestStats stats = { .struct_size = sizeof(GgqlIngestStats) };
+int32_t rc = ggql_ingestor_ingest_with_profile(
     handle, filepath, num_threads, gamma, verbose,
     GGQL_PROFILE_PANGENOME,  // ou METAGENOMICS, ASSEMBLY, COMPARATIVE
     max_gbwt_paths, keep_gbwt_tmp, cache_dir,
-    event_cb, user_data);
+    event_cb, user_data,
+    &stats);
 
-// Engine de query
-GgqlEngineHandle eng = ggql_engine_load(cache_dir);
+// Cancel cooperativo do ingest (Fase 3, simétrico ao engine_cancel)
+ggql_ingestor_cancel(handle);
+
+// ── Engine de query (Rounds 1–3 + Round 4 refinements) ─────────────────────
+GgqlEngineHandle eng = ggql_engine_load(cache_dir);  // lazy load do FM-Index
 GgqlResultHandle r = ggql_engine_execute(eng, "FIND SEGMENT WHERE length > 1000", 100, 0);
+
+// Variante com cap per-query (Fase 6 — paralelismo seguro)
+GgqlResultHandle r2 = ggql_engine_execute_with_cap(eng, query, 100, 0, /*cap=*/50);
+
+// Cursor stateful — true O(N) streaming (Fase 7 / C7.1, SEGMENT full-scan)
+GgqlCursorHandle c = ggql_engine_execute_cursor(eng, "FIND SEGMENT RETURN id, name");
+while (true) {
+    GgqlResultHandle page = ggql_cursor_next(c, /*page_size=*/4096);
+    if (ggql_result_row_count(page) == 0) { ggql_result_free(page); break; }
+    /* processa page */
+    ggql_result_free(page);
+}
+ggql_cursor_destroy(c);
 ```
+
+#### Cliente Flutter validado
+
+O cliente `ggql_ui` (repo Flutter separado) usa bindings gerados via
+`ffigen` + wrapper Dart idiomático (`GgqlEngine`, `GgqlResult`,
+`GgqlCapabilities`). **28/28 testes** ponta-a-ponta passando contra
+`libggql_ffi.so` atual. Integração coordenada em
+[`ggql_ui/docs/ffi_conflitos_coordenacao.md`](https://github.com/karlaycosta/ggql_ui)
+(14 sub-seções §4.4–§4.14 documentando cada fase).
 
 ---
 
@@ -422,15 +473,21 @@ ggql_engine/
 │   ├── ffi/              ─ ffi.cpp (bindings extern "C")
 │   ├── repl/             ─ ggql_repl.cpp
 │   └── bench_gbwt.cpp    ─ Driver de benchmark/ingestão
-├── tests/                ─ 10 testes do projeto (CTest)
+├── tests/                ─ 16 testes do projeto (CTest)
+│                           inclui test_ffi_query / _ingest_cancel / _cursor
 ├── third_party/          ─ fmt · pegtl · sdsl-lite · gbwt · libsais
-├── docs/                 ─ ingest_profiles.md, diagramas GFA
+├── docs/                 ─ ingest_profiles.md + diagramas GFA
+│                           ffi_flutter_python_integration.md (guia consumer)
+│                           ffi_problemas_round4.md (auditoria FFI Round 4)
 └── CMakeLists.txt        ─ Arquitetura por bibliotecas estáticas
+                            (+ vendor jemalloc opcional via ExternalProject_Add)
 ```
 
 ---
 
 ## Roadmap
+
+### Core engine
 
 - [x] Topologia CSR bidirecional (offsets Elias-Fano)
 - [x] Ingestão paralela de GFA — mmap + OpenMP + BBHash MPHF
@@ -441,17 +498,48 @@ ggql_engine/
 - [x] Gramática GGQL — PEG tipado (PEGTL) + AST `std::variant`
 - [x] QueryPlanner — `FIND TIP/REPEAT/BUBBLE/SEGMENT/EDGE/PATH`, `SEARCH KMER`
 - [x] REPL interativa com input multilinha
-- [x] Bindings Dart/FFI completos (engine + query + perfis)
 - [x] **Perfis de ingestão** — pangenome / metagenomics / assembly / comparative
-- [x] **17 testes CTest** (10 do projeto + 7 do gbwt)
+- [x] **16 testes CTest** (do projeto) + 7 do gbwt vendorizado
 - [x] `crosses()` integrado ao QueryPlanner (com `CrossesCache` para
   composição AND/OR sobre paths atravessados)
 - [x] `contains_kmer()` integrado ao `FIND SEGMENT WHERE`
+
+### FFI / Integração (Round 4 — entregue 2026-05-22)
+
+- [x] Bindings Dart/FFI completos (engine + query + perfis + ingest events)
+- [x] `last_error` thread-safe (C9) — race entre threads concorrentes eliminada
+- [x] Arena per-event de 16 slots em `EventBridge` (C1) — janela de race
+  Dart `NativeCallable.listener` reduzida 16×
+- [x] Terminal Ok/Fail garantido (E3) com sentinela `__ggql_ingest_done__`
+  — consumer fecha callbacks sem `Future.delayed` mágico
+- [x] `ggql_ingestor_cancel` simétrico ao `engine_cancel` (C2/P10) com 7
+  checkpoints entre fases de ingest
+- [x] **Opaque struct typedef** (E1/P4) nos 3 handles — type confusion
+  rejeitada pelo compilador
+- [x] **`struct_size`** em `GgqlIngestStats`/`Capabilities`/`ParseResult`
+  (C5/P3, BREAKING) + refactor das 3 `ingest*` para out param —
+  forward-compat para evolução do ABI
+- [x] `ggql_engine_execute_with_cap` (C8) — cap per-query inline
+  para paralelismo seguro
+- [x] `ggql_engine_last_error_into` (E2) — copy-out strlcpy elimina
+  dependência do `thread_local`
+- [x] `cli::set_event_callback_tl` (C3b) — ingests paralelos em threads
+  distintas têm canais isolados
+- [x] **Cursor stateful** via `std::generator` C++23 (C7.1) — true
+  streaming O(N) para `FIND SEGMENT` full-scan
+- [x] **Allocator split** — jemalloc nos binários + mimalloc na `.so`
+  (dlopen-safe para Flutter/Python sem `LD_PRELOAD`)
+
+### Próximos passos
+
+- [ ] **C7.2+** — portar EDGE/PATH/TIP/REPEAT/BUBBLE/SEARCH KMER + fast-paths
+  de SEGMENT (name/length/depth index) para cursor `std::generator`
 - [ ] Persistência de queries pré-compiladas (cache de planos)
 - [ ] CI no GitHub Actions (`ubuntu-24.04`, `g++-14`)
 - [ ] Suporte a GFA 2.0 (linhas E/G/U)
 - [ ] Indexação de alinhamentos GAF (reuso de GBWT/CrossesCache) — ver
   *future work* no paper
+- [ ] Portabilidade macOS / ARM
 
 ---
 
