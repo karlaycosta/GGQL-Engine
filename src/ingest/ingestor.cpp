@@ -21,6 +21,11 @@
 
 namespace ggql {
 
+// C2 (Fase 3 / P10 — 2026-05-22): mensagem padronizada para cancel
+// cooperativo. Detector cliente compara contra esta string em
+// IngestStats.error_message para distinguir cancel de falha real.
+static constexpr const char* kIngestCancelMsg = "ingest cancelled";
+
 // ══════════════════════════════════════════════════════════════════════════════
 // Passada 1 FUSIONADA
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1304,6 +1309,10 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::complet
         return std::unexpected("complete_with_gbwt: pré-condição inválida (cache não carregado)");
     }
 
+    // C2: checkpoint na entrada do warm-cache path (gBWT serial — fase 5,
+    // pode levar segundos a minutos em pangenoma grande).
+    if (is_cancelled()) { return std::unexpected(kIngestCancelMsg); }
+
     // bin_packing não é persistido — reseta para que process_data_parallel
     // use num_threads bins simples (sem bin packing por componente).
     num_bins_packed_ = 0;
@@ -1507,6 +1516,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
     auto t_built = t0;
 
     if (!skip_pass1) {
+        // C2: checkpoint entre fases.
+        if (is_cancelled()) { return std::unexpected(kIngestCancelMsg); }
         if (verbose) {
             // phase() agora fecha automaticamente a Fase 0 anterior (idempotente).
             cli::phase(1, do_early_remap ? "Ingestão de IDs (Passada 1 + L-pairs)"
@@ -1566,6 +1577,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
     }
 
     const bool write_db = save_metadata;
+    // C2: checkpoint entre fases.
+    if (is_cancelled()) { return std::unexpected(kIngestCancelMsg); }
     if (verbose) {
         std::string suffix = "processamento";
         if (write_db) {
@@ -1642,6 +1655,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
     res_.mmap.reset();
 
     if (fm_seq_for_build_size > 0) {
+        // C2: checkpoint entre fases.
+        if (is_cancelled()) { return std::unexpected(kIngestCancelMsg); }
         if (verbose) {
             cli::phase(3, "FM-Index");
         }
@@ -1659,6 +1674,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
     }
 
     if (build_topology && !skip_pass1) {
+        // C2: checkpoint entre fases.
+        if (is_cancelled()) { return std::unexpected(kIngestCancelMsg); }
         if (verbose) {
             cli::phase(4, fmt::format("CSR Topology · {} links", cli::format_count(links.size())));
         }
@@ -1742,6 +1759,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
 
         if (build_gbwt && !gbwt_groups.empty()) {
             const size_t total_paths = stats.path_count;
+            // C2: checkpoint entre fases (Fase 5: gBWT — pode levar segundos).
+            if (is_cancelled()) { return std::unexpected(kIngestCancelMsg); }
             if (verbose) {
                 cli::phase(5, fmt::format("gBWT paralelo · {} paths em {} grupos",
                                           cli::format_count(total_paths), gbwt_groups.size()));
@@ -1916,6 +1935,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
         // at-cg/billi): construção iterativa do biedged graph + SESE, paridade
         // exata com o binário Billi. Single-thread por enquanto.
         if (build_snarls && res_.topology) {
+            // C2: checkpoint entre fases (Fase 6: Snarls — pode levar segundos no HPRC).
+            if (is_cancelled()) { return std::unexpected(kIngestCancelMsg); }
             if (verbose) {
                 cli::phase(6, "Snarls (FIND BUBBLE)");
             }
@@ -1997,6 +2018,12 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
         return std::unexpected(
             "build_gbwt/build_snarls requerem build_topology=true (ambos dependem da CSR)");
     }
+
+    // C2 (Fase 3 / P10 — 2026-05-22): reseta o flag de cancel no início de
+    // cada ingest. Mesmo padrão de engine_execute — evita carry-over de
+    // cancels armados entre runs. Para cancelar uma ingestão em curso, a
+    // UI deve chamar cancel() *depois* que esta função começou.
+    cancel_requested_.store(false, std::memory_order_release);
 
 #ifdef _OPENMP
     if (verbose) {

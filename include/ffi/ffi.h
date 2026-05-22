@@ -178,6 +178,31 @@ GgqlIngestStats ggql_ingestor_ingest_granular(
 // Reseta o ingestor
 void ggql_ingestor_reset(GgqlIngestorHandle handle);
 
+// ── Cancelamento cooperativo do ingest (Round 4 Fase 3 / C2 / P10, 2026-05-22) ─
+//
+// Sinaliza o ingest atualmente em execução neste ingestor handle para
+// abortar. Seguro chamar de qualquer thread (típico: thread UI). O ingest
+// worker checa o flag em CHECKPOINTS ENTRE FASES (Fase 1: parse + MPHF,
+// Fase 2: links/paths, Fase 3: FM-Index, Fase 4: CSR Topology, Fase 5:
+// gBWT, Fase 6: Snarls). Granularidade: cancel chega em <1s na próxima
+// transição de fase. Não há checkpoints dentro dos loops internos (parse
+// OpenMP, gBWT por path, snarls por componente) — refinamento futuro.
+//
+// Comportamento simétrico a ggql_engine_cancel:
+//   - O flag é RESETADO no início de cada ggql_ingestor_ingest_*(). Armar
+//     cancel antes de começar é no-op (mesmo design conservador).
+//   - Quando o cancel morde, a função de ingest retorna com
+//     GgqlIngestStats.success = false e
+//     GgqlIngestStats.error_message = "ingest cancelled".
+//   - Fase 7 (Persistência) NÃO tem checkpoint — interromper save deixaria
+//     cache parcial no disco. Cancel pega até o fim da Fase 6.
+//   - Arquivos intermediários no cache_dir podem ficar parcialmente
+//     escritos se cancel chegar entre Fase 6 e Fase 7. Consumer pode
+//     limpar o cache_dir ao receber "ingest cancelled".
+//
+// No-op se handle == NULL.
+void ggql_ingestor_cancel(GgqlIngestorHandle handle);
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // API DE QUERY — Engine + Resultado
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -529,6 +529,10 @@ Ambas as auditorias devem ser lidas em conjunto para planejar Round 4 — uma co
 |---|---|
 | 2026-05-22 | Documento criado após análise criteriosa solicitada na sessão; nenhum dos itens foi implementado ainda — são candidatos para Round 4 |
 | 2026-05-22 | Adicionado P10 (`ggql_ingestor_cancel`) após cross-check com auditoria cliente; nova §6 "Coordenação com auditoria cliente" |
+| 2026-05-22 | **Fase 1 entregue** (`ggql_engine@28051f0`): P1/C9 (`last_error` thread_local), P5/C6 (doc cancel reset alinhada), P7/C4a (doc lifecycle destroy). Zero ABI change. Validado com `test_ffi_query`. |
+| 2026-05-22 | **Fase 2 entregue** (`ggql_engine@7f8fd41`): P6/C1 opção B (arena circular de 16 slots em `EventBridge`), E3 (terminal Ok/Fail com sentinela `__ggql_ingest_done__` antes de `clear_event_callback`). Header documenta LIFETIME e TERMINAL EVENT. Validado com `test_ffi_query` + `ingest_test.dart` do cliente Flutter contra a `.so` nova. |
+| 2026-05-22 | Header `ffi.h` ganhou **GARANTIA DE UNICIDADE** da sentinela `__ggql_ingest_done__` em §TERMINAL EVENT (`ggql_engine@d623a57`) — atende pendência do cliente em §4.6 do `ffi_conflitos_coordenacao.md` (validação empírica: 1 sentinela em tiny.gfa e chm13_subset_sm.gfa). |
+| 2026-05-22 | **Fase 3 entregue** (próximo commit): P10/C2 — `ggql_ingestor_cancel(handle)` simétrico a `engine_cancel`. `GfaIngestorMmapParallel` ganhou flag `cancel_requested_` atômica + métodos `cancel()`/`is_cancelled()`; reset no início de `ingest()`; 7 checkpoints entre fases em `run_full_ingest` (Fase 1–6, **Fase 7 Persistência intencionalmente sem checkpoint**) + 1 em `complete_with_gbwt`. Símbolo exposto em `ffi.h`. Novo teste `test_ffi_ingest_cancel.cpp` valida 4 casos: cancel(NULL) no-op, ingest normal, cancel pré-armado é resetado, **cancel concorrente disparou** com `error_message == "ingest cancelled"`. Cliente já tinha o ponto de chamada esperando (cf. §4.1 de `ffi_conflitos_coordenacao.md` C2). |
 
 **Arquivos analisados:**
 - `src/ffi/ffi.cpp` (779 linhas, último mexido em `dafe6dd`)

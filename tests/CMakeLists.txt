@@ -147,3 +147,20 @@ add_test(
 set_tests_properties(test_ffi_query PROPERTIES
     ENVIRONMENT "GGQL_TEST_IDX=${CMAKE_SOURCE_DIR}/data/chm13_subset_100w.gfa.idx"
 )
+
+# ── Teste de cancelamento do ingest (C2 / P10) ───────────────────────────────
+add_executable(test_ffi_ingest_cancel test_ffi_ingest_cancel.cpp)
+target_compile_options(test_ffi_ingest_cancel PRIVATE
+    -std=c++23 -march=native
+    $<$<CONFIG:Debug>:-O0 -g>
+    $<$<NOT:$<CONFIG:Debug>>:-O2>
+)
+target_link_libraries(test_ffi_ingest_cancel PRIVATE ggql_ffi)
+add_test(
+    NAME test_ffi_ingest_cancel
+    COMMAND test_ffi_ingest_cancel
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(test_ffi_ingest_cancel PROPERTIES
+    ENVIRONMENT "GGQL_TEST_GFA=${CMAKE_SOURCE_DIR}/data/chm13_subset_10w.gfa"
+)

@@ -21,6 +21,7 @@
 #include "ggql/storage/topology.hpp"
 
 #include <array>
+#include <atomic>
 #include <bit>
 #include <charconv>
 #include <chrono>
@@ -256,6 +257,26 @@ class GfaIngestorMmapParallel {
     // Libera na ordem correta: topology → mphf → mmap (backing das string_views).
     void reset() noexcept { res_ = {}; }
 
+    // Round 4 Fase 3 / C2 / P10 (2026-05-22): cancelamento cooperativo do
+    // ingest, simétrico a ggql_engine_cancel. Outra thread (tipicamente UI)
+    // chama cancel(); o ingest checa o flag em checkpoints ENTRE FASES
+    // (Fase 1: parse + MPHF, Fase 2: links/paths, …, Fase 7: persistência)
+    // e aborta retornando std::unexpected("ingest cancelled").
+    //
+    // Granularidade: checkpoints entre fases. Cancel chega em <1s na
+    // próxima transição de fase. Não há checkpoints dentro dos loops
+    // internos (parse OpenMP, gBWT por path, snarls por componente);
+    // se necessário no futuro, refinar com checkpoints finos.
+    //
+    // O flag é RESETADO no início de cada ingest() — mesmo padrão de
+    // engine_execute (evita cancel "preso" entre runs).
+    void cancel() noexcept {
+        cancel_requested_.store(true, std::memory_order_release);
+    }
+    [[nodiscard]] bool is_cancelled() const noexcept {
+        return cancel_requested_.load(std::memory_order_acquire);
+    }
+
   private:
     // BUG-3 (fix): Resources agrupa os três recursos com ordem de destruição
     // enforçada pela estrutura — membros são destruídos na ordem INVERSA de
@@ -278,6 +299,12 @@ class GfaIngestorMmapParallel {
     std::vector<uint64_t> bin_sigma_;   // sigma acumulado por bin
     uint32_t num_components_ = 0;
     uint32_t num_bins_packed_ = 0;
+
+    // C2 (Fase 3): flag de cancelamento cooperativo. Verificado em
+    // checkpoints entre fases do pipeline de ingestão (run_full_ingest,
+    // complete_with_gbwt, complete_with_snarls). Resetado no início de
+    // cada ingest() para evitar carry-over entre runs.
+    std::atomic<bool> cancel_requested_{false};
 
     // ── Utilitários de parsing ────────────────────────────────────────────────
 

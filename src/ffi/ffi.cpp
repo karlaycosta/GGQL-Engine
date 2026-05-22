@@ -224,6 +224,14 @@ void ggql_ingestor_reset(GgqlIngestorHandle handle) {
     }
 }
 
+// C2/P10 (Fase 3 / 2026-05-22): cancel cooperativo do ingest, simétrico a
+// ggql_engine_cancel. Chamado tipicamente da thread UI durante um ingest
+// longo (HPRC ~24min). Worker checa em checkpoints entre fases.
+void ggql_ingestor_cancel(GgqlIngestorHandle handle) {
+    if (!handle) { return; }
+    static_cast<GfaIngestorMmapParallel*>(handle)->cancel();
+}
+
 // thread_local evita que múltiplas chamadas FFI simultâneas em threads
 // diferentes sobrescrevam a error_message de outra.
 thread_local std::string last_error_message;
