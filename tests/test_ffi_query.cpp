@@ -159,7 +159,7 @@ int main() {
 
     // ── 10. Round 2.D: ggql_engine_validate parse-only ───────────────────────
     {
-        GgqlParseResult pr{};
+        GgqlParseResult pr{.struct_size = sizeof(GgqlParseResult)};
         // queries válidas
         check(ggql_engine_validate(eng, "FIND SEGMENT", &pr) == 0 && pr.valid,
               "validate: FIND SEGMENT");
@@ -183,6 +183,11 @@ int main() {
         // args inválidos
         check(ggql_engine_validate(eng, nullptr, &pr) == -1, "validate: query NULL");
         check(ggql_engine_validate(eng, "FIND SEGMENT", nullptr) == -1, "validate: out NULL");
+
+        // C5 / Fase 5: struct_size==0 (caller esqueceu de inicializar) → -2
+        GgqlParseResult bad_pr{};  // struct_size = 0
+        check(ggql_engine_validate(eng, "FIND SEGMENT", &bad_pr) == -2,
+              "validate: struct_size insuficiente → -2");
     }
 
     // ── 11. Round 2.E: list_entities ──────────────────────────────────────────
@@ -242,7 +247,7 @@ int main() {
 
     // ── 13. Round 1.B: ggql_engine_capabilities ──────────────────────────────
     {
-        GgqlEngineCapabilities caps{};
+        GgqlEngineCapabilities caps{.struct_size = sizeof(GgqlEngineCapabilities)};
         check(ggql_engine_capabilities(eng, &caps) == 0, "capabilities rc=0");
         check(caps.has_metadata, "caps: has_metadata=true");
         check(caps.has_topology, "caps: has_topology=true (§3.bis)");
@@ -252,6 +257,11 @@ int main() {
         // args inválidos
         check(ggql_engine_capabilities(nullptr, &caps) == -1, "caps engine NULL");
         check(ggql_engine_capabilities(eng, nullptr) == -1, "caps out NULL");
+
+        // C5 / Fase 5: struct_size==0 → -2
+        GgqlEngineCapabilities bad_caps{};
+        check(ggql_engine_capabilities(eng, &bad_caps) == -2,
+              "caps: struct_size insuficiente → -2");
     }
 
     // ── 14. FIND BUBBLE via FFI — regressão do bug do move ctor (commit 5d9c8a5) ─

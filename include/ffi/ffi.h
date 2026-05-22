@@ -22,8 +22,22 @@ extern "C" {
 // em vez de Pointer<Void>) — type-safety propagada para o lado Dart.
 typedef struct GgqlIngestor_* GgqlIngestorHandle;
 
-// Result Structs for IngestStatsParallel
+// Result struct para ggql_ingestor_ingest_*().
+//
+// C5 / Fase 5 (Round 4 / 2026-05-22): struct evolve-friendly via
+// `struct_size`. Caller DEVE preencher `struct_size = sizeof(GgqlIngestStats)`
+// ANTES de passar como out param. Engine checa que o tamanho passado é
+// compatível (>= versão mínima esperada); rejeita com retorno -2 se
+// caller passou um struct stale (recompile contra header novo).
+//
+// Quando o engine adicionar campos no futuro, o pattern é:
+//   - Caller compilado contra header NOVO passa sizeof maior, recebe
+//     todos os campos.
+//   - Caller compilado contra header VELHO passa sizeof menor; engine
+//     escreve só até o offset suportado pelo caller, garantindo que
+//     campos novos não sobrescrevam memória do caller.
 typedef struct {
+    size_t   struct_size;      // = sizeof(GgqlIngestStats) — preenchido pelo caller
     uint64_t segment_count;
     uint64_t link_count;
     uint64_t node_count;
@@ -111,7 +125,20 @@ void ggql_ingestor_destroy(GgqlIngestorHandle handle);
 
 // Inicia a ingestao. event_cb pode ser NULL se o consumidor não quiser
 // receber eventos.
-GgqlIngestStats ggql_ingestor_ingest(
+//
+// C5 / Fase 5 (2026-05-22 — BREAKING vs versões anteriores): retorna
+// `int32_t` em vez de `GgqlIngestStats` direto. Stats vai pelo out param
+// `out_stats` — caller DEVE preencher `out_stats->struct_size =
+// sizeof(GgqlIngestStats)` antes de chamar.
+//
+// Retorno:
+//    0 — ingest OK; out_stats->success == true
+//    1 — ingest falhou; out_stats->success == false (error_message preenchido
+//        thread_local — válido até a próxima chamada FFI nesta thread)
+//   -1 — argumentos NULL (handle, filepath, cache_dir ou out_stats)
+//   -2 — out_stats->struct_size insuficiente (caller compilado contra
+//        header antigo; recompile)
+int32_t ggql_ingestor_ingest(
     GgqlIngestorHandle handle,
     const char* filepath,
     int num_threads,
@@ -124,7 +151,8 @@ GgqlIngestStats ggql_ingestor_ingest(
     bool keep_gbwt_tmp,
     const char* cache_dir,
     GgqlEventCallback event_cb,
-    void* user_data
+    void* user_data,
+    GgqlIngestStats* out_stats
 );
 
 // ── Perfis de ingestão ───────────────────────────────────────────────────────
@@ -147,7 +175,8 @@ const char* ggql_profile_name(GgqlIngestProfile p);
 
 // Variante de ggql_ingestor_ingest que recebe perfil pronto. Equivalente a
 // chamar ggql_ingestor_ingest com os flags derivados de `profile`.
-GgqlIngestStats ggql_ingestor_ingest_with_profile(
+// C5 / Fase 5: nova assinatura (ver ggql_ingestor_ingest acima).
+int32_t ggql_ingestor_ingest_with_profile(
     GgqlIngestorHandle handle,
     const char* filepath,
     int num_threads,
@@ -158,7 +187,8 @@ GgqlIngestStats ggql_ingestor_ingest_with_profile(
     bool keep_gbwt_tmp,
     const char* cache_dir,
     GgqlEventCallback event_cb,
-    void* user_data
+    void* user_data,
+    GgqlIngestStats* out_stats
 );
 
 // Variante granular: expõe `build_gbwt` e `build_snarls` separadamente
@@ -167,7 +197,8 @@ GgqlIngestStats ggql_ingestor_ingest_with_profile(
 // com snarls mas sem gBWT", ou "gBWT sem snarls".
 //
 // Restrição: `build_gbwt`/`build_snarls` exigem `build_topology=true`.
-GgqlIngestStats ggql_ingestor_ingest_granular(
+// C5 / Fase 5: nova assinatura (ver ggql_ingestor_ingest acima).
+int32_t ggql_ingestor_ingest_granular(
     GgqlIngestorHandle handle,
     const char* filepath,
     int num_threads,
@@ -182,7 +213,8 @@ GgqlIngestStats ggql_ingestor_ingest_granular(
     bool keep_gbwt_tmp,
     const char* cache_dir,
     GgqlEventCallback event_cb,
-    void* user_data
+    void* user_data,
+    GgqlIngestStats* out_stats
 );
 
 // Reseta o ingestor
@@ -271,6 +303,7 @@ const char* ggql_engine_last_error(GgqlEngineHandle engine);
 // antes do lazy-load — checa existência de fm_index.bin no disco). UI pode
 // usar para cinzar botão "Buscar k-mer" quando false.
 typedef struct {
+    size_t struct_size;     // C5/Fase 5: caller seta = sizeof(GgqlEngineCapabilities)
     bool has_metadata;      // true se engine_load/create teve sucesso
     bool has_topology;      // true se topology.bin foi carregado
     bool has_fm_index;      // true se fm_index.bin existe (mesmo não-carregado)
@@ -295,6 +328,7 @@ int32_t ggql_engine_capabilities(GgqlEngineHandle engine,
 // `error_line`/`error_col` ficam em -1 (não exposto pelo parser PEGTL atual;
 // `error_message` carrega a posição em texto livre quando disponível).
 typedef struct {
+    size_t struct_size;        // C5/Fase 5: caller seta = sizeof(GgqlParseResult)
     bool valid;
     int32_t error_line;
     int32_t error_col;

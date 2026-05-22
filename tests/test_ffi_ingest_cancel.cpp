@@ -67,7 +67,8 @@ int main() {
         check(h != nullptr, "create() deve retornar handle");
 
         const std::string cache = make_tmp_cache_dir();
-        GgqlIngestStats st = ggql_ingestor_ingest(
+        GgqlIngestStats st{.struct_size = sizeof(GgqlIngestStats)};
+        const int32_t rc = ggql_ingestor_ingest(
             h, gfa, 4, 1.0,
             /*verbose=*/false,
             /*save_metadata=*/true,
@@ -77,7 +78,9 @@ int main() {
             /*keep_gbwt_tmp=*/false,
             cache.c_str(),
             /*event_cb=*/nullptr,
-            /*user_data=*/nullptr);
+            /*user_data=*/nullptr,
+            &st);
+        check(rc == 0, "ingest normal deve retornar 0");
         check(st.success, "ingest normal deve ter success=true");
         check(st.segment_count > 0, "ingest normal deve produzir segments");
 
@@ -96,12 +99,15 @@ int main() {
         ggql_ingestor_cancel(h);
 
         const std::string cache = make_tmp_cache_dir();
-        GgqlIngestStats st = ggql_ingestor_ingest(
+        GgqlIngestStats st{.struct_size = sizeof(GgqlIngestStats)};
+        const int32_t rc = ggql_ingestor_ingest(
             h, gfa, 4, 1.0,
             /*verbose=*/false, /*save_metadata=*/true,
             /*build_topology=*/false, /*build_fm_index=*/false,
             /*max_gbwt_paths=*/0, /*keep_gbwt_tmp=*/false,
-            cache.c_str(), /*event_cb=*/nullptr, /*user_data=*/nullptr);
+            cache.c_str(), /*event_cb=*/nullptr, /*user_data=*/nullptr, &st);
+        check(rc == 0,
+              "ingest pós-cancel-armado-precoce deve retornar 0 (flag resetado)");
         check(st.success,
               "ingest pós-cancel-armado-precoce deve ter success=true (flag resetado)");
 
@@ -126,14 +132,16 @@ int main() {
         });
 
         const std::string cache = make_tmp_cache_dir();
-        GgqlIngestStats st = ggql_ingestor_ingest(
+        GgqlIngestStats st{.struct_size = sizeof(GgqlIngestStats)};
+        const int32_t rc = ggql_ingestor_ingest(
             h, gfa, 4, 1.0,
             /*verbose=*/false, /*save_metadata=*/true,
             /*build_topology=*/true,  // path mais longo p/ aumentar chance do cancel
             /*build_fm_index=*/true,
             /*max_gbwt_paths=*/0, /*keep_gbwt_tmp=*/false,
-            cache.c_str(), /*event_cb=*/nullptr, /*user_data=*/nullptr);
+            cache.c_str(), /*event_cb=*/nullptr, /*user_data=*/nullptr, &st);
         canceller.join();
+        (void)rc;  // success/failure detectada via st.success abaixo
         check(cancel_fired.load(), "thread de cancel executou");
 
         if (st.success) {

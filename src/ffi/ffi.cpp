@@ -239,7 +239,10 @@ thread_local std::string last_error_message;
 
 namespace {
 
-GgqlIngestStats do_ingest_ffi(
+// C5 / Fase 5 (2026-05-22): do_ingest_ffi agora preenche out_stats em vez
+// de retornar por valor. Retorna 0 (sucesso), 1 (falha semântica),
+// -1 (args NULL), -2 (struct_size insuficiente).
+int32_t do_ingest_ffi(
     GgqlIngestorHandle handle,
     const char* filepath,
     int num_threads,
@@ -254,15 +257,22 @@ GgqlIngestStats do_ingest_ffi(
     bool keep_gbwt_tmp,
     const char* cache_dir,
     GgqlEventCallback event_cb,
-    void* user_data
+    void* user_data,
+    GgqlIngestStats* out_stats
 ) {
-    GgqlIngestStats stats = {};
-    stats.success = false;
+    if (!out_stats) { return -1; }
+    if (out_stats->struct_size < sizeof(GgqlIngestStats)) { return -2; }
+
+    // Zera todos os campos exceto struct_size (echo de volta).
+    const size_t caller_size = out_stats->struct_size;
+    *out_stats = {};
+    out_stats->struct_size = caller_size;
+    out_stats->success = false;
 
     if (!handle || !filepath || !cache_dir) {
         last_error_message = "Invalid arguments passed to ggql_ingestor_ingest (null pointers).";
-        stats.error_message = last_error_message.c_str();
-        return stats;
+        out_stats->error_message = last_error_message.c_str();
+        return -1;
     }
 
     // Instala a ponte de eventos (thread_local p/ não vazar entre chamadas
@@ -292,34 +302,34 @@ GgqlIngestStats do_ingest_ffi(
         );
 
         if (result.has_value()) {
-            stats.success = true;
-            stats.segment_count = result->segment_count;
-            stats.link_count = result->link_count;
-            stats.node_count = result->node_count;
-            stats.path_count = result->path_count;
-            stats.elapsed_total_s = result->elapsed_total_s;
-            stats.elapsed_io1_s = result->elapsed_io1_s;
-            stats.elapsed_build_s = result->elapsed_build_s;
-            stats.elapsed_ingest_s = result->elapsed_ingest_s;
-            stats.elapsed_metadata_s = result->elapsed_metadata_s;
-            stats.elapsed_topology_s = result->elapsed_topology_s;
-            stats.elapsed_gbwt_s = result->elapsed_gbwt_s;
-            stats.elapsed_fm_index_s = result->elapsed_fm_index_s;
-            stats.gbwt_cpu_avg_s = result->gbwt_cpu_avg_s;
-            stats.gbwt_cpu_max_s = result->gbwt_cpu_max_s;
-            stats.gbwt_total_nodes = result->gbwt_total_nodes;
-            stats.gbwt_peak_rss_kb = result->gbwt_peak_rss_kb;
-            stats.gbwt_index_size_b = result->gbwt_index_size_b;
+            out_stats->success = true;
+            out_stats->segment_count = result->segment_count;
+            out_stats->link_count = result->link_count;
+            out_stats->node_count = result->node_count;
+            out_stats->path_count = result->path_count;
+            out_stats->elapsed_total_s = result->elapsed_total_s;
+            out_stats->elapsed_io1_s = result->elapsed_io1_s;
+            out_stats->elapsed_build_s = result->elapsed_build_s;
+            out_stats->elapsed_ingest_s = result->elapsed_ingest_s;
+            out_stats->elapsed_metadata_s = result->elapsed_metadata_s;
+            out_stats->elapsed_topology_s = result->elapsed_topology_s;
+            out_stats->elapsed_gbwt_s = result->elapsed_gbwt_s;
+            out_stats->elapsed_fm_index_s = result->elapsed_fm_index_s;
+            out_stats->gbwt_cpu_avg_s = result->gbwt_cpu_avg_s;
+            out_stats->gbwt_cpu_max_s = result->gbwt_cpu_max_s;
+            out_stats->gbwt_total_nodes = result->gbwt_total_nodes;
+            out_stats->gbwt_peak_rss_kb = result->gbwt_peak_rss_kb;
+            out_stats->gbwt_index_size_b = result->gbwt_index_size_b;
         } else {
             last_error_message = result.error();
-            stats.error_message = last_error_message.c_str();
+            out_stats->error_message = last_error_message.c_str();
         }
     } catch (const std::exception& e) {
         last_error_message = std::string("C++ Exception: ") + e.what();
-        stats.error_message = last_error_message.c_str();
+        out_stats->error_message = last_error_message.c_str();
     } catch (...) {
         last_error_message = "Unknown C++ exception occurred during ingest";
-        stats.error_message = last_error_message.c_str();
+        out_stats->error_message = last_error_message.c_str();
     }
 
     // E3 (Round 4 / 2026-05-22): emite SEMPRE um evento terminal (Ok ou
@@ -336,23 +346,23 @@ GgqlIngestStats do_ingest_ffi(
     // evita colisão com Ok/Fail intermediários gerados pelo cli::).
     if (event_cb) {
         cli::Event terminal{};
-        terminal.kind = stats.success ? cli::EventKind::Ok
-                                      : cli::EventKind::Fail;
+        terminal.kind = out_stats->success ? cli::EventKind::Ok
+                                           : cli::EventKind::Fail;
         terminal.text = std::string_view{"__ggql_ingest_done__"};
-        terminal.detail = stats.success
+        terminal.detail = out_stats->success
             ? std::string_view{}
-            : std::string_view{stats.error_message ? stats.error_message
-                                                   : "ingest_failed"};
+            : std::string_view{out_stats->error_message ? out_stats->error_message
+                                                        : "ingest_failed"};
         dispatch_bridge(terminal, &bridge);
         cli::clear_event_callback();
     }
 
-    return stats;
+    return out_stats->success ? 0 : 1;
 }
 
 } // namespace
 
-GgqlIngestStats ggql_ingestor_ingest(
+int32_t ggql_ingestor_ingest(
     GgqlIngestorHandle handle,
     const char* filepath,
     int num_threads,
@@ -365,7 +375,8 @@ GgqlIngestStats ggql_ingestor_ingest(
     bool keep_gbwt_tmp,
     const char* cache_dir,
     GgqlEventCallback event_cb,
-    void* user_data
+    void* user_data,
+    GgqlIngestStats* out_stats
 ) {
     // API legada: gBWT e snarls seguem build_topology (todos acoplados, como
     // era antes da separação). Para controle granular, use
@@ -375,10 +386,10 @@ GgqlIngestStats ggql_ingestor_ingest(
                          /*build_gbwt=*/build_topology,
                          /*build_snarls=*/build_topology,
                          max_gbwt_paths, keep_gbwt_tmp, cache_dir,
-                         event_cb, user_data);
+                         event_cb, user_data, out_stats);
 }
 
-GgqlIngestStats ggql_ingestor_ingest_with_profile(
+int32_t ggql_ingestor_ingest_with_profile(
     GgqlIngestorHandle handle,
     const char* filepath,
     int num_threads,
@@ -389,19 +400,20 @@ GgqlIngestStats ggql_ingestor_ingest_with_profile(
     bool keep_gbwt_tmp,
     const char* cache_dir,
     GgqlEventCallback event_cb,
-    void* user_data
+    void* user_data,
+    GgqlIngestStats* out_stats
 ) {
     const auto pf = flags_for(static_cast<IngestProfile>(profile));
     return do_ingest_ffi(handle, filepath, num_threads, gamma, verbose,
                          pf.save_metadata, pf.build_topology, pf.build_fm_index,
                          pf.build_gbwt, pf.build_snarls,
                          max_gbwt_paths, keep_gbwt_tmp, cache_dir,
-                         event_cb, user_data);
+                         event_cb, user_data, out_stats);
 }
 
 // Round 1.C (2026-05-20): controle granular — `build_gbwt`/`build_snarls`
 // expostos individualmente. Permite combos fora dos 4 perfis fixos.
-GgqlIngestStats ggql_ingestor_ingest_granular(
+int32_t ggql_ingestor_ingest_granular(
     GgqlIngestorHandle handle,
     const char* filepath,
     int num_threads,
@@ -416,13 +428,14 @@ GgqlIngestStats ggql_ingestor_ingest_granular(
     bool keep_gbwt_tmp,
     const char* cache_dir,
     GgqlEventCallback event_cb,
-    void* user_data
+    void* user_data,
+    GgqlIngestStats* out_stats
 ) {
     return do_ingest_ffi(handle, filepath, num_threads, gamma, verbose,
                          save_metadata, build_topology, build_fm_index,
                          build_gbwt, build_snarls,
                          max_gbwt_paths, keep_gbwt_tmp, cache_dir,
-                         event_cb, user_data);
+                         event_cb, user_data, out_stats);
 }
 
 int32_t ggql_profile_from_name(const char* name, GgqlIngestProfile* out) {
@@ -594,8 +607,12 @@ int64_t ggql_engine_execute_streaming(
 int32_t ggql_engine_capabilities(GgqlEngineHandle engine,
                                  GgqlEngineCapabilities* out) {
     if (!engine || !out) { return -1; }
+    // C5 / Fase 5: valida struct_size antes de escrever.
+    if (out->struct_size < sizeof(GgqlEngineCapabilities)) { return -2; }
     auto* w = reinterpret_cast<GgqlEngineWrapper*>(engine);
+    const size_t caller_size = out->struct_size;
     *out = {};
+    out->struct_size = caller_size;
     // Metadata sempre carregado em load/create se chegamos a um handle válido.
     out->has_metadata = true;
     out->segment_count = static_cast<uint64_t>(w->metadata.size());
@@ -627,7 +644,11 @@ int32_t ggql_engine_validate(GgqlEngineHandle /*engine*/,
                              const char* query,
                              GgqlParseResult* out) {
     if (!query || !out) { return -1; }
+    // C5 / Fase 5: valida struct_size antes de escrever.
+    if (out->struct_size < sizeof(GgqlParseResult)) { return -2; }
+    const size_t caller_size = out->struct_size;
     *out = {};
+    out->struct_size = caller_size;
     out->error_line = -1;
     out->error_col = -1;
     auto parsed = grammar::parse_ggql(query);
