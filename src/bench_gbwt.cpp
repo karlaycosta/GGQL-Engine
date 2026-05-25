@@ -125,91 +125,96 @@ int main(int argc, char* argv[]) {
     const size_t peak_rss_kb = read_process_peak_rss_kb();
     (void)rss_initial;  // rss_initial fica como referência; usamos peak agora
 
-    // Heurística cache hit: gBWT não foi (re)construído, então o painel de
-    // perf de gBWT não tem dados — só elapsed_total_s reflete o trabalho
-    // feito (load do cache + eventuais rebuilds incrementais como snarls).
-    // I-5: distingue 3 cenários — sem paths, cache hit real, build novo.
-    const bool no_paths        = st.path_count == 0;
-    const bool gbwt_was_built  = st.elapsed_gbwt_s > 0.0 && st.gbwt_total_nodes > 0;
+    // I-5 (atualizado 2026-05-25): caminho único com seções condicionais.
+    // Cada bloco aparece apenas quando aplicável — antes a flag no_paths
+    // descartava TODAS as métricas (FM-Index, CSR, Snarls etc.) mesmo
+    // quando essas fases tinham rodado e produzido dados úteis.
+    const bool no_paths       = st.path_count == 0;
+    const bool gbwt_was_built = st.elapsed_gbwt_s > 0.0 && st.gbwt_total_nodes > 0;
 
-    cli::title("Métricas de Performance gBWT");
+    cli::title("Métricas de Performance da Ingestão");
     cli::blank();
 
+    // Nota descritiva no topo para contextualizar o que sobra/falta.
     if (no_paths) {
-        cli::note("(GFA sem paths — gBWT não construído; só topologia indexada)");
+        cli::note("(GFA sem W/P-lines — gBWT não construído; "
+                  "demais fases medidas abaixo)");
         cli::blank();
-        cli::section("Resumo");
-        cli::kv_count("Total de Caminhos", 0);
-        cli::kv_size("Pico RSS Processo", peak_rss_kb * 1024);
-        cli::kv_time("TOTAL Pipeline", st.elapsed_total_s);
+    } else if (!gbwt_was_built) {
+        cli::note("(cache hit — gBWT já persistido; bench mediu "
+                  "carga + rebuilds incrementais)");
         cli::blank();
-        cli::ok("Benchmark concluído com sucesso");
-        cli::blank();
-        return 0;
     }
 
-    if (!gbwt_was_built) {
-        cli::note("(cache hit — gBWT já estava persistido; bench mediu carga + rebuilds incrementais)");
-        cli::blank();
-        cli::section("Resumo");
-        cli::kv_count("Total de Caminhos", st.path_count);
-        cli::kv_size("Pico RSS Processo", peak_rss_kb * 1024);
-        cli::kv_time("TOTAL (load + rebuilds)", st.elapsed_total_s);
-        cli::blank();
-        cli::ok("Benchmark concluído com sucesso");
-        cli::blank();
-        return 0;
+    // ── Bloco gBWT (só se construído nesta run) ──────────────────────────────
+    if (gbwt_was_built) {
+        cli::section("Tempos de Execução (gBWT)");
+        cli::kv_time("Tempo Real (Wall-clock)", st.elapsed_gbwt_s);
+        cli::kv_time("Tempo CPU Médio/Thread", st.gbwt_cpu_avg_s);
+        cli::kv_time("Tempo CPU Máximo (Thread)", st.gbwt_cpu_max_s);
+        const double control_overhead =
+            std::max(0.0, st.elapsed_gbwt_s - st.gbwt_cpu_max_s);
+        if (control_overhead > 0.001) {
+            cli::kv_time("Overhead de Controle/Merge", control_overhead);
+        }
     }
 
-    cli::section("Tempos de Execução");
-    cli::kv_time("Tempo Real (Wall-clock)", st.elapsed_gbwt_s);
-    cli::kv_time("Tempo CPU Médio/Thread", st.gbwt_cpu_avg_s);
-    cli::kv_time("Tempo CPU Máximo (Thread)", st.gbwt_cpu_max_s);
-    const double control_overhead = std::max(0.0, st.elapsed_gbwt_s - st.gbwt_cpu_max_s);
-    if (control_overhead > 0.001) {
-        cli::kv_time("Overhead de Controle/Merge", control_overhead);
-    }
-
-    cli::section("Memória e Escalonamento");
-    if (st.gbwt_peak_rss_kb > 0) {
-        cli::kv_size("Pico RSS (Build Isolado)", static_cast<size_t>(st.gbwt_peak_rss_kb) * 1024);
+    // ── Memória (sempre aplicável; campos gBWT-específicos só se houver) ─────
+    cli::section("Memória");
+    if (gbwt_was_built && st.gbwt_peak_rss_kb > 0) {
+        cli::kv_size("Pico RSS (Build gBWT Isolado)",
+                     static_cast<size_t>(st.gbwt_peak_rss_kb) * 1024);
     }
     cli::kv_size("Pico RSS Processo (peak)", peak_rss_kb * 1024);
-    cli::kv_size("Tamanho do Índice", st.gbwt_index_size_b);
+    if (gbwt_was_built) {
+        cli::kv_size("Tamanho do Índice gBWT", st.gbwt_index_size_b);
+    }
 
-    cli::section("Throughput e Eficiência");
-    const double nodes_per_s =
-        static_cast<double>(st.gbwt_total_nodes) / st.elapsed_gbwt_s;
-    const double bits_per_node =
-        static_cast<double>(st.gbwt_index_size_b) * 8.0 / st.gbwt_total_nodes;
+    // ── Throughput gBWT (só se construído) ───────────────────────────────────
+    if (gbwt_was_built) {
+        cli::section("Throughput e Eficiência (gBWT)");
+        const double nodes_per_s =
+            static_cast<double>(st.gbwt_total_nodes) / st.elapsed_gbwt_s;
+        const double bits_per_node =
+            static_cast<double>(st.gbwt_index_size_b) * 8.0 / st.gbwt_total_nodes;
 
+        cli::kv_count("Total de Caminhos", st.path_count);
+        cli::kv_count("Total de Nós (Símbolos)", st.gbwt_total_nodes);
+
+        std::string rate_str;
+        if (nodes_per_s > 1e6) {
+            rate_str = fmt::format("{:.2f} M nós/s", nodes_per_s / 1e6);
+        } else if (nodes_per_s > 1e3) {
+            rate_str = fmt::format("{:.1f} K nós/s", nodes_per_s / 1e3);
+        } else {
+            rate_str = fmt::format("{:.0f} nós/s", nodes_per_s);
+        }
+        cli::kv("Throughput de Construção", rate_str);
+        cli::kv_number("Eficiência de Compressão", bits_per_node, "bits/nó");
+    }
+
+    // ── Contexto de Ingestão (SEMPRE — cada fase com tempo > 0) ──────────────
+    cli::section("Contexto de Ingestão (fases medidas)");
+    const double phase1 = st.elapsed_io1_s + st.elapsed_build_s;
+    if (phase1 > 0.0)               { cli::kv_time("Fase 1 (MPHF)", phase1); }
+    if (st.elapsed_ingest_s > 0.0)  { cli::kv_time("Fase 2 (Links/Paths)", st.elapsed_ingest_s); }
+    if (st.elapsed_fm_index_s > 0.0){ cli::kv_time("Fase 3 (FM-Index)", st.elapsed_fm_index_s); }
+    if (st.elapsed_topology_s > 0.0){ cli::kv_time("Fase 4 (CSR Topology)", st.elapsed_topology_s); }
+    if (st.elapsed_gbwt_s > 0.0)    { cli::kv_time("Fase 5 (gBWT)", st.elapsed_gbwt_s); }
+    if (st.elapsed_snarls_s > 0.0)  { cli::kv_time("Fase 6 (Snarls)", st.elapsed_snarls_s); }
+    if (st.elapsed_save_s > 0.0)    { cli::kv_time("Fase 7 (Persistência)", st.elapsed_save_s); }
+    cli::kv_time("TOTAL Pipeline", st.elapsed_total_s);
+
+    // ── Resumo (sempre; contadores 0 omitidos — cache hit não os repopula) ──
+    cli::section("Resumo");
+    if (st.segment_count > 0) {
+        cli::kv_count("Total de Segmentos", st.segment_count);
+    }
+    if (st.link_count > 0) {
+        cli::kv_count("Total de Links", st.link_count);
+    }
     cli::kv_count("Total de Caminhos", st.path_count);
-    cli::kv_count("Total de Nós (Símbolos)", st.gbwt_total_nodes);
-
-    // Formata Throughput com unidades K/M se for grande
-    std::string rate_str;
-    if (nodes_per_s > 1e6) {
-        rate_str = fmt::format("{:.2f} M nós/s", nodes_per_s / 1e6);
-    } else if (nodes_per_s > 1e3) {
-        rate_str = fmt::format("{:.1f} K nós/s", nodes_per_s / 1e3);
-    } else {
-        rate_str = fmt::format("{:.0f} nós/s", nodes_per_s);
-    }
-    cli::kv("Throughput de Construção", rate_str);
-    cli::kv_number("Eficiência de Compressão", bits_per_node, "bits/nó");
-
-    cli::section("Contexto de Ingestão");
-    cli::kv_time("Fase 1 (MPHF)", st.elapsed_io1_s + st.elapsed_build_s);
-    cli::kv_time("Fase 2 (Links/Paths)", st.elapsed_ingest_s);
-    cli::kv_time("Fase 3 (FM-Index)", st.elapsed_fm_index_s);
-    cli::kv_time("Fase 4 (CSR Topology)", st.elapsed_topology_s);
-    cli::kv_time("Fase 5 (gBWT)", st.elapsed_gbwt_s);
-    if (st.elapsed_snarls_s > 0.0) {
-        cli::kv_time("Fase 6 (Snarls)", st.elapsed_snarls_s);
-    }
-    if (st.elapsed_save_s > 0.0) {
-        cli::kv_time("Fase 7 (Persistência)", st.elapsed_save_s);
-    }
+    cli::kv_size("Pico RSS Processo", peak_rss_kb * 1024);
     cli::kv_time("TOTAL Pipeline", st.elapsed_total_s);
 
     cli::blank();
