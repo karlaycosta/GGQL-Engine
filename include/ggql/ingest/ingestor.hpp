@@ -201,6 +201,13 @@ class GfaIngestorMmapParallel {
     // cache (auditoria/UI), não usado pelo pipeline de ingestão.
     [[nodiscard]] std::optional<CachedFlags> read_cached_flags(const std::string& dir) const;
 
+    // Lê path_count do manifest existente. Persistido desde v1+; presente em
+    // qualquer cache válido. Retorna nullopt se manifest ausente/corrompido.
+    // Uso interno: try_cache_{fast,hash} pulam a Pass2 paths-only quando
+    // path_count == 0 (GFA sem W/P-lines — gBWT não aplicável, mesmo que
+    // o caller tenha pedido build_gbwt=true).
+    [[nodiscard]] std::optional<uint64_t> read_cached_path_count(const std::string& dir) const;
+
     // Ingere um arquivo GFA e constrói os índices solicitados.
     //
     // Parâmetros:

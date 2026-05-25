@@ -952,6 +952,31 @@ GfaIngestorMmapParallel::read_cached_flags(const std::string& dir) const {
     return f;
 }
 
+// Lê só path_count do manifest. Existe desde v1+. Usado em try_cache_*
+// para distinguir "GFA sem paths" de "paths não foram indexados".
+std::optional<uint64_t>
+GfaIngestorMmapParallel::read_cached_path_count(const std::string& dir) const {
+    namespace fs = std::filesystem;
+    if (!fs::exists(dir + "/manifest.txt")) {
+        return std::nullopt;
+    }
+    std::ifstream in(dir + "/manifest.txt");
+    if (!in) {
+        return std::nullopt;
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+        std::string_view lv{line};
+        if (lv.starts_with("path_count=")) {
+            uint64_t v = 0;
+            const auto sv = lv.substr(11);
+            std::from_chars(sv.data(), sv.data() + sv.size(), v);
+            return v;
+        }
+    }
+    return std::nullopt;
+}
+
 // Regrava manifest mantendo todas as linhas, exceto as de flags/profile/
 // indexed_at que são substituídas pelos novos valores. Preserva ordem das
 // linhas existentes; se algum campo de flag não estava no manifest (v3),
@@ -1410,9 +1435,14 @@ std::optional<IngestStatsParallel> GfaIngestorMmapParallel::try_cache_fast(
     const bool meta_ok = !save_metadata || std::filesystem::exists(cache_dir + "/metadata.bin");
     const bool fm_ok = !build_fm_index || std::filesystem::exists(cache_dir + "/fm_index.bin");
     // gbwt_ok aceita o novo path_stores.bin OU o legacy gbwts.bin (migrado
-    // on-the-fly em load()).
+    // on-the-fly em load()). Também considera "cache válido" quando o GFA
+    // foi indexado e descobriu-se que não tem W/P-lines (path_count==0 no
+    // manifest) — nesse caso completar com gBWT seria no-op (Pass2 vazia).
+    const auto cached_paths = read_cached_path_count(cache_dir);
+    const bool no_paths_in_gfa = cached_paths.has_value() && *cached_paths == 0;
     const bool gbwt_ok = !build_gbwt || std::filesystem::exists(cache_dir + "/path_stores.bin") ||
-                         std::filesystem::exists(cache_dir + "/gbwts.bin");
+                         std::filesystem::exists(cache_dir + "/gbwts.bin") ||
+                         no_paths_in_gfa;
     const bool snarls_ok = !build_snarls || std::filesystem::exists(cache_dir + "/snarls.bin");
 
     if (meta_ok && fm_ok && gbwt_ok && snarls_ok) {
@@ -1465,8 +1495,13 @@ std::optional<IngestStatsParallel> GfaIngestorMmapParallel::try_cache_hash(
     }
 
     const bool meta_ok = !save_metadata || std::filesystem::exists(cache_dir + "/metadata.bin");
+    // Mesma lógica de try_cache_fast: GFA sem paths (path_count==0 no manifest)
+    // dispensa gBWT mesmo com build_gbwt=true — evita Pass2 paths-only vazia.
+    const auto cached_paths = read_cached_path_count(cache_dir);
+    const bool no_paths_in_gfa = cached_paths.has_value() && *cached_paths == 0;
     const bool gbwt_ok = !build_gbwt || std::filesystem::exists(cache_dir + "/path_stores.bin") ||
-                         std::filesystem::exists(cache_dir + "/gbwts.bin");
+                         std::filesystem::exists(cache_dir + "/gbwts.bin") ||
+                         no_paths_in_gfa;
     const bool snarls_ok = !build_snarls || std::filesystem::exists(cache_dir + "/snarls.bin");
 
     if (meta_ok && gbwt_ok && snarls_ok) {
