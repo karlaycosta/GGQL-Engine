@@ -46,6 +46,8 @@ GfaIngestorMmapParallel::collect_keys_and_links_parallel(int num_threads, bool c
     if (collect_links_for_uf) {
         result.thread_pairs.resize(num_threads);
     }
+    // Contagem per-thread de W/P-lines (merge ao fim, evita atomic no hot loop).
+    std::vector<uint64_t> thread_paths(static_cast<size_t>(num_threads), 0);
 
     const size_t chunk_size = total_size / static_cast<size_t>(num_threads);
 
@@ -75,6 +77,7 @@ GfaIngestorMmapParallel::collect_keys_and_links_parallel(int num_threads, bool c
         std::array<std::string_view, 8> tokens;
         size_t local_bytes = 0;
         const char* last_p = p;
+        uint64_t local_paths = 0;
 
         while (p < chunk_end) {
             char first = *p;
@@ -100,6 +103,13 @@ GfaIngestorMmapParallel::collect_keys_and_links_parallel(int num_threads, bool c
                 if (ntok >= 4 && !tokens[0].empty() && !tokens[2].empty()) {
                     result.thread_pairs[tid].push_back({tokens[0], tokens[2]});
                 }
+            } else if (first == 'W' || first == 'P') {
+                // Conta a W/P-line e pula corpo (sem coletar — Pass2 paths-only
+                // ainda é necessário pra extrair node sequences quando build_gbwt).
+                if (p + 1 < chunk_end && *(p + 1) == '\t') {
+                    ++local_paths;
+                }
+                p = skip_line(p, chunk_end);
             } else {
                 p = skip_line(p, chunk_end);
             }
@@ -114,6 +124,11 @@ GfaIngestorMmapParallel::collect_keys_and_links_parallel(int num_threads, bool c
         if (local_bytes > 0) {
             tracker.add_progress(local_bytes);
         }
+        thread_paths[tid] = local_paths;
+    }
+
+    for (uint64_t c : thread_paths) {
+        result.path_count += c;
     }
 
     tracker.finish();
@@ -1278,6 +1293,24 @@ GfaIngestorMmapParallel::load_index(const std::string& dir, std::optional<uint64
 // Quando o cache em disco cobre tudo exceto snarls.bin, derivamos snarls
 // diretamente da topology já carregada (snarl_decomposition::find_all_snarls opera
 // apenas na CSR — não precisa do GFA original).
+void GfaIngestorMmapParallel::sync_manifest_with_disk(const std::string& dir) const {
+    namespace fs = std::filesystem;
+    if (!fs::exists(dir + "/manifest.txt")) {
+        return;
+    }
+    // build_topology=true por construção: o cache só é considerado válido
+    // quando topology.bin existe (load_index reconstrói do disco).
+    const CachedFlags actual{
+        /*save_metadata*/  fs::exists(dir + "/metadata.bin"),
+        /*build_fm_index*/ fs::exists(dir + "/fm_index.bin"),
+        /*build_topology*/ true,
+        /*build_gbwt*/     fs::exists(dir + "/path_stores.bin") ||
+                           fs::exists(dir + "/gbwts.bin"),
+        /*build_snarls*/   fs::exists(dir + "/snarls.bin"),
+    };
+    rewrite_manifest_flags(dir, actual);
+}
+
 IngestStatsParallel GfaIngestorMmapParallel::complete_with_snarls(
     const std::string& cache_dir, IngestStatsParallel stats, bool verbose,
     std::chrono::high_resolution_clock::time_point t_start) {
@@ -1312,6 +1345,11 @@ IngestStatsParallel GfaIngestorMmapParallel::complete_with_snarls(
                    "  [snarls] AVISO: falha ao computar snarls — FIND BUBBLE indisponível: {}\n",
                    e.what());
     }
+    // Manifest sincronizado com estado real do disco: upgrade incremental
+    // (perfil novo > perfil do cache) deixa manifest mentiroso se não
+    // regravarmos aqui, e isso confunde prune_cache_for_downgrade em sessões
+    // futuras (vê cached==requested, não apaga arquivos órfãos).
+    sync_manifest_with_disk(cache_dir);
     stats.elapsed_total_s = sec(clock::now() - t_start).count();
     return stats;
 }
@@ -1367,6 +1405,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::complet
         if (build_snarls && !std::filesystem::exists(cache_dir + "/snarls.bin")) {
             stats = complete_with_snarls(cache_dir, std::move(stats), verbose, t_start);
         }
+        sync_manifest_with_disk(cache_dir);
         stats.elapsed_total_s = sec(clock::now() - t_start).count();
         return stats;
     }
@@ -1419,6 +1458,7 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::complet
         stats = complete_with_snarls(cache_dir, std::move(stats), verbose, t_start);
     }
 
+    sync_manifest_with_disk(cache_dir);
     stats.elapsed_total_s = sec(clock::now() - t_start).count();
     return stats;
 }
@@ -1479,9 +1519,9 @@ std::optional<IngestStatsParallel> GfaIngestorMmapParallel::try_cache_fast(
 }
 
 std::optional<IngestStatsParallel> GfaIngestorMmapParallel::try_cache_hash(
-    const std::string& cache_dir, bool save_metadata, bool build_gbwt, bool build_snarls,
-    bool verbose, uint64_t& out_hash, bool& out_skip, bool& out_complete_snarls_only,
-    bool& out_complete_gbwt_only) {
+    const std::string& cache_dir, bool save_metadata, bool build_fm_index, bool build_gbwt,
+    bool build_snarls, bool verbose, uint64_t& out_hash, bool& out_skip,
+    bool& out_complete_snarls_only, bool& out_complete_gbwt_only) {
     out_hash = XXH64(res_.mmap->data, res_.mmap->size, 0);
     // NÃO reseta mmap aqui: caller pode precisar para Pass2 paths-only.
     // O reset original (que existia para liberar RAM) acontecerá quando
@@ -1495,6 +1535,7 @@ std::optional<IngestStatsParallel> GfaIngestorMmapParallel::try_cache_hash(
     }
 
     const bool meta_ok = !save_metadata || std::filesystem::exists(cache_dir + "/metadata.bin");
+    const bool fm_ok = !build_fm_index || std::filesystem::exists(cache_dir + "/fm_index.bin");
     // Mesma lógica de try_cache_fast: GFA sem paths (path_count==0 no manifest)
     // dispensa gBWT mesmo com build_gbwt=true — evita Pass2 paths-only vazia.
     const auto cached_paths = read_cached_path_count(cache_dir);
@@ -1504,14 +1545,14 @@ std::optional<IngestStatsParallel> GfaIngestorMmapParallel::try_cache_hash(
                          no_paths_in_gfa;
     const bool snarls_ok = !build_snarls || std::filesystem::exists(cache_dir + "/snarls.bin");
 
-    if (meta_ok && gbwt_ok && snarls_ok) {
+    if (meta_ok && fm_ok && gbwt_ok && snarls_ok) {
         res_.mmap.reset(); // hit completo, mmap não é mais necessário
         if (verbose) {
             cli::step_ok_end("cache hit (hash) — carregado");
         }
         return *res;
     }
-    if (meta_ok && gbwt_ok && !snarls_ok && res_.topology) {
+    if (meta_ok && fm_ok && gbwt_ok && !snarls_ok && res_.topology) {
         res_.mmap.reset(); // Fase 1 não usa mmap
         out_complete_snarls_only = true;
         if (verbose) {
@@ -1519,7 +1560,7 @@ std::optional<IngestStatsParallel> GfaIngestorMmapParallel::try_cache_hash(
         }
         return *res;
     }
-    if (meta_ok && !gbwt_ok && res_.topology && res_.mphf) {
+    if (meta_ok && fm_ok && !gbwt_ok && res_.topology && res_.mphf) {
         // FASE 2: mmap permanece aberto para Pass2 paths-only.
         out_complete_gbwt_only = true;
         if (verbose) {
@@ -2025,6 +2066,17 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
     // do bench_gbwt — escala HPRC, snarls/save somam dezenas de segundos.
     stats.elapsed_total_s = sec(clock::now() - t_start).count();
 
+    // skip_pass1=true: rodamos run_full_ingest só pra completar artefatos que
+    // o cache hit parcial detectou ausentes (ex: FM-Index quando perfil foi
+    // promovido de comparative→pangenome). O bloco que chama write_manifest_atomic
+    // (linhas 1993-2046) está sob if(!skip_pass1), então o manifest não foi
+    // regravado e continuaria mentindo sobre as flags. sync_manifest_with_disk
+    // deriva flags do disco e regrava (mantendo num_nodes/link_count/path_count
+    // preservados via rewrite_manifest_flags, que só toca flags+profile+indexed_at).
+    if (skip_pass1) {
+        sync_manifest_with_disk(cache_dir);
+    }
+
     if (verbose) {
         cli::ok("Ingestão concluída", ggql::format_seconds(stats.elapsed_total_s));
         cli::note(fmt::format(
@@ -2109,6 +2161,12 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
                                      complete_snarls_only, complete_gbwt_only)) {
         if (complete_snarls_only) {
             cached = complete_with_snarls(cache_dir, *cached, verbose, t_start);
+        } else {
+            // Cache hit completo — sem upgrade incremental, sync_manifest_with_disk
+            // não seria chamado naturalmente. Regrava aqui se manifest divergir
+            // do disco (cenário comum: cache antigo + alteração manual ou bug
+            // de sessão pretérita deixou flags inconsistentes).
+            sync_manifest_with_disk(cache_dir);
         }
         return *cached;
     }
@@ -2136,10 +2194,13 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
     // ── verificação por hash XXH64 (só se mtime não casou) ───────────────────
     if (!skip_pass1) {
         if (auto cached =
-                try_cache_hash(cache_dir, save_metadata, build_gbwt, build_snarls, verbose,
-                               gfa_hash, skip_pass1, complete_snarls_only, complete_gbwt_only)) {
+                try_cache_hash(cache_dir, save_metadata, build_fm_index, build_gbwt, build_snarls,
+                               verbose, gfa_hash, skip_pass1, complete_snarls_only,
+                               complete_gbwt_only)) {
             if (complete_snarls_only) {
                 cached = complete_with_snarls(cache_dir, *cached, verbose, t_start);
+            } else {
+                sync_manifest_with_disk(cache_dir);
             }
             return *cached;
         }

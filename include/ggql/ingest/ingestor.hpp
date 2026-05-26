@@ -378,6 +378,9 @@ class GfaIngestorMmapParallel {
             std::string_view from, to;
         };
         std::vector<std::vector<LinkNamePair>> thread_pairs;
+        // Contagem de W/P-lines (Pass1 não coleta paths, só conta) — usado para
+        // sugestão de perfil e auto-decisão de pular Pass2 paths-only.
+        uint64_t path_count = 0;
     };
 
     [[nodiscard]] Pass1Result collect_keys_and_links_parallel(int num_threads,
@@ -496,6 +499,12 @@ class GfaIngestorMmapParallel {
     // perfil (recomputado de new_flags). Atualiza indexed_at para o agora.
     void rewrite_manifest_flags(const std::string& dir, CachedFlags new_flags) const;
 
+    // Deriva CachedFlags do estado atual dos arquivos em disco e regrava o
+    // manifest. Usado após upgrades incrementais (complete_with_gbwt /
+    // complete_with_snarls) que adicionam estruturas sem passar pelo
+    // write_manifest_atomic do cold path.
+    void sync_manifest_with_disk(const std::string& dir) const;
+
     // Tenta carregar o índice do cache.
     //   expected_hash    : hash XXH64 calculado pelo chamador (nullopt = não verificar).
     //   file_sz          : tamanho atual do GFA (0 = ignorar pré-filtro).
@@ -546,9 +555,9 @@ class GfaIngestorMmapParallel {
     // paths-only.
     [[nodiscard]] std::optional<IngestStatsParallel>
     try_cache_hash(const std::string& cache_dir,
-                   bool save_metadata, bool build_gbwt, bool build_snarls,
-                   bool verbose, uint64_t& out_hash, bool& out_skip,
-                   bool& out_complete_snarls_only,
+                   bool save_metadata, bool build_fm_index, bool build_gbwt,
+                   bool build_snarls, bool verbose, uint64_t& out_hash,
+                   bool& out_skip, bool& out_complete_snarls_only,
                    bool& out_complete_gbwt_only);
 
     // Ingestão completa (Pass1 + MPHF + Union-Find + Pass2 + topologia + save).

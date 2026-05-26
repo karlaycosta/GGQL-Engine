@@ -7,7 +7,9 @@
 // Documentação completa: docs/ingest_profiles.md.
 
 #include <cstdint>
+#include <expected>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility> // std::unreachable
 
@@ -59,6 +61,41 @@ parse_profile(std::string_view s) noexcept {
     if (s == "assembly"     || s == "asm")  { return IngestProfile::Assembly; }
     if (s == "comparative"  || s == "comp") { return IngestProfile::Comparative; }
     return std::nullopt;
+}
+
+// Sumário estrutural do GFA usado para inferir o perfil de ingestão.
+// Pode ser preenchido por uma varredura leve (survey_gfa_light) ou
+// reaproveitado de um Pass1 completo já executado no ingestor.
+struct IngestSurvey {
+    uint64_t segment_count   = 0;
+    uint64_t link_count      = 0;
+    uint64_t path_count      = 0;  // W-lines + P-lines
+    uint64_t file_size_bytes = 0;
+    double   elapsed_s       = 0.0;
+};
+
+// Varredura leve do GFA: mmap + paralelismo OpenMP + apenas contagem
+// de S/L/W/P. Não aloca keys nem links; não constrói MPHF nem UF.
+// Custo dominante: leitura sequencial de file_size bytes do mmap (cold
+// cache) ou ~constante per-byte (warm cache). Pra GRCh38-464 (~3.3 GB):
+// cold ~1.5 s em NVMe rápido, warm ~0.5 s.
+//
+// Retorna IngestSurvey ou string de erro (arquivo não encontrado, mmap
+// falhou). Standalone — não precisa de instância de GfaIngestorMmapParallel.
+[[nodiscard]] std::expected<IngestSurvey, std::string>
+survey_gfa_light(const std::string& filepath, int num_threads = 4);
+
+// Heurística baseada em densidade de links e presença de paths.
+// Threshold 1.5 (links/segs) escolhido empiricamente — pangenomas HPRC
+// típicos ficam em ~1.4–1.5; assembly graphs ramificados sobem rapidamente.
+[[nodiscard]] inline IngestProfile suggest_profile(const IngestSurvey& s) noexcept {
+    const double density = (s.segment_count > 0)
+        ? static_cast<double>(s.link_count) / static_cast<double>(s.segment_count)
+        : 0.0;
+    if (s.path_count == 0) {
+        return density > 1.5 ? IngestProfile::Assembly : IngestProfile::Metagenomics;
+    }
+    return density > 1.5 ? IngestProfile::Pangenome : IngestProfile::Comparative;
 }
 
 } // namespace ggql

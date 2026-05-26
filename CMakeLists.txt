@@ -238,6 +238,7 @@ target_link_libraries(ggql_storage PUBLIC ggql_core sdsl gbwt libsais tbb gomp p
 # ── Camada 2 — ggql_ingest (parser GFA; depende de Storage) ──────────────────
 add_library(ggql_ingest STATIC
     src/ingest/ingestor.cpp
+    src/ingest/survey.cpp
 )
 target_compile_options(ggql_ingest PRIVATE
     -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
@@ -275,6 +276,15 @@ target_compile_options(bench_gbwt PRIVATE
 )
 target_link_options(bench_gbwt PRIVATE -flto=auto)
 target_link_libraries(bench_gbwt PRIVATE ggql_ingest ${GGQL_BIN_ALLOCATOR_LIB})
+
+# bench_suggest_profile — protótipo: compara baseline vs light survey
+# vs prepare+reuse para decidir se o reuse cross-call vale a pena.
+add_executable(bench_suggest_profile src/bench_suggest_profile.cpp)
+target_compile_options(bench_suggest_profile PRIVATE
+    -O3 -flto=auto -march=native -fopenmp -fno-strict-aliasing
+)
+target_link_options(bench_suggest_profile PRIVATE -flto=auto)
+target_link_libraries(bench_suggest_profile PRIVATE ggql_ingest ${GGQL_BIN_ALLOCATOR_LIB})
 
 # bench_snarl — microbenchmark isolado do snarl_decomposition::find_all_snarls.
 add_executable(bench_snarl tools/bench_snarl.cpp)
