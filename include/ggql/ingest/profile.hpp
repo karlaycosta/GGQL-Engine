@@ -67,11 +67,14 @@ parse_profile(std::string_view s) noexcept {
 // Pode ser preenchido por uma varredura leve (survey_gfa_light) ou
 // reaproveitado de um Pass1 completo já executado no ingestor.
 struct IngestSurvey {
-    uint64_t segment_count   = 0;
-    uint64_t link_count      = 0;
-    uint64_t path_count      = 0;  // W-lines + P-lines
-    uint64_t file_size_bytes = 0;
-    double   elapsed_s       = 0.0;
+    uint64_t segment_count        = 0;
+    uint64_t link_count           = 0;
+    uint64_t path_count           = 0;  // W-lines + P-lines (agregado)
+    uint64_t total_sequence_bytes = 0;  // soma do campo seq das S-lines (≠ file_size)
+    uint64_t file_size_bytes      = 0;
+    double   avg_path_length      = 0.0;  // média de nós por path (0 se path_count == 0)
+    double   elapsed_s            = 0.0;
+    bool     has_w                = false; // ao menos 1 W-line vista
 };
 
 // Varredura leve do GFA: mmap + paralelismo OpenMP + apenas contagem

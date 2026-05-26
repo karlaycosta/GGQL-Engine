@@ -3,6 +3,11 @@
 #include "ggql/ingest/ingestor.hpp"
 #include "ggql/ingest/metadata_store.hpp"
 #include "ggql/ingest/profile.hpp"
+
+#include <cmath>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include "ggql/query/entity_columns.hpp"
 #include "ggql/query/grammar.hpp"
 #include "ggql/query/query_context.hpp"
@@ -459,6 +464,145 @@ const char* ggql_profile_name(GgqlIngestProfile p) {
     case GGQL_PROFILE_COMPARATIVE:  return "comparative";
     }
     return nullptr;
+}
+
+// ── Sugestão de perfil via varredura leve (2026-05-25; estendida 2026-05-26) ──
+int32_t ggql_survey_gfa(const char* filepath, int num_threads, GgqlSurvey* out) {
+    if (!filepath || !out) { return -1; }
+    if (out->struct_size < sizeof(GgqlSurvey)) { return -2; }
+
+    try {
+        auto res = ggql::survey_gfa_light(filepath, num_threads);
+        if (!res) {
+            last_error_message = res.error();
+            out->error_message = last_error_message.c_str();
+            return 1;
+        }
+        const auto suggested = ggql::suggest_profile(*res);
+        out->segment_count        = res->segment_count;
+        out->link_count           = res->link_count;
+        out->path_count           = res->path_count;
+        out->has_w                = res->has_w;
+        out->total_sequence_bytes = res->total_sequence_bytes;
+        out->avg_path_length      = res->avg_path_length;
+        out->file_size_bytes      = res->file_size_bytes;
+        out->elapsed_s            = res->elapsed_s;
+        out->suggested_profile    = static_cast<uint8_t>(suggested);
+        out->error_message        = nullptr;
+        return 0;
+    } catch (const std::exception& e) {
+        last_error_message = std::string("C++ Exception: ") + e.what();
+        out->error_message = last_error_message.c_str();
+        return 1;
+    } catch (...) {
+        last_error_message = "Unknown C++ exception in ggql_survey_gfa";
+        out->error_message = last_error_message.c_str();
+        return 1;
+    }
+}
+
+// ── Estimativa de recursos por perfil (C11, 2026-05-26) ───────────────────────
+// Constantes calibradas contra GRCh38-464 cold (146,6 s · 36,8 GB · 14,5 GB)
+// com 8 threads. Confidence_pct=30 enquanto for ponto único — alvo 70+ após
+// 5 datasets adicionais (HPRC subsets + bactéria + assembly).
+namespace {
+thread_local std::string g_estimate_notes;
+
+struct EstimatePoint {
+    double ram_gb;
+    double disk_gb;
+    double time_s;
+};
+
+EstimatePoint compute_point(const GgqlSurvey& sv, int threads,
+                            bool fm, bool gbwt, bool snarls) {
+    const double file_gb = sv.file_size_bytes / 1e9;
+    const double seq_gb  = sv.total_sequence_bytes / 1e9;
+    const double segs_m  = sv.segment_count / 1e6;
+    const double links_m = sv.link_count / 1e6;
+
+    // TEMPO (s)
+    double t = 4.0 * file_gb;                          // pass1+pass2 (~250 MB/s/thread × 8)
+    if (fm)                            { t += seq_gb / 0.025; }   // FM-Index ~25 MB/s effective
+    if (snarls)                        { t += segs_m * 1.0; }     // ~1 µs/seg
+    if (gbwt && sv.path_count > 0) {
+        const double total_path_nodes =
+            sv.avg_path_length * static_cast<double>(sv.path_count);
+        t += total_path_nodes / 1e5;                  // ~10 µs/symbol gBWT build
+    }
+    // Escala sublinear em threads (FM-Index domina, libsais64_omp ~thread^-0.7).
+    if (threads > 0 && threads != 8) {
+        const double factor = std::pow(threads / 8.0, -0.7);
+        t *= factor;
+    }
+
+    // RAM PEAK (GB)
+    double ram = 1.0 + file_gb;                        // base + mmap
+    if (fm)  { ram += 10.0 * seq_gb; }                 // libsais64 SA worst-case
+    ram += file_gb;                                    // metadata_seqs em RAM
+
+    // DISCO (GB) — sempre tem metadata (save_metadata implícito true no FFI)
+    double d = file_gb;                                // metadata_seqs ≈ file
+    if (fm)     { d += 3.2 * seq_gb; }                 // FM-Index ~25 bits/byte
+    if (snarls) { d += segs_m * 0.013; }               // snarls ~40 B
+    if (gbwt && sv.path_count > 0) {
+        const double total_path_nodes =
+            sv.avg_path_length * static_cast<double>(sv.path_count);
+        d += total_path_nodes * 4 / 1e9;               // path_stores ~4 B/symbol
+    }
+    d += links_m * 0.012;                              // E_fwd+E_bwd: 12 B/link
+    d += segs_m  * 0.020;                              // mphf+remap+length: ~20 MB/M segs
+
+    return {ram, d, t};
+}
+} // anon
+
+int32_t ggql_estimate_ingest(const GgqlSurvey* survey, int num_threads,
+                             bool build_fm_index, bool build_gbwt, bool build_snarls,
+                             GgqlIngestEstimate* out) {
+    if (!survey || !out) { return -1; }
+    if (survey->struct_size < sizeof(GgqlSurvey)) { return -2; }
+    if (out->struct_size    < sizeof(GgqlIngestEstimate)) { return -2; }
+
+    if (num_threads <= 0) {
+#ifdef _OPENMP
+        num_threads = omp_get_max_threads();
+#else
+        num_threads = 8;
+#endif
+    }
+
+    const auto p = compute_point(*survey, num_threads,
+                                 build_fm_index, build_gbwt, build_snarls);
+
+    // Bandas ±30% RAM, ±15% disco, ±40%/+60% tempo (calibração preliminar).
+    auto gb_to_b = [](double gb) { return static_cast<uint64_t>(gb * 1e9); };
+    out->ram_peak_bytes_lo    = gb_to_b(p.ram_gb * 0.70);
+    out->ram_peak_bytes_point = gb_to_b(p.ram_gb);
+    out->ram_peak_bytes_hi    = gb_to_b(p.ram_gb * 1.30);
+    out->idx_disk_bytes_lo    = gb_to_b(p.disk_gb * 0.85);
+    out->idx_disk_bytes_point = gb_to_b(p.disk_gb);
+    out->idx_disk_bytes_hi    = gb_to_b(p.disk_gb * 1.15);
+    out->elapsed_s_lo         = p.time_s * 0.60;
+    out->elapsed_s_point      = p.time_s;
+    out->elapsed_s_hi         = p.time_s * 1.60;
+
+    out->confidence_pct = 30;
+    out->methodology    = 1; // survey-based
+
+    // Note adaptativo: alerta se gBWT pedido sem paths ou GFA muito pequeno.
+    if (build_gbwt && survey->path_count == 0) {
+        g_estimate_notes = "GFA sem W/P-lines — gBWT será no-op; "
+                           "considere usar metagenomics";
+        out->notes = g_estimate_notes.c_str();
+    } else if (survey->file_size_bytes < 10 * 1024 * 1024) {
+        g_estimate_notes = "GFA pequeno (<10 MB) — estimativas com baixa "
+                           "precisão; tempo dominado por overhead fixo";
+        out->notes = g_estimate_notes.c_str();
+    } else {
+        out->notes = nullptr;
+    }
+    return 0;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

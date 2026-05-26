@@ -381,6 +381,13 @@ class GfaIngestorMmapParallel {
         // Contagem de W/P-lines (Pass1 não coleta paths, só conta) — usado para
         // sugestão de perfil e auto-decisão de pular Pass2 paths-only.
         uint64_t path_count = 0;
+        // Métricas adicionais para sugestão de perfil + estimate (C11 contract):
+        // total_sequence_bytes = soma de tokens[1].size() das S-lines (≠ file_size)
+        // total_path_nodes     = soma do nº de segmentos em todos os W/P-lines
+        // has_w                = true se ao menos uma W-line foi vista
+        uint64_t total_sequence_bytes = 0;
+        uint64_t total_path_nodes     = 0;
+        bool     has_w                = false;
     };
 
     [[nodiscard]] Pass1Result collect_keys_and_links_parallel(int num_threads,

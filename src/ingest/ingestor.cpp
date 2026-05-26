@@ -46,8 +46,11 @@ GfaIngestorMmapParallel::collect_keys_and_links_parallel(int num_threads, bool c
     if (collect_links_for_uf) {
         result.thread_pairs.resize(num_threads);
     }
-    // Contagem per-thread de W/P-lines (merge ao fim, evita atomic no hot loop).
+    // Contadores per-thread (merge ao fim, evita atomic no hot loop).
     std::vector<uint64_t> thread_paths(static_cast<size_t>(num_threads), 0);
+    std::vector<uint64_t> thread_seq_bytes(static_cast<size_t>(num_threads), 0);
+    std::vector<uint64_t> thread_path_nodes(static_cast<size_t>(num_threads), 0);
+    std::vector<uint8_t>  thread_has_w(static_cast<size_t>(num_threads), 0);
 
     const size_t chunk_size = total_size / static_cast<size_t>(num_threads);
 
@@ -78,6 +81,9 @@ GfaIngestorMmapParallel::collect_keys_and_links_parallel(int num_threads, bool c
         size_t local_bytes = 0;
         const char* last_p = p;
         uint64_t local_paths = 0;
+        uint64_t local_seq_bytes = 0;
+        uint64_t local_path_nodes = 0;
+        bool local_has_w = false;
 
         while (p < chunk_end) {
             char first = *p;
@@ -92,6 +98,9 @@ GfaIngestorMmapParallel::collect_keys_and_links_parallel(int num_threads, bool c
                 if (ntok >= 1 && !tokens[0].empty()) {
                     thread_keys[tid].push_back(tokens[0]);
                 }
+                if (ntok >= 2) {
+                    local_seq_bytes += tokens[1].size();
+                }
             } else if (collect_links_for_uf && first == 'L') {
                 ++p;
                 if (p >= chunk_end || *p != '\t') {
@@ -104,10 +113,30 @@ GfaIngestorMmapParallel::collect_keys_and_links_parallel(int num_threads, bool c
                     result.thread_pairs[tid].push_back({tokens[0], tokens[2]});
                 }
             } else if (first == 'W' || first == 'P') {
-                // Conta a W/P-line e pula corpo (sem coletar — Pass2 paths-only
-                // ainda é necessário pra extrair node sequences quando build_gbwt).
+                // Conta a W/P-line + nodes do path (separadores), pula corpo.
+                // Pass2 paths-only ainda é necessário pra extrair sequences
+                // dos paths quando build_gbwt — aqui só contamos pra survey.
                 if (p + 1 < chunk_end && *(p + 1) == '\t') {
                     ++local_paths;
+                    if (first == 'W') { local_has_w = true; }
+                    // Walk linha contando separadores de path:
+                    //   P\t<name>\t<seg_list>  → seg_list = "id1+,id2-,..." → count(',')+1
+                    //   W\t<sample>\t<haplo>\t<contig>\t<start>\t<end>\t<path> → "><id..." → count('>'+'<')
+                    const char* q = p;
+                    const char* line_end = q;
+                    while (line_end < chunk_end && *line_end != '\n') { ++line_end; }
+                    uint64_t nodes = 0;
+                    if (first == 'P') {
+                        for (const char* c = q; c < line_end; ++c) {
+                            if (*c == ',') { ++nodes; }
+                        }
+                        if (line_end > q) { ++nodes; }  // último segmento sem vírgula
+                    } else { // 'W'
+                        for (const char* c = q; c < line_end; ++c) {
+                            if (*c == '>' || *c == '<') { ++nodes; }
+                        }
+                    }
+                    local_path_nodes += nodes;
                 }
                 p = skip_line(p, chunk_end);
             } else {
@@ -124,12 +153,16 @@ GfaIngestorMmapParallel::collect_keys_and_links_parallel(int num_threads, bool c
         if (local_bytes > 0) {
             tracker.add_progress(local_bytes);
         }
-        thread_paths[tid] = local_paths;
+        thread_paths[tid]      = local_paths;
+        thread_seq_bytes[tid]  = local_seq_bytes;
+        thread_path_nodes[tid] = local_path_nodes;
+        thread_has_w[tid]      = local_has_w ? 1 : 0;
     }
 
-    for (uint64_t c : thread_paths) {
-        result.path_count += c;
-    }
+    for (uint64_t c : thread_paths)      { result.path_count           += c; }
+    for (uint64_t c : thread_seq_bytes)  { result.total_sequence_bytes += c; }
+    for (uint64_t c : thread_path_nodes) { result.total_path_nodes     += c; }
+    for (uint8_t  c : thread_has_w)      { if (c) { result.has_w = true; } }
 
     tracker.finish();
 

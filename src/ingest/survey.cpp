@@ -57,6 +57,9 @@ survey_gfa_light(const std::string& filepath, int num_threads) {
     std::vector<uint64_t> t_segs(static_cast<size_t>(num_threads), 0);
     std::vector<uint64_t> t_links(static_cast<size_t>(num_threads), 0);
     std::vector<uint64_t> t_paths(static_cast<size_t>(num_threads), 0);
+    std::vector<uint64_t> t_seq_bytes(static_cast<size_t>(num_threads), 0);
+    std::vector<uint64_t> t_path_nodes(static_cast<size_t>(num_threads), 0);
+    std::vector<uint8_t>  t_has_w(static_cast<size_t>(num_threads), 0);
 
     const size_t chunk_size = total_size / static_cast<size_t>(num_threads);
 
@@ -79,32 +82,77 @@ survey_gfa_light(const std::string& filepath, int num_threads) {
         }
 
         uint64_t s = 0, l = 0, p_cnt = 0;
+        uint64_t seq_bytes = 0, path_nodes = 0;
+        bool has_w = false;
         const char* p = chunk_start;
         while (p < chunk_end) {
             const char first = *p;
-            // Apenas linhas que começam com S/L/W/P seguidas de TAB contam.
-            // Comentários, headers (H), pares (J), etc., são puladas.
+            // Comentários, headers (H), etc. são puladas (default).
             if ((first == 'S' || first == 'L' || first == 'W' || first == 'P')
                 && p + 1 < chunk_end && *(p + 1) == '\t') {
+                // Encontra fim da linha uma vez (reusado em S/W/P).
+                const char* line_end = p;
+                while (line_end < chunk_end && *line_end != '\n') { ++line_end; }
                 switch (first) {
-                    case 'S': ++s; break;
+                    case 'S': {
+                        ++s;
+                        // S\t<name>\t<seq>\t[tags] — pular ao 2º TAB, contar até o 3º (ou fim).
+                        const char* c = p + 2; // pós "S\t"
+                        while (c < line_end && *c != '\t') { ++c; } // pula <name>
+                        if (c < line_end) {
+                            ++c; // skip TAB
+                            const char* seq_start = c;
+                            while (c < line_end && *c != '\t') { ++c; }
+                            seq_bytes += static_cast<uint64_t>(c - seq_start);
+                        }
+                        break;
+                    }
                     case 'L': ++l; break;
                     case 'W':
-                    case 'P': ++p_cnt; break;
+                    case 'P': {
+                        ++p_cnt;
+                        if (first == 'W') { has_w = true; }
+                        // Conta nós (separadores) — mesma lógica do Pass1.
+                        uint64_t nodes = 0;
+                        if (first == 'P') {
+                            for (const char* c = p; c < line_end; ++c) {
+                                if (*c == ',') { ++nodes; }
+                            }
+                            if (line_end > p) { ++nodes; }
+                        } else {
+                            for (const char* c = p; c < line_end; ++c) {
+                                if (*c == '>' || *c == '<') { ++nodes; }
+                            }
+                        }
+                        path_nodes += nodes;
+                        break;
+                    }
                 }
+                p = (line_end < chunk_end) ? (line_end + 1) : line_end;
+            } else {
+                p = skip_line_local(p, chunk_end);
             }
-            p = skip_line_local(p, chunk_end);
         }
-        t_segs[tid] = s;
-        t_links[tid] = l;
-        t_paths[tid] = p_cnt;
+        t_segs[tid]       = s;
+        t_links[tid]      = l;
+        t_paths[tid]      = p_cnt;
+        t_seq_bytes[tid]  = seq_bytes;
+        t_path_nodes[tid] = path_nodes;
+        t_has_w[tid]      = has_w ? 1 : 0;
     }
 
     IngestSurvey out;
     out.file_size_bytes = total_size;
-    for (uint64_t v : t_segs)  { out.segment_count += v; }
-    for (uint64_t v : t_links) { out.link_count    += v; }
-    for (uint64_t v : t_paths) { out.path_count    += v; }
+    for (uint64_t v : t_segs)       { out.segment_count        += v; }
+    for (uint64_t v : t_links)      { out.link_count           += v; }
+    for (uint64_t v : t_paths)      { out.path_count           += v; }
+    for (uint64_t v : t_seq_bytes)  { out.total_sequence_bytes += v; }
+    uint64_t total_path_nodes = 0;
+    for (uint64_t v : t_path_nodes) { total_path_nodes         += v; }
+    for (uint8_t v : t_has_w)       { if (v) { out.has_w = true; } }
+    out.avg_path_length = (out.path_count > 0)
+        ? static_cast<double>(total_path_nodes) / static_cast<double>(out.path_count)
+        : 0.0;
     out.elapsed_s = sec(clock::now() - t0).count();
     return out;
 }

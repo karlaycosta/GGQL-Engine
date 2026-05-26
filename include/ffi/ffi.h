@@ -173,6 +173,99 @@ int32_t ggql_profile_from_name(const char* name, GgqlIngestProfile* out);
 // Retorna o nome canônico (aponta para string estática). NULL em enum inválido.
 const char* ggql_profile_name(GgqlIngestProfile p);
 
+// ── Sugestão de perfil via varredura leve (2026-05-25; estendida 2026-05-26) ──
+//
+// Permite a UI/CLI obter um perfil sugerido ANTES de chamar ingest, baseado
+// em contagens estruturais do GFA (S/L/W/P-lines + densidade). A varredura
+// é paralela, não aloca nada além dos counters, e é tipicamente sub-segundo
+// pra GFAs até dezenas de GB (limitada por largura de banda de RAM/disco).
+//
+// Custo: ~0,5 s pra GRCh38-464 (3,3 GB, 8 threads). Não toca em arquivos
+// de cache (.idx); operação read-only sobre o GFA.
+//
+// Heurística de `suggested_profile` (para tooltip do badge "Recomendado"):
+//   density = link_count / segment_count
+//   - path_count == 0 && density > 1.5  → Assembly      (sem paths, ramificado)
+//   - path_count == 0 && density ≤ 1.5  → Metagenomics  (sem paths, simples)
+//   - path_count >  0 && density > 1.5  → Pangenome     (paths + emaranhado)
+//   - path_count >  0 && density ≤ 1.5  → Comparative   (paths + simples)
+// Threshold 1.5: pangenomas HPRC ficam ~1,4–1,5; assembly graphs ramificados
+// passam disso. Calibrado empiricamente — pode evoluir com mais datasets.
+typedef struct {
+    size_t      struct_size;            // Caller seta = sizeof(GgqlSurvey).
+    uint64_t    segment_count;          // S-lines (nós).
+    uint64_t    link_count;             // L-lines (arestas).
+    uint64_t    path_count;             // W-lines + P-lines combinados.
+    bool        has_w;                  // C11/S2: true se ao menos 1 W-line foi vista.
+    uint8_t     _pad1[7];
+    uint64_t    total_sequence_bytes;   // C11/Q2: soma de seq das S-lines (≠ file_size).
+    double      avg_path_length;        // C11/Q2: média de nós por path (0 se path_count==0).
+    uint64_t    file_size_bytes;
+    double      elapsed_s;
+    uint8_t     suggested_profile;      // GgqlIngestProfile (cast pra/de int)
+    uint8_t     _pad2[7];
+    const char* error_message;          // NULL em sucesso; thread_local, válido
+                                        // até próxima chamada FFI nesta thread.
+} GgqlSurvey;
+
+// Executa survey + heurística. Função stateless — não precisa de handle.
+//
+// Retorno:
+//    0 — sucesso; out preenchido, error_message=NULL
+//    1 — survey falhou; out->error_message preenchido (thread_local)
+//   -1 — argumentos NULL (filepath ou out)
+//   -2 — out->struct_size insuficiente (recompile)
+int32_t ggql_survey_gfa(const char* filepath, int num_threads, GgqlSurvey* out);
+
+// ── Estimativa de recursos por perfil (C11, 2026-05-26) ──────────────────────
+//
+// Combina um GgqlSurvey (resultado de ggql_survey_gfa) com flags de profile
+// pra predizer RAM peak, espaço em disco do .idx, e tempo de ingest.
+// Custo: <1 ms (puro CPU). Chame N vezes (1 por combo de flags) reusando o
+// mesmo survey — caro foi o scan.
+//
+// Cada métrica vem com banda [lo, point, hi] — UI deve exibir como range
+// `~lo–hi` honesto. `confidence_pct` reflete qualidade da calibração:
+//   30  — preview (1 ponto medido; bands ±30% em torno do point)
+//   70+ — calibrado contra suite multi-ponto (target após 5+ datasets)
+typedef struct {
+    size_t   struct_size;
+
+    // Predições com banda lo/hi (em bytes / segundos)
+    uint64_t ram_peak_bytes_lo;
+    uint64_t ram_peak_bytes_point;
+    uint64_t ram_peak_bytes_hi;
+    uint64_t idx_disk_bytes_lo;
+    uint64_t idx_disk_bytes_point;
+    uint64_t idx_disk_bytes_hi;
+    double   elapsed_s_lo;
+    double   elapsed_s_point;
+    double   elapsed_s_hi;
+
+    // Métricas auxiliares
+    uint8_t  confidence_pct;   // 0–100
+    uint8_t  methodology;      // 0=stat · 1=survey · 2=survey+history
+    uint8_t  _pad[6];
+    const char* notes;         // NULL ou texto informativo; thread_local.
+} GgqlIngestEstimate;
+
+// Computa estimativas a partir de um survey + flags + threads.
+//
+// num_threads: 0 = detecta via omp_get_max_threads().
+//
+// Retorno:
+//    0 — sucesso
+//   -1 — argumentos NULL (survey ou out)
+//   -2 — survey->struct_size ou out->struct_size insuficiente
+int32_t ggql_estimate_ingest(
+    const GgqlSurvey* survey,
+    int num_threads,
+    bool build_fm_index,
+    bool build_gbwt,
+    bool build_snarls,
+    GgqlIngestEstimate* out
+);
+
 // Variante de ggql_ingestor_ingest que recebe perfil pronto. Equivalente a
 // chamar ggql_ingestor_ingest com os flags derivados de `profile`.
 // C5 / Fase 5: nova assinatura (ver ggql_ingestor_ingest acima).
