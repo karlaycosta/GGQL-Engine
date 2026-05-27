@@ -7,6 +7,7 @@
 #include "ggql/ingest/ingestor.hpp"  // MmapFileParallel
 
 #include <chrono>
+#include <cstring>  // memchr
 #include <vector>
 
 #ifdef _OPENMP
@@ -25,14 +26,16 @@ inline const char* align_to_line_start_local(const char* p, const char* start) {
     return p;
 }
 
+// memchr usa SIMD (pcmpeqb/AVX2) na libc — 16-32 B/iter contra char-a-char.
 inline const char* skip_line_local(const char* p, const char* end) {
-    while (p < end && *p != '\n') {
-        ++p;
-    }
-    if (p < end) {
-        ++p;
-    }
-    return p;
+    const auto* nl = static_cast<const char*>(std::memchr(p, '\n', static_cast<size_t>(end - p)));
+    return nl ? nl + 1 : end;
+}
+
+// Encontra próximo TAB em [p, end); retorna end se não achar.
+inline const char* find_tab(const char* p, const char* end) {
+    const auto* t = static_cast<const char*>(std::memchr(p, '\t', static_cast<size_t>(end - p)));
+    return t ? t : end;
 }
 
 } // namespace
@@ -90,20 +93,19 @@ survey_gfa_light(const std::string& filepath, int num_threads) {
             // Comentários, headers (H), etc. são puladas (default).
             if ((first == 'S' || first == 'L' || first == 'W' || first == 'P')
                 && p + 1 < chunk_end && *(p + 1) == '\t') {
-                // Encontra fim da linha uma vez (reusado em S/W/P).
-                const char* line_end = p;
-                while (line_end < chunk_end && *line_end != '\n') { ++line_end; }
+                // Encontra fim da linha uma vez (reusado em S/W/P) — memchr SIMD.
+                const auto* nl = static_cast<const char*>(
+                    std::memchr(p, '\n', static_cast<size_t>(chunk_end - p)));
+                const char* line_end = nl ? nl : chunk_end;
                 switch (first) {
                     case 'S': {
                         ++s;
                         // S\t<name>\t<seq>\t[tags] — pular ao 2º TAB, contar até o 3º (ou fim).
-                        const char* c = p + 2; // pós "S\t"
-                        while (c < line_end && *c != '\t') { ++c; } // pula <name>
+                        const char* c = find_tab(p + 2, line_end); // fim do <name>
                         if (c < line_end) {
                             ++c; // skip TAB
-                            const char* seq_start = c;
-                            while (c < line_end && *c != '\t') { ++c; }
-                            seq_bytes += static_cast<uint64_t>(c - seq_start);
+                            const char* seq_end = find_tab(c, line_end);
+                            seq_bytes += static_cast<uint64_t>(seq_end - c);
                         }
                         break;
                     }
@@ -112,7 +114,6 @@ survey_gfa_light(const std::string& filepath, int num_threads) {
                     case 'P': {
                         ++p_cnt;
                         if (first == 'W') { has_w = true; }
-                        // Conta nós (separadores) — mesma lógica do Pass1.
                         uint64_t nodes = 0;
                         if (first == 'P') {
                             for (const char* c = p; c < line_end; ++c) {

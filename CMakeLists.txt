@@ -286,6 +286,14 @@ target_compile_options(bench_suggest_profile PRIVATE
 target_link_options(bench_suggest_profile PRIVATE -flto=auto)
 target_link_libraries(bench_suggest_profile PRIVATE ggql_ingest ${GGQL_BIN_ALLOCATOR_LIB})
 
+# bench_survey — micro-bench isolado pra profile (perf record / callgrind).
+# Mantém -O3 (medir caso real) + -g pra ter símbolos no perf report.
+add_executable(bench_survey tools/bench_survey.cpp)
+target_compile_options(bench_survey PRIVATE
+    -O3 -g -fno-omit-frame-pointer -march=native -fopenmp -fno-strict-aliasing
+)
+target_link_libraries(bench_survey PRIVATE ggql_ingest ${GGQL_BIN_ALLOCATOR_LIB})
+
 # bench_snarl — microbenchmark isolado do snarl_decomposition::find_all_snarls.
 add_executable(bench_snarl tools/bench_snarl.cpp)
 target_compile_options(bench_snarl PRIVATE

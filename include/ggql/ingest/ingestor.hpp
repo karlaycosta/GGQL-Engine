@@ -92,6 +92,11 @@ struct MmapFileParallel {
         // MADV_SEQUENTIAL para readahead otimizado
         ::madvise(ptr, new_size, MADV_SEQUENTIAL);
 
+        // MADV_WILLNEED: prefetch agressivo das páginas pro page cache.
+        // Complementa SEQUENTIAL (que só ajusta readahead) — útil em
+        // survey/scan cold onde queremos minimizar latency de primeira leitura.
+        ::madvise(ptr, new_size, MADV_WILLNEED);
+
         // MADV_HUGEPAGE para reduzir TLB misses (requer huge pages habilitadas)
 #ifdef MADV_HUGEPAGE
         ::madvise(ptr, new_size, MADV_HUGEPAGE);
