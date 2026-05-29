@@ -14,6 +14,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <limits>     // std::numeric_limits
 #include <numeric>    // std::reduce
 #include <gbwt/utils.h> // ::gbwt::text_buffer_type, vector_type, ENDMARKER
 
@@ -496,8 +497,6 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
                                 ? static_cast<size_t>(num_bins_packed_)
                                 : static_cast<size_t>(num_threads);
 
-    std::atomic<size_t> paths_written_global{0};
-
     constexpr uint64_t IN_RAM_SIGMA_THRESHOLD = 10'000;
     std::vector<bool> bin_use_in_ram(collect_paths ? num_bins : 0, false);
 
@@ -533,6 +532,52 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
     }
 
     const size_t chunk_size_p2 = total_size / static_cast<size_t>(num_threads);
+
+    // ── B2 / Option A: truncamento de `max_paths` em ORDEM DE ARQUIVO ──────────
+    //
+    // O gate antigo usava um std::atomic fetch_add (path_nr) cuja ordem entre
+    // threads é racy → quando o cap morde, o CONJUNTO de paths incluídos no gBWT
+    // variava run-a-run (não-determinístico). Aqui pré-contamos, por chunk, os
+    // paths-candidatos (linhas W/P-com-tab) usando AS MESMAS fronteiras de chunk
+    // do loop principal; o prefixo dá a cada thread o rank global em ordem de
+    // arquivo. No loop, cada thread usa `prefix[tid] + idx_local` como rank
+    // determinístico (substitui o path_nr). Só roda quando o cap pode morder
+    // (finito); ilimitado (SIZE_MAX) escreve tudo sem gate, já determinístico.
+    const bool cap_active =
+        collect_paths && max_paths != std::numeric_limits<size_t>::max();
+    std::vector<uint64_t> path_prefix(static_cast<size_t>(num_threads) + 1, 0);
+    if (cap_active) {
+        std::vector<uint64_t> chunk_pc(static_cast<size_t>(num_threads), 0);
+#pragma omp parallel num_threads(num_threads)
+        {
+            int tid = 0;
+#ifdef _OPENMP
+            tid = omp_get_thread_num();
+#endif
+            const char* cs = data_start + tid * chunk_size_p2;
+            const char* ce = (tid == num_threads - 1) ? data_end : (cs + chunk_size_p2);
+            if (tid > 0) {
+                cs = align_to_line_start(cs, data_start);
+            }
+            if (tid < num_threads - 1) {
+                ce = align_to_line_start(data_start + (tid + 1) * chunk_size_p2, data_start);
+            }
+            uint64_t cnt = 0;
+            const char* q = cs;
+            while (q < ce) {
+                const char c = *q;
+                if ((c == 'W' || c == 'P') && q + 1 < ce && *(q + 1) == '\t') {
+                    ++cnt;
+                }
+                q = skip_line(q, ce);
+            }
+            chunk_pc[static_cast<size_t>(tid)] = cnt;
+        }
+        for (int i = 0; i < num_threads; ++i) {
+            path_prefix[static_cast<size_t>(i) + 1] =
+                path_prefix[static_cast<size_t>(i)] + chunk_pc[static_cast<size_t>(i)];
+        }
+    }
 
     // Per-thread accumulators — sem mutex no loop paralelo.
     //
@@ -624,6 +669,10 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
         // Contadores escalares locais — evitam indexar o vetor (alignas Counter)
         // a cada S/L-line no hot loop; escritos uma vez no fim (item 6).
         uint64_t local_seg = 0, local_lnk = 0;
+        // B2/Option A: índice local de paths-candidatos (W/P-com-tab) nesta
+        // thread; com path_prefix[tid] dá o rank global em ordem de arquivo.
+        const uint64_t rank_base = path_prefix[static_cast<size_t>(tid)];
+        uint64_t local_cand = 0;
 
         while (p < chunk_end) {
             char first = *p;
@@ -693,6 +742,12 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
                 }
                 ++p;
 
+                // Rank global determinístico (ordem de arquivo) deste candidato —
+                // substitui o path_nr racy (B2/Option A). Incrementa p/ TODO
+                // candidato (mesmo parse vazio), alinhado com o pré-scan.
+                const uint64_t global_rank = rank_base + local_cand;
+                ++local_cand;
+
                 path_name.clear();
                 local_nodes.clear();
                 uint64_t first_mphf_id = ULLONG_MAX;
@@ -707,9 +762,7 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
                 }
 
                 if (!local_nodes.empty() && collect_paths) {
-                    const size_t path_nr =
-                        paths_written_global.fetch_add(1, std::memory_order_relaxed);
-                    if (max_paths == 0 || path_nr < max_paths) {
+                    if (!cap_active || global_rank < max_paths) {
                         size_t target;
                         if (has_remap && first_mphf_id != ULLONG_MAX) {
                             uint32_t comp = comp_for_node_[first_mphf_id];
@@ -720,7 +773,7 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
                                 target = 0;
                             }
                         } else {
-                            target = path_nr % num_bins;
+                            target = static_cast<size_t>(global_rank % num_bins);
                         }
                         if (bin_use_in_ram[target]) {
                             // Sem mutex — cada thread escreve no seu slot privado.
