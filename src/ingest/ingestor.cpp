@@ -1424,8 +1424,8 @@ void GfaIngestorMmapParallel::sync_manifest_with_disk(const std::string& dir) co
 
 IngestStatsParallel GfaIngestorMmapParallel::complete_with_snarls(
     const std::string& cache_dir, IngestStatsParallel stats, bool verbose,
-    std::chrono::high_resolution_clock::time_point t_start) {
-    using clock = std::chrono::high_resolution_clock;
+    std::chrono::steady_clock::time_point t_start) {
+    using clock = std::chrono::steady_clock;
     using sec = std::chrono::duration<double>;
 
     if (!res_.topology) {
@@ -1475,8 +1475,8 @@ IngestStatsParallel GfaIngestorMmapParallel::complete_with_snarls(
 std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::complete_with_gbwt(
     const std::string& /*filepath*/, const std::string& cache_dir, int num_threads,
     size_t max_gbwt_paths, bool build_snarls, bool verbose, IngestStatsParallel stats,
-    std::chrono::high_resolution_clock::time_point t_start) {
-    using clock = std::chrono::high_resolution_clock;
+    std::chrono::steady_clock::time_point t_start) {
+    using clock = std::chrono::steady_clock;
     using sec = std::chrono::duration<double>;
 
     if (!res_.mmap || !res_.mphf || !res_.topology) {
@@ -1691,8 +1691,8 @@ std::expected<IngestStatsParallel, std::string> GfaIngestorMmapParallel::run_ful
     int num_threads, double gamma, bool verbose, bool save_metadata, bool build_topology,
     bool build_fm_index, size_t max_gbwt_paths, bool keep_gbwt_tmp, const std::string& cache_dir,
     bool build_gbwt, bool build_snarls, uint64_t file_sz, int64_t file_mtime_ns, uint64_t gfa_hash,
-    bool skip_pass1, std::chrono::high_resolution_clock::time_point t_start) {
-    using clock = std::chrono::high_resolution_clock;
+    bool skip_pass1, std::chrono::steady_clock::time_point t_start) {
+    using clock = std::chrono::steady_clock;
     using sec = std::chrono::duration<double>;
 
     const bool do_early_remap = build_topology && build_gbwt && (max_gbwt_paths > 0);
@@ -2207,7 +2207,7 @@ GfaIngestorMmapParallel::ingest(const std::string& filepath, int num_threads, do
                                 bool verbose, bool save_metadata, bool build_topology,
                                 bool build_fm_index, size_t max_gbwt_paths, bool keep_gbwt_tmp,
                                 const std::string& cache_dir, bool build_gbwt, bool build_snarls) {
-    using clock = std::chrono::high_resolution_clock;
+    using clock = std::chrono::steady_clock;
 
     if (num_threads <= 0) {
         return std::unexpected("num_threads deve ser positivo");
