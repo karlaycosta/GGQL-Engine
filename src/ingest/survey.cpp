@@ -6,8 +6,11 @@
 #include "ggql/ingest/profile.hpp"
 #include "ggql/ingest/ingestor.hpp"  // MmapFileParallel
 
+#include <algorithm>  // std::ranges::count
 #include <chrono>
-#include <cstring>  // memchr
+#include <cstring>    // memchr
+#include <numeric>    // std::reduce
+#include <span>
 #include <vector>
 
 #ifdef _OPENMP
@@ -42,7 +45,9 @@ inline const char* find_tab(const char* p, const char* end) {
 
 std::expected<IngestSurvey, std::string>
 survey_gfa_light(const std::string& filepath, int num_threads) {
-    using clock = std::chrono::high_resolution_clock;
+    // steady_clock (monotônico) — high_resolution_clock pode ser alias de
+    // system_clock em algumas libs e dar elapsed negativo sob ajuste de relógio.
+    using clock = std::chrono::steady_clock;
     using sec = std::chrono::duration<double>;
 
     const auto t0 = clock::now();
@@ -92,7 +97,7 @@ survey_gfa_light(const std::string& filepath, int num_threads) {
             const char first = *p;
             // Comentários, headers (H), etc. são puladas (default).
             if ((first == 'S' || first == 'L' || first == 'W' || first == 'P')
-                && p + 1 < chunk_end && *(p + 1) == '\t') {
+                && p + 1 < chunk_end && *(p + 1) == '\t') [[likely]] {
                 // Encontra fim da linha uma vez (reusado em S/W/P) — memchr SIMD.
                 const auto* nl = static_cast<const char*>(
                     std::memchr(p, '\n', static_cast<size_t>(chunk_end - p)));
@@ -113,16 +118,29 @@ survey_gfa_light(const std::string& filepath, int num_threads) {
                     case 'W':
                     case 'P': {
                         ++p_cnt;
-                        if (first == 'W') { has_w = true; }
                         uint64_t nodes = 0;
                         if (first == 'P') {
-                            for (const char* c = p; c < line_end; ++c) {
-                                if (*c == ',') { ++nodes; }
+                            // P\t<nome>\t<seg1,seg2,...>\t<overlaps> — nós =
+                            // vírgulas no campo de SEGMENTOS + 1. Restringir ao
+                            // 2º→3º TAB evita contar as vírgulas da lista de
+                            // overlaps CIGAR (que dobrariam a contagem). Aninhado
+                            // (como o case 'S') p/ o compilador provar seg <= line_end.
+                            const char* seg = find_tab(p + 2, line_end); // fim do <nome>
+                            if (seg < line_end) {
+                                ++seg;                                   // início dos <segmentos>
+                                const char* seg_end = find_tab(seg, line_end);
+                                nodes = static_cast<uint64_t>(
+                                            std::ranges::count(std::span(seg, seg_end), ',')) + 1;
                             }
-                            if (line_end > p) { ++nodes; }
                         } else {
+                            has_w = true;
+                            // W\t…6 campos…\t<walk> — nós = nº de marcas de
+                            // orientação no walk. '<'=0x3C e '>'=0x3E diferem só
+                            // no bit 1, então (b|0x02)==0x3E casa os dois (e só
+                            // eles) num único compare aritmético — auto-vetorizável
+                            // (compare+popcount SIMD) ao contrário do OR escalar.
                             for (const char* c = p; c < line_end; ++c) {
-                                if (*c == '>' || *c == '<') { ++nodes; }
+                                nodes += (static_cast<unsigned char>(*c) | 0x02u) == 0x3Eu;
                             }
                         }
                         path_nodes += nodes;
@@ -143,14 +161,14 @@ survey_gfa_light(const std::string& filepath, int num_threads) {
     }
 
     IngestSurvey out;
-    out.file_size_bytes = total_size;
-    for (uint64_t v : t_segs)       { out.segment_count        += v; }
-    for (uint64_t v : t_links)      { out.link_count           += v; }
-    for (uint64_t v : t_paths)      { out.path_count           += v; }
-    for (uint64_t v : t_seq_bytes)  { out.total_sequence_bytes += v; }
-    uint64_t total_path_nodes = 0;
-    for (uint64_t v : t_path_nodes) { total_path_nodes         += v; }
-    for (uint8_t v : t_has_w)       { if (v) { out.has_w = true; } }
+    out.file_size_bytes      = total_size;
+    out.segment_count        = std::reduce(t_segs.begin(),      t_segs.end());
+    out.link_count           = std::reduce(t_links.begin(),     t_links.end());
+    out.path_count           = std::reduce(t_paths.begin(),     t_paths.end());
+    out.total_sequence_bytes = std::reduce(t_seq_bytes.begin(), t_seq_bytes.end());
+    out.has_w = std::ranges::any_of(t_has_w, [](uint8_t v) { return v != 0; });
+    const uint64_t total_path_nodes =
+        std::reduce(t_path_nodes.begin(), t_path_nodes.end());
     out.avg_path_length = (out.path_count > 0)
         ? static_cast<double>(total_path_nodes) / static_cast<double>(out.path_count)
         : 0.0;
