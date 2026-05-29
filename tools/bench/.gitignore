@@ -1,0 +1,3 @@
+# binários compilados do harness de benchmark (regeneráveis das fontes)
+drop_file_cache
+bench_tokenize

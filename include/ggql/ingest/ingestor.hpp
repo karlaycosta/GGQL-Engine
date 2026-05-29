@@ -97,7 +97,11 @@ struct MmapFileParallel {
         // survey/scan cold onde queremos minimizar latency de primeira leitura.
         ::madvise(ptr, new_size, MADV_WILLNEED);
 
-        // MADV_HUGEPAGE para reduzir TLB misses (requer huge pages habilitadas)
+        // MADV_HUGEPAGE: em geral NO-OP aqui (H3). THP transparente em kernels
+        // padrão cobre só memória anônima; page-cache de arquivo exige
+        // CONFIG_READ_ONLY_THP_FOR_FS + fs compatível (raro). Mantido como
+        // dica inofensiva — não contar com redução de TLB misses neste mmap
+        // file-backed read-only. Ver docs/analise_ingestor_hpp.md (H3).
 #ifdef MADV_HUGEPAGE
         ::madvise(ptr, new_size, MADV_HUGEPAGE);
 #endif
@@ -326,10 +330,18 @@ class GfaIngestorMmapParallel {
     }
 
     static std::string_view next_token(const char*& p, const char* end) noexcept {
+        [[assume(p <= end)]];  // C++23: invariante de chunk — elimina checagens redundantes
         const char* start = p;
-        // Com -O3 -march=native o GCC vetoriza este loop com AVX2 (32 B/ciclo).
-        // Substituir por dois memchr é mais lento: aumenta o custo de chamadas e
-        // escaneia os dados duas vezes. A vetorização automática já é ótima aqui.
+        // ATENÇÃO: este loop NÃO é auto-vetorizado. Loops de busca com saída
+        // antecipada (trip-count desconhecido) não vetorizam no GCC/Clang —
+        // verificado no assembly (g++-14 -O3 -march=native): loop escalar
+        // byte-a-byte (movzbl + range-check `leal -9` p/ \t/\n, compare p/ \r).
+        // Mantido escalar de propósito: a maioria dos tokens é CURTA (IDs de
+        // nó, orientação, campos de L/W/P) e o overhead de chamada do memchr
+        // domina nesses casos. O ganho do memchr está só no token LONGO de
+        // sequência das S-lines (medido 5,95× isolado no CHM13-464 — ver
+        // docs/bench/ingestor_baseline_2026-05-29.md), e por isso é aplicado
+        // pontualmente no parse de S-line do .cpp, não aqui no caminho geral.
         while (p < end && *p != '\t' && *p != '\n' && *p != '\r') {
             ++p;
         }
@@ -344,11 +356,16 @@ class GfaIngestorMmapParallel {
 
     static size_t tokenize(const char*& p, const char* end, std::array<std::string_view, 8>& out,
                            size_t max_fields) noexcept {
+        [[assume(p <= end)]];  // C++23: invariante de chunk
         size_t n = 0;
 #ifdef __GNUC__
     #pragma GCC unroll 8
 #endif
-        while (n < max_fields && p < end && *p != '\n') {
+        // Para também em '\r' (H4): em arquivos CRLF o '\r' final fica antes do
+        // '\n'; sem este teste, next_token pararia no '\r' sem consumi-lo e o
+        // loop geraria tokens vazios espúrios até max_fields. skip_line() abaixo
+        // (memchr '\n') consome a quebra de linha inteira (\r\n ou \n).
+        while (n < max_fields && p < end && *p != '\n' && *p != '\r') {
             out[n++] = next_token(p, end);
         }
 

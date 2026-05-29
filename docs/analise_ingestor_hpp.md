@@ -395,3 +395,178 @@ deslocados.
 - `if constexpr` — não há código template aqui.
 - `std::string_view` literais (`"prefix"sv`) — sem ganho real.
 - Mover `parse_optional_tags` para `.cpp` — perderia inline, performance regrediria.
+
+---
+
+## Re-auditoria 2026-05-29 — foco em performance extrema + C++23
+
+Branch: `ffi/refine-load-and-introspection` · HEAD `442a82b`
+Itens B1–B5/P1–P4/M1–M4 da auditoria de 2026-05-05 **já aplicados** — esta
+passada busca achados *novos*, com ênfase em I/O e hot-path de parsing.
+Status: **diagnosticado, não aplicado.** Métricas de baseline coletadas
+ANTES de qualquer fix (ver `docs/bench/ingestor_baseline_2026-05-29.md`).
+
+> **⚠️ Atualização empírica (baseline 2026-05-29):** medições posteriores
+> rebaixaram H1 de ALTA para BAIXA/latente. Ver "Baseline empírico" ao
+> final desta seção — nesta máquina (63 GiB RAM, SSD) o re-read multi-passada
+> **não ocorre** (`File system inputs` = exatamente 1× o arquivo, mesmo cold e
+> sob pressão de RAM até o limiar de OOM). O ingestor é **CPU-bound** para
+> arquivos que cabem na RAM.
+
+### H1 — `MADV_SEQUENTIAL` + pipeline multi-passada = page-cache thrashing
+**Severidade: hipótese ALTA → medida BAIXA/latente (ver baseline).**
+
+`MmapFileParallel::open` aplica em **todo** o arquivo (hpp:93–98):
+```cpp
+::madvise(ptr, new_size, MADV_SEQUENTIAL);   // libera páginas atrás do cursor
+::madvise(ptr, new_size, MADV_WILLNEED);     // puxa tudo pro cache agora
+```
+`MADV_SEQUENTIAL` faz read-behind eviction (man: *"pages ... may be freed
+soon after they are accessed"*). Mas o arquivo é escaneado por inteiro
+**3–4 vezes**:
+- `survey.cpp` (mmap próprio) — scan completo
+- `try_cache_hash` → `XXH64(mmap->data, size)` (`ingestor.cpp:1688`) — scan completo
+- Pass1 `collect_keys_and_links_parallel` — scan completo
+- Pass2 `process_data_parallel` — scan completo (+ re-`madvise(SEQUENTIAL)` por-chunk em `ingestor.cpp:665`)
+
+Consequência sob pressão de memória / cache frio: `SEQUENTIAL` despeja as
+páginas entre passadas → ~1 leitura de disco vira 3–4. E `WILLNEED` **briga**
+com `SEQUENTIAL` (um puxa tudo, o outro descarta). Incoerente p/ multi-passada.
+
+**Fix proposto (policy sensível a tamanho vs RAM):**
+- arquivo ≤ RAM disponível: `MADV_WILLNEED`/`MAP_POPULATE` **sem** `SEQUENTIAL`
+  → páginas persistem entre as 4 passadas, paga-se I/O 1×.
+- arquivo > RAM: `MADV_SEQUENTIAL` por passada, **sem** `WILLNEED`.
+
+**Nota de medição:** o ganho só aparece sob cache frio ou pressão de RAM.
+Em máquina com muita RAM livre (62 GiB aqui, 50 livre) e arquivo ≤ RAM, o
+kernel ignora o hint de free e mascara o efeito — por isso o baseline mede
+explicitamente o caso frio (eviction via `posix_fadvise(DONTNEED)`).
+
+### H2 — comentário de `next_token` afirma vetorização AVX2 que NÃO existe
+**Severidade: MÉDIA (doc incorreta + perf no token de sequência).**
+
+hpp:330–332:
+```cpp
+// Com -O3 -march=native o GCC vetoriza este loop com AVX2 (32 B/ciclo).
+```
+**Verificado** (`g++-14 -O3 -march=native -fopt-info-vec-optimized`): zero
+instruções vetoriais. GCC gera loop **escalar byte-a-byte** (`movzbl`,
+range-check `leal -9` p/ \t/\n). Loops de busca com saída antecipada não são
+auto-vetorizados. O token de **sequência** das S-lines (dezenas/centenas de
+kB) é escaneado byte-a-byte; `memchr('\t')` (SIMD no glibc) ganharia muito
+nele — ao contrário da conclusão do comentário ("dois memchr é mais lento",
+que só vale para tokens curtos).
+
+**Fix proposto:** (a) corrigir o comentário (é factualmente errado);
+(b) split híbrido — `memchr('\t')` no campo de sequência longo + scan escalar
+nos campos curtos; ou scan SIMD manual de 3 delimitadores com
+`[[gnu::target("avx2")]]`.
+
+### H3 — `MADV_HUGEPAGE` é no-op em mapeamento file-backed read-only
+**Severidade: BAIXA (inofensivo, ganho ilusório).**
+
+hpp:100–103: `MADV_HUGEPAGE` em `MAP_PRIVATE | PROT_READ` file-backed. THP
+transparente em kernels padrão cobre só memória anônima; page-cache de arquivo
+exige `CONFIG_READ_ONLY_THP_FOR_FS` + fs compatível (raro). Na prática não
+reduz TLB misses como o comentário afirma. Manter é inofensivo, mas não contar
+com o ganho.
+
+### H4 — CRLF gera tokens vazios espúrios em `tokenize`
+**Severidade: BAIXA (robustez).**
+
+`next_token` para em `\r` mas só consome `\t`. Em GFA com CRLF o `\r` final
+sobra; `tokenize` (`while ... *p != '\n'`) re-chama `next_token` sobre o `\r`
+gerando tokens vazios até `max_fields=8`. Não trava (limitado) e é benigno p/
+parsers que indexam posições fixas, mas desperdiça iterações. Sugestão: tratar
+`\r` junto de `\n` no fim de linha.
+
+### C++23 — estado bom, folgas pontuais
+
+Usa bem o essencial: `std::expected`/`std::unexpected` na factory `open`
+(sem throw no ctor), `std::bit_width` em `calc_node_width` constexpr,
+`[[nodiscard]]`/`[[unlikely]]`, rule-of-5 completa (move-assign aplicado em B2).
+Oportunidades baratas ainda não aplicadas:
+- **`[[assume(p <= end)]]`** (atributo padrão C++23) em `next_token`/`tokenize`/
+  `align_to_line_start` — elimina checagens de limite redundantes nos hot loops.
+  Maior potencial concreto.
+- `[[gnu::hot]]` nos parsers estáticos.
+- `std::print`/`std::println` no lugar de `fmt::` — neutro em perf; não vale mexer.
+
+### Baseline empírico (2026-05-29) — medir ANTES de aplicar
+
+Harness reproduzível: `tools/bench/ingestor_bench.sh` (+ `drop_file_cache.c`,
+evicção de page-cache via `posix_fadvise(DONTNEED)`, sem root).
+Resultados completos: `docs/bench/ingestor_baseline_2026-05-29.md` (+ `.csv`).
+
+Ambiente: kernel 6.8, 63 GiB RAM (50 livre), SSD, g++-14 `-O3`, 8 threads,
+profile `metagenomics` (sem gBWT/snarls → maximiza fração de scan).
+
+| Métrica | bench_1M (127M) | chm13_10w (439M) | chm13_100w (633M) |
+|---|---:|---:|---:|
+| WARM survey throughput | 6808 MB/s | 7566 MB/s | 7063 MB/s |
+| COLD wall (ingest completo) | 0,94 s | 11,08 s | 14,45 s |
+| COLD `File system inputs` / tamanho | 1,00× | 1,00× | 1,00× |
+| Peak RSS | 426 MB | 2536 MB | 2914 MB |
+
+**Conclusões que mudam o plano:**
+1. **H1 não tem impacto mensurável aqui.** `File system inputs` = exatamente
+   1× o arquivo em TODOS os casos cold — o page cache persiste entre as 4
+   passadas (survey+hash+Pass1+Pass2). Verificado também sob
+   `systemd-run --user -p MemoryMax=3200M`: ainda 1×. Wall cold ≈ wall warm
+   (I/O sobrepõe ao CPU). O fix de `madvise` seria **no-op nesta HW**; só
+   renderia em storage lento/rede ou arquivo ≫ RAM.
+2. **Workload é CPU-bound.** O tempo está em MPHF + topologia + parse, não em I/O.
+3. **H2 medido (micro-bench `bench_tokenize`, 2026-05-29):** isolado e
+   single-thread, `next_token` escalar vs memchr no token de sequência:
+   **1,62×** nos subsets (~54 B/seg) e **5,95×** no `CHM13-464.gfa` real
+   (avg ~2840 B/seg, max 4,67 MB) — scan escalar 1,89 s → memchr 0,32 s.
+   **Confirma que o comentário do header está errado.** Porém, end-to-end o
+   ganho é diluído: o Pass1/Pass2 é paralelo (12 threads) → scan de 1,89 s
+   single-thread vira ~0,24 s de wall; e o ingest é dominado por outras fases
+   (CHM13-464 metagenomics: Fase 3 FM-Index = **3,40 min**, peak RSS 41,5 GB).
+   **Veredito:** aplicar H2 pelo valor de corretude + casos parse-bound
+   (perfis sem FM-Index/gBWT, baixo nº de threads), NÃO esperando speedup no
+   ingest completo. Detalhes em `docs/bench/ingestor_baseline_2026-05-29.md`.
+
+**Recomendação:** o ganho de perf esperado de H1/H2 nesta HW/dados é marginal.
+O valor garantido está nas correções de **corretude/doc** (H2 comentário
+errado, H3 no-op, H4 CRLF) e em `[[assume]]` (C++23). Reservar o fix de
+`madvise` (H1) para quando houver storage lento ou GFA ≫ RAM, e baselinar H2
+contra `CHM13-464.gfa` antes de mexer no `next_token`.
+
+### Plano de aplicação (após baseline)
+
+| # | Item | Tipo | Ganho medido/esperado | Status |
+|---|---|---|---|---|
+| H1 | madvise policy sensível a tamanho vs RAM | perf I/O | **nulo nesta HW** (latente p/ storage lento) | ⏳ adiado (sem ROI nesta HW) |
+| H2-doc | corrigir comentário falso de AVX2 em `next_token` | doc | — | ✅ aplicado 2026-05-29 |
+| H2-perf | memchr no token de sequência (S-line) | perf parse | **5,95× isolado** no CHM13-464; diluído end-to-end | ⏳ no `.cpp`, não no header (parse-bound only) |
+| H3 | nota sobre MADV_HUGEPAGE no-op | doc | nenhum | ✅ aplicado 2026-05-29 |
+| H4 | tratar CRLF em tokenize | robustez | nenhum (perf) | ✅ aplicado 2026-05-29 |
+| C++23 | `[[assume(p <= end)]]` em next_token/tokenize | perf | marginal | ✅ aplicado 2026-05-29 |
+
+### Pacote de correções baratas aplicado (2026-05-29)
+
+Editado `include/ggql/ingest/ingestor.hpp`:
+- **H2-doc** — comentário de `next_token` reescrito: removida a afirmação
+  falsa de auto-vetorização AVX2 (verificada inexistente no assembly);
+  documenta que é escalar de propósito (tokens curtos dominam por contagem) e
+  que o ganho do memchr (5,95× medido) está só no token de sequência longo,
+  aplicável no parse de S-line do `.cpp`.
+- **H3** — comentário de `MADV_HUGEPAGE` explica que é no-op em mmap
+  file-backed read-only.
+- **H4** — `tokenize` agora para também em `'\r'` (não só `'\n'`): elimina
+  tokens vazios espúrios em arquivos CRLF. `skip_line` (memchr `\n`) consome a
+  quebra inteira. Verificado: GFA idêntico em LF vs CRLF parseia igual
+  (2 segs / 1 link / 1 path).
+- **C++23** — `[[assume(p <= end)]]` em `next_token` e `tokenize` (invariante
+  de chunk; ajuda o otimizador a remover checagens de limite).
+
+**H2-perf e H1 NÃO aplicados** — H1 sem ROI nesta HW (medido); H2-perf vive no
+`.cpp` (parse de S-line), com ganho diluído end-to-end (paralelo + FM-Index
+domina) — reservado para quando o caminho parse-bound importar.
+
+**Validação:** build limpo (g++-14, `[[assume]]` OK), **17/17 testes passando**.
+Nota: os 3 testes de query dependem da fixture local
+`data/chm13_subset_100w.gfa.idx` (regenerada com `bench_gbwt --profile pangenome`).
