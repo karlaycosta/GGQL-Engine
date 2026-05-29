@@ -9,8 +9,8 @@
 [![CMake](https://img.shields.io/badge/CMake-3.16%2B-064F8C?logo=cmake)](CMakeLists.txt)
 [![GCC](https://img.shields.io/badge/GCC-14%2B-A42E2B?logo=gnu)](https://gcc.gnu.org)
 [![Plataforma](https://img.shields.io/badge/plataforma-Linux-lightgrey?logo=linux)](https://kernel.org)
-[![FFI Round 4](https://img.shields.io/badge/FFI-Round%204%20%C2%B7%2039%20s%C3%ADmbolos-success)](docs/ffi_flutter_python_integration.md)
-[![Tests](https://img.shields.io/badge/CTest-16%20suites-blue)](tests/CMakeLists.txt)
+[![FFI Round 5](https://img.shields.io/badge/FFI-Round%205%20%C2%B7%2042%20s%C3%ADmbolos-success)](docs/ffi_flutter_python_integration.md)
+[![Tests](https://img.shields.io/badge/CTest-17%20suites-blue)](tests/CMakeLists.txt)
 
 Um motor de consulta declarativa para grafos pangenômicos no **formato GFA**,
 projetado para genomas de **85 milhões de nós** (HPRC / CHM13). Expõe a
@@ -85,13 +85,16 @@ pelo menos três ferramentas distintas em um pipeline tradicional.
 - **Cache inteligente em disco.** A primeira ingestão grava `.idx/`; chamadas
   subsequentes carregam em milissegundos com validação por hash XXH64 +
   mtime/size.
-- **Integração multi-linguagem madura.** Além da REPL, expõe **39 símbolos
+- **Integração multi-linguagem madura.** Além da REPL, expõe **42 símbolos
   C ABI** para bindings em Dart/Flutter, Python (via `ctypes`), Rust, etc.
   API endurecida no Round 4 (2026-05-22, 9 commits em 7 fases): opaque
   struct typedefs, `struct_size` para forward-compat, cursor stateful
   (true O(N) streaming via `std::generator` C++23), `ingestor_cancel`
-  cooperativo, copy-out de erros, `event_callback` thread-local — tudo
-  documentado em [`docs/ffi_flutter_python_integration.md`](docs/ffi_flutter_python_integration.md).
+  cooperativo, copy-out de erros, `event_callback` thread-local. Round 5
+  (2026-05-29) adicionou pré-voo de ingestão (`ggql_survey_gfa` +
+  `ggql_estimate_ingest`, sugestão de perfil) e subgrafo induzido para o
+  GraphView (`ggql_engine_subgraph_from_result`) — tudo documentado em
+  [`docs/ffi_flutter_python_integration.md`](docs/ffi_flutter_python_integration.md).
 - **Allocator otimizado por target.** Binários standalone usam jemalloc
   (perf máxima); `libggql_ffi.so` usa mimalloc (dlopen-safe, sem
   `LD_PRELOAD` para Flutter/Python). Configurável via
@@ -352,8 +355,8 @@ ctest --test-dir build --output-on-failure
 | `ggql_repl` | **REPL interativa** — entry point principal |
 | `bench_gbwt` | Benchmark de ingestão + construção gBWT |
 | `bench_{snarl,fm_index,metadata,topology,graph_algorithms,path_storage}` | Microbench por componente |
-| `libggql_ffi.so` | Biblioteca compartilhada para bindings Dart/Python/FFI (**39 símbolos**) |
-| `tests/test_*` | **16 testes CTest** (incluindo `test_ffi_query`, `test_ffi_ingest_cancel`, `test_ffi_cursor` validando API Round 4) |
+| `libggql_ffi.so` | Biblioteca compartilhada para bindings Dart/Python/FFI (**42 símbolos**) |
+| `tests/test_*` | **17 testes CTest** (incluindo `test_ffi_query`, `test_ffi_ingest_cancel`, `test_ffi_cursor`, `test_ffi_subgraph` validando a API FFI) |
 
 ---
 
@@ -403,7 +406,7 @@ printf 'FIND TIP RETURN id;\n.quit\n' \
 
 ### Bindings C/Dart/FFI/Python
 
-A API C está em [`include/ffi/ffi.h`](include/ffi/ffi.h) — **39 símbolos
+A API C está em [`include/ffi/ffi.h`](include/ffi/ffi.h) — **42 símbolos
 exportados**. Guia completo de integração com Flutter (ffigen) e Python
 (ctypes/cffi) em
 [`docs/ffi_flutter_python_integration.md`](docs/ffi_flutter_python_integration.md).
@@ -440,6 +443,25 @@ while (true) {
     ggql_result_free(page);
 }
 ggql_cursor_destroy(c);
+
+// ── Subgrafo induzido para o GraphView (Round 5 / C12) ─────────────────────
+// A partir dos segment ids de um resultado, devolve o subgrafo induzido +
+// halo de 1-hop em índices LOCAIS densos, via two-pass (struct_size + copy-out):
+//   - seg_ids_in: ids globais (= ggql_result_cell_int do FIND SEGMENT RETURN id)
+//   - edges: pares achatados não-direcionados/dedupados em idx local
+//   - node_cap: orçamento total (resultado + halo); estouro → truncated
+int64_t ids[] = { /* ids do resultado */ };
+GgqlSubgraphDims dims = { .struct_size = sizeof(GgqlSubgraphDims) };
+ggql_engine_subgraph_from_result(eng, ids, n, /*halo_hops=*/1, /*node_cap=*/5000,
+                                 &dims, NULL,0, NULL,0, NULL,0);   // 1ª passada: dims
+if (!dims.truncated) {                                            // senão: "refine query"
+    int32_t* edges     = malloc(dims.edge_count * 2 * sizeof(int32_t));
+    int64_t* seg_ids   = malloc(dims.node_count * sizeof(int64_t));
+    uint8_t* is_result = malloc(dims.node_count * sizeof(uint8_t));
+    ggql_engine_subgraph_from_result(eng, ids, n, 1, 5000, &dims, // 2ª passada: preenche
+        edges, dims.edge_count*2, seg_ids, dims.node_count, is_result, dims.node_count);
+    /* edges → layout; seg_ids → labels/hit-test; is_result → resultado vs halo */
+}
 ```
 
 #### Cliente Flutter validado
@@ -473,8 +495,8 @@ ggql_engine/
 │   ├── ffi/              ─ ffi.cpp (bindings extern "C")
 │   ├── repl/             ─ ggql_repl.cpp
 │   └── bench_gbwt.cpp    ─ Driver de benchmark/ingestão
-├── tests/                ─ 16 testes do projeto (CTest)
-│                           inclui test_ffi_query / _ingest_cancel / _cursor
+├── tests/                ─ 17 testes do projeto (CTest)
+│                           inclui test_ffi_query / _ingest_cancel / _cursor / _subgraph
 ├── third_party/          ─ fmt · pegtl · sdsl-lite · gbwt · libsais
 ├── docs/                 ─ ingest_profiles.md + diagramas GFA
 │                           ffi_flutter_python_integration.md (guia consumer)
@@ -499,7 +521,7 @@ ggql_engine/
 - [x] QueryPlanner — `FIND TIP/REPEAT/BUBBLE/SEGMENT/EDGE/PATH`, `SEARCH KMER`
 - [x] REPL interativa com input multilinha
 - [x] **Perfis de ingestão** — pangenome / metagenomics / assembly / comparative
-- [x] **16 testes CTest** (do projeto) + 7 do gbwt vendorizado
+- [x] **17 testes CTest** (do projeto) + 7 do gbwt vendorizado
 - [x] `crosses()` integrado ao QueryPlanner (com `CrossesCache` para
   composição AND/OR sobre paths atravessados)
 - [x] `contains_kmer()` integrado ao `FIND SEGMENT WHERE`
@@ -529,6 +551,22 @@ ggql_engine/
   streaming O(N) para `FIND SEGMENT` full-scan
 - [x] **Allocator split** — jemalloc nos binários + mimalloc na `.so`
   (dlopen-safe para Flutter/Python sem `LD_PRELOAD`)
+
+### FFI / Integração (Round 5 — entregue 2026-05-29)
+
+- [x] **Pré-voo de ingestão** (C11) — `ggql_survey_gfa` (survey estendido) +
+  `ggql_estimate_ingest` (estimativa de RAM/tempo por perfil + sugestão de
+  perfil) para a UI decidir antes de ingerir. O *light Pass1*
+  (`survey_gfa_light`) é uma varredura `mmap` + OpenMP **SIMD** — `memchr`
+  para fronteiras de linha + contagem de orientação de walk vetorizada
+  (`(b|0x02)==0x3E` casa `<`/`>` num único compare) — com contagem de nós da
+  P-line restrita ao campo de segmentos (ignora o overlaps CIGAR, mantendo
+  `avg_path_length` correto para a sugestão de perfil)
+- [x] **Subgrafo induzido para o GraphView** (C12) —
+  `ggql_engine_subgraph_from_result`: a partir dos segment ids de um resultado,
+  devolve o subgrafo induzido + halo de 1-hop em índices locais densos
+  (two-pass `struct_size` + copy-out, arestas não-direcionadas/dedupadas, cap
+  rígido com `truncated`). Habilita o GraphView result-driven do cliente Flutter
 
 ### Próximos passos
 
