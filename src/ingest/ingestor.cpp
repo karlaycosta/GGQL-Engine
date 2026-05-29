@@ -11,6 +11,7 @@
 #include "ggql/utils.hpp"
 
 #include <algorithm>  // std::ranges::count
+#include <cstdlib>    // std::getenv
 #include <cstring>
 #include <ctime>
 #include <fstream>
@@ -629,6 +630,18 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
         }
     }
 
+    // Instrumentação opcional de balanceamento de carga (item 5 da análise).
+    // Mede o tempo de parsing por-thread no loop principal do Pass2 para
+    // quantificar a imbalance (S/L/W/P clusterizam → a thread do bloco W/P vira
+    // o caminho crítico). Habilita com GGQL_PROFILE_PASS2=1. Custo quando off:
+    // 2 chamadas steady_clock::now() por thread (desprezível); print só sob a
+    // env var. NÃO usar para decidir refactor sem ler a análise de risco no
+    // doc — schedule(dynamic) pode PIORAR I/O cold e estourar buffers.
+    const bool prof_pass2 = std::getenv("GGQL_PROFILE_PASS2") != nullptr;
+    std::vector<double>   thr_secs(static_cast<size_t>(num_threads), 0.0);
+    std::vector<uint64_t> thr_bytes(static_cast<size_t>(num_threads), 0);
+    std::vector<uint64_t> thr_cand(static_cast<size_t>(num_threads), 0);
+
 #pragma omp parallel num_threads(num_threads)
     {
         int tid = 0;
@@ -653,6 +666,7 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
             }
         }
 
+        const auto t_thr0 = std::chrono::steady_clock::now();
         const char* p = chunk_start;
         std::array<std::string_view, 8> tokens;
 
@@ -816,6 +830,11 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
         // Escrita única dos contadores escalares no slot per-thread (item 6).
         local_segments[tid].value = local_seg;
         local_links[tid].value    = local_lnk;
+        // Instrumentação de imbalance (item 5): tempo/bytes/candidatos da thread.
+        thr_secs[static_cast<size_t>(tid)] =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t_thr0).count();
+        thr_bytes[static_cast<size_t>(tid)] = static_cast<uint64_t>(chunk_end - chunk_start);
+        thr_cand[static_cast<size_t>(tid)] = local_cand;
     }
 
     // R1 (2026-05-11): merge dos acumuladores per-thread movido para o passo
@@ -823,6 +842,39 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
     // independente — ordem (b, t) determina ordem dos paths no GBWT final.
 
     tracker.finish();
+
+    // Relatório de imbalance do Pass2 (item 5) — só sob GGQL_PROFILE_PASS2.
+    // Quantifica o desbalanceamento do particionamento estático: ratio = tempo
+    // da thread mais lenta / média. ratio ≈ 1.0 → balanceado; alto → o bloco
+    // W/P concentrou numa thread (caminho crítico). Ver a análise de risco em
+    // docs/analise_ingestor_cpp.md (item 5) ANTES de partir p/ schedule(dynamic).
+    if (prof_pass2 && num_threads > 0) {
+        double tmax = 0.0, tmin = thr_secs[0], tsum = 0.0;
+        int slow_tid = 0;
+        for (int i = 0; i < num_threads; ++i) {
+            tsum += thr_secs[static_cast<size_t>(i)];
+            if (thr_secs[static_cast<size_t>(i)] > tmax) {
+                tmax = thr_secs[static_cast<size_t>(i)];
+                slow_tid = i;
+            }
+            tmin = std::min(tmin, thr_secs[static_cast<size_t>(i)]);
+        }
+        const double mean = tsum / static_cast<double>(num_threads);
+        const double ratio = (mean > 0.0) ? tmax / mean : 1.0;
+        std::fprintf(stderr,
+                     "[GGQL_PROFILE_PASS2] threads=%d  parse: max=%.3fs (tid %d) "
+                     "mean=%.3fs min=%.3fs  imbalance=%.2fx  (tid %d: %llu MiB, %llu cand-paths)\n",
+                     num_threads, tmax, slow_tid, mean, tmin, ratio, slow_tid,
+                     (unsigned long long)(thr_bytes[static_cast<size_t>(slow_tid)] >> 20),
+                     (unsigned long long)thr_cand[static_cast<size_t>(slow_tid)]);
+        for (int i = 0; i < num_threads; ++i) {
+            std::fprintf(stderr,
+                         "[GGQL_PROFILE_PASS2]   tid %2d: %.3fs  %llu MiB  %llu cand-paths\n",
+                         i, thr_secs[static_cast<size_t>(i)],
+                         (unsigned long long)(thr_bytes[static_cast<size_t>(i)] >> 20),
+                         (unsigned long long)thr_cand[static_cast<size_t>(i)]);
+        }
+    }
 
     IngestStatsParallel stats;
     for (int i = 0; i < num_threads; ++i) {
