@@ -6,16 +6,10 @@
 #include "ggql/ingest/profile.hpp"
 #include "ggql/ingest/ingestor.hpp"  // MmapFileParallel
 
-#include <algorithm>  // std::ranges::count
+#include <algorithm>  // std::ranges::count, std::min, std::max
 #include <chrono>
 #include <cstring>    // memchr
-#include <numeric>    // std::reduce
 #include <span>
-#include <vector>
-
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 
 namespace ggql {
 
@@ -62,32 +56,37 @@ survey_gfa_light(const std::string& filepath, int num_threads) {
 
     if (num_threads < 1) { num_threads = 1; }
 
-    std::vector<uint64_t> t_segs(static_cast<size_t>(num_threads), 0);
-    std::vector<uint64_t> t_links(static_cast<size_t>(num_threads), 0);
-    std::vector<uint64_t> t_paths(static_cast<size_t>(num_threads), 0);
-    std::vector<uint64_t> t_seq_bytes(static_cast<size_t>(num_threads), 0);
-    std::vector<uint64_t> t_path_nodes(static_cast<size_t>(num_threads), 0);
-    std::vector<uint8_t>  t_has_w(static_cast<size_t>(num_threads), 0);
+    // Particionamento em MUITOS chunks finos line-aligned + schedule(dynamic):
+    // os tipos de linha clusterizam no GFA (bloco S → bloco L → bloco W/P) e o
+    // custo por byte é desigual (L trivial vs W/P com contagem por byte). Com
+    // 1 chunk/thread estático, a thread que pega o bloco W/P vira o caminho
+    // crítico. Com ~8 chunks/thread e agendamento dinâmico, os blocos caros se
+    // distribuem entre as threads. Chunk mínimo de 1 MiB p/ o overhead de
+    // align/agendamento não dominar. A invariante de fronteira é mantida: o fim
+    // do chunk k (align((k+1)·cs)) é idêntico ao início do chunk k+1 → sem
+    // gap/overlap e determinístico em qualquer nº de threads/chunks.
+    constexpr size_t kMinChunk = 1u << 20;  // 1 MiB
+    int n_chunks = static_cast<int>(std::min<size_t>(
+        static_cast<size_t>(num_threads) * 8,
+        std::max<size_t>(1, total_size / kMinChunk)));
+    if (n_chunks < 1) { n_chunks = 1; }
+    const size_t cs = total_size / static_cast<size_t>(n_chunks);
 
-    const size_t chunk_size = total_size / static_cast<size_t>(num_threads);
+    uint64_t segs = 0, links = 0, paths = 0, seq_total = 0, path_nodes_total = 0;
+    int has_w_i = 0;
 
-#pragma omp parallel num_threads(num_threads)
-    {
-        int tid = 0;
-#ifdef _OPENMP
-        tid = omp_get_thread_num();
-#endif
-        const char* chunk_start = data_start + tid * chunk_size;
+#pragma omp parallel for schedule(dynamic) num_threads(num_threads)               \
+    reduction(+ : segs, links, paths, seq_total, path_nodes_total)                \
+    reduction(| : has_w_i)
+    for (int k = 0; k < n_chunks; ++k) {
+        const char* chunk_start =
+            (k == 0) ? data_start
+                     : align_to_line_start_local(
+                           data_start + static_cast<size_t>(k) * cs, data_start);
         const char* chunk_end =
-            (tid == num_threads - 1) ? data_end : (chunk_start + chunk_size);
-
-        if (tid > 0) {
-            chunk_start = align_to_line_start_local(chunk_start, data_start);
-        }
-        if (tid < num_threads - 1) {
-            const char* next_chunk = data_start + (tid + 1) * chunk_size;
-            chunk_end = align_to_line_start_local(next_chunk, data_start);
-        }
+            (k == n_chunks - 1) ? data_end
+                                : align_to_line_start_local(
+                                      data_start + static_cast<size_t>(k + 1) * cs, data_start);
 
         uint64_t s = 0, l = 0, p_cnt = 0;
         uint64_t seq_bytes = 0, path_nodes = 0;
@@ -152,25 +151,24 @@ survey_gfa_light(const std::string& filepath, int num_threads) {
                 p = skip_line_local(p, chunk_end);
             }
         }
-        t_segs[tid]       = s;
-        t_links[tid]      = l;
-        t_paths[tid]      = p_cnt;
-        t_seq_bytes[tid]  = seq_bytes;
-        t_path_nodes[tid] = path_nodes;
-        t_has_w[tid]      = has_w ? 1 : 0;
+        // Acumula os parciais do chunk nas variáveis de reduction OpenMP.
+        segs             += s;
+        links            += l;
+        paths            += p_cnt;
+        seq_total        += seq_bytes;
+        path_nodes_total += path_nodes;
+        has_w_i          |= (has_w ? 1 : 0);
     }
 
     IngestSurvey out;
     out.file_size_bytes      = total_size;
-    out.segment_count        = std::reduce(t_segs.begin(),      t_segs.end());
-    out.link_count           = std::reduce(t_links.begin(),     t_links.end());
-    out.path_count           = std::reduce(t_paths.begin(),     t_paths.end());
-    out.total_sequence_bytes = std::reduce(t_seq_bytes.begin(), t_seq_bytes.end());
-    out.has_w = std::ranges::any_of(t_has_w, [](uint8_t v) { return v != 0; });
-    const uint64_t total_path_nodes =
-        std::reduce(t_path_nodes.begin(), t_path_nodes.end());
+    out.segment_count        = segs;
+    out.link_count           = links;
+    out.path_count           = paths;
+    out.total_sequence_bytes = seq_total;
+    out.has_w                = (has_w_i != 0);
     out.avg_path_length = (out.path_count > 0)
-        ? static_cast<double>(total_path_nodes) / static_cast<double>(out.path_count)
+        ? static_cast<double>(path_nodes_total) / static_cast<double>(out.path_count)
         : 0.0;
     out.elapsed_s = sec(clock::now() - t0).count();
     return out;
