@@ -10,9 +10,11 @@
 #include "ggql/storage/snarl_decomposition.hpp"
 #include "ggql/utils.hpp"
 
+#include <algorithm>  // std::ranges::count
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <numeric>    // std::reduce
 #include <gbwt/utils.h> // ::gbwt::text_buffer_type, vector_type, ENDMARKER
 
 #ifdef _OPENMP
@@ -123,17 +125,31 @@ GfaIngestorMmapParallel::collect_keys_and_links_parallel(int num_threads, bool c
                     //   P\t<name>\t<seg_list>  → seg_list = "id1+,id2-,..." → count(',')+1
                     //   W\t<sample>\t<haplo>\t<contig>\t<start>\t<end>\t<path> → "><id..." → count('>'+'<')
                     const char* q = p;
-                    const char* line_end = q;
-                    while (line_end < chunk_end && *line_end != '\n') { ++line_end; }
+                    const char* line_end = static_cast<const char*>(
+                        std::memchr(q, '\n', static_cast<size_t>(chunk_end - q)));
+                    if (!line_end) { line_end = chunk_end; }
                     uint64_t nodes = 0;
                     if (first == 'P') {
-                        for (const char* c = q; c < line_end; ++c) {
-                            if (*c == ',') { ++nodes; }
+                        // P\t<nome>\t<seg1,seg2,...>\t<overlaps> — nós = vírgulas no
+                        // campo de SEGMENTOS + 1. Restringir ao 2º→3º TAB evita contar
+                        // as vírgulas da lista de overlaps CIGAR (que dobrariam a
+                        // contagem). q='P', q+1='\t'. (B1 — idem survey)
+                        const char* name = q + 2;
+                        const auto* t2 = static_cast<const char*>(
+                            std::memchr(name, '\t', static_cast<size_t>(line_end - name)));
+                        if (t2) {
+                            const char* seg = t2 + 1;
+                            const auto* t3 = static_cast<const char*>(
+                                std::memchr(seg, '\t', static_cast<size_t>(line_end - seg)));
+                            const char* seg_end = t3 ? t3 : line_end;
+                            nodes = static_cast<uint64_t>(
+                                        std::ranges::count(seg, seg_end, ',')) + 1;
                         }
-                        if (line_end > q) { ++nodes; }  // último segmento sem vírgula
                     } else { // 'W'
+                        // marcas de orientação no walk; (b|0x02)==0x3E casa '<'(0x3C) e
+                        // '>'(0x3E) num único compare auto-vetorizável (P2 — idem survey).
                         for (const char* c = q; c < line_end; ++c) {
-                            if (*c == '>' || *c == '<') { ++nodes; }
+                            nodes += (static_cast<unsigned char>(*c) | 0x02u) == 0x3Eu;
                         }
                     }
                     local_path_nodes += nodes;
@@ -159,10 +175,10 @@ GfaIngestorMmapParallel::collect_keys_and_links_parallel(int num_threads, bool c
         thread_has_w[tid]      = local_has_w ? 1 : 0;
     }
 
-    for (uint64_t c : thread_paths)      { result.path_count           += c; }
-    for (uint64_t c : thread_seq_bytes)  { result.total_sequence_bytes += c; }
-    for (uint64_t c : thread_path_nodes) { result.total_path_nodes     += c; }
-    for (uint8_t  c : thread_has_w)      { if (c) { result.has_w = true; } }
+    result.path_count           = std::reduce(thread_paths.begin(),      thread_paths.end());
+    result.total_sequence_bytes = std::reduce(thread_seq_bytes.begin(),  thread_seq_bytes.end());
+    result.total_path_nodes     = std::reduce(thread_path_nodes.begin(), thread_path_nodes.end());
+    result.has_w = std::ranges::any_of(thread_has_w, [](uint8_t c) { return c != 0; });
 
     tracker.finish();
 
@@ -605,6 +621,9 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
 
         size_t local_bytes = 0;
         const char* last_p = p;
+        // Contadores escalares locais — evitam indexar o vetor (alignas Counter)
+        // a cada S/L-line no hot loop; escritos uma vez no fim (item 6).
+        uint64_t local_seg = 0, local_lnk = 0;
 
         while (p < chunk_end) {
             char first = *p;
@@ -625,7 +644,7 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
                 if (id == ULLONG_MAX) {
                     continue;
                 }
-                ++local_segments[tid].value;
+                ++local_seg;
 
                 if (collect_records) {
                     SegmentRecord rec;
@@ -655,7 +674,7 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
                 if (from_id == ULLONG_MAX || to_id == ULLONG_MAX) {
                     continue;
                 }
-                ++local_links[tid].value;
+                ++local_lnk;
 
                 if (collect_links) {
                     uint64_t from_csr =
@@ -703,18 +722,21 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
                         } else {
                             target = path_nr % num_bins;
                         }
-                        ::gbwt::vector_type seq(local_nodes.begin(), local_nodes.end());
                         if (bin_use_in_ram[target]) {
                             // Sem mutex — cada thread escreve no seu slot privado.
+                            // seq só é construído p/ bins in-RAM (precisa do vetor
+                            // próprio); bins em disco escrevem local_nodes direto (P1).
+                            ::gbwt::vector_type seq(local_nodes.begin(), local_nodes.end());
                             thr_in_ram[static_cast<size_t>(tid)][target].push_back(std::move(seq));
                             thr_names[static_cast<size_t>(tid)][target].push_back(
                                 std::move(path_name));
                         } else if (thr_gbwt_bufs[static_cast<size_t>(tid)][target]) {
                             // R1 (2026-05-11): per-thread buf, sem mutex →
                             // ordem dentro do (tid, bin) = ordem do chunk
-                            // (determinística).
+                            // (determinística). P1: itera local_nodes direto, sem o
+                            // ::gbwt::vector_type intermediário (1 alloc/path a menos).
                             auto& buf = *thr_gbwt_bufs[static_cast<size_t>(tid)][target];
-                            for (uint64_t v : seq) {
+                            for (uint64_t v : local_nodes) {
                                 buf.push_back(v);
                             }
                             buf.push_back(::gbwt::ENDMARKER);
@@ -738,6 +760,9 @@ GfaIngestorMmapParallel::process_data_parallel(int num_threads, bool collect_rec
         if (local_bytes > 0) {
             tracker.add_progress(local_bytes);
         }
+        // Escrita única dos contadores escalares no slot per-thread (item 6).
+        local_segments[tid].value = local_seg;
+        local_links[tid].value    = local_lnk;
     }
 
     // R1 (2026-05-11): merge dos acumuladores per-thread movido para o passo
