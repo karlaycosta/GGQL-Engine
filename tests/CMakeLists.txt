@@ -181,3 +181,20 @@ add_test(
 set_tests_properties(test_ffi_cursor PROPERTIES
     ENVIRONMENT "GGQL_TEST_IDX=${CMAKE_SOURCE_DIR}/data/chm13_subset_sm.gfa.idx"
 )
+
+# ── Teste do subgrafo induzido p/ o GraphView (C12) ──────────────────────────
+add_executable(test_ffi_subgraph test_ffi_subgraph.cpp)
+target_compile_options(test_ffi_subgraph PRIVATE
+    -std=c++23 -march=native
+    $<$<CONFIG:Debug>:-O0 -g>
+    $<$<NOT:$<CONFIG:Debug>>:-O2>
+)
+target_link_libraries(test_ffi_subgraph PRIVATE ggql_ffi)
+add_test(
+    NAME test_ffi_subgraph
+    COMMAND test_ffi_subgraph
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(test_ffi_subgraph PROPERTIES
+    ENVIRONMENT "GGQL_TEST_IDX=${CMAKE_SOURCE_DIR}/data/chm13_subset_sm.gfa.idx"
+)

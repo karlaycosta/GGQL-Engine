@@ -641,6 +641,62 @@ GgqlResultHandle ggql_engine_execute_with_cap(
     uint64_t         cap
 );
 
+// ── Subgrafo induzido para o GraphView (C12 / Round 5, 2026-05-29) ────────────
+//
+// O GraphView do cliente é result-driven: desenha o subgrafo dos nós de um
+// RESULTADO de query, não a base inteira (render de 85M nós é inviável). Mas
+// `FIND SEGMENT` devolve só nós (id/name), sem arestas — não há topologia para
+// desenhar. Este símbolo recebe os segment ids de um resultado e devolve o
+// SUBGRAFO INDUZIDO por eles + um HALO de `halo_hops` (vizinhos diretos como
+// contexto), em índices LOCAIS densos [0, node_count), com cap rígido.
+//
+// Entrada por LISTA de segment ids (não por GgqlResultHandle): o cliente extrai
+// os ids via ggql_result_cell_int do `FIND SEGMENT RETURN id` — esse id é o id
+// interno denso (espaço MPHF) que indexa a topologia, sem descasamento. Ids
+// fora de [0, num_nodes) ou duplicados são validados/dedupados internamente.
+//
+// Contrato two-pass (struct_size C5 + copy-out E2):
+//   1ª passada (dims-only): edges/seg_ids/is_result = NULL e *_cap = 0. O engine
+//     conta os nós (resultado + halo) e, se o total ultrapassar `node_cap`,
+//     ABORTA cedo, devolve dims com truncated=true e NÃO materializa nada. O
+//     cliente vê truncated → mostra "refine query" e NÃO faz a 2ª passada.
+//   2ª passada (preenche): o cliente aloca pelos dims e chama de novo com os
+//     buffers. O engine recomputa (topologia imutável → resultado idêntico) e
+//     preenche cada buffer não-NULL fornecido.
+//
+// `node_cap` é o orçamento TOTAL (resultado + halo). node_cap <= 0 = sem cap.
+// `halo_hops`: 0 (só o resultado) ou 1 (resultado + vizinhos diretos). Valores
+//   > 1 retornam erro (-4) nesta versão — parâmetro fica genérico p/ evolução.
+// `edges` são pares achatados [a0,b0,a1,b1,…] em índice LOCAL, NÃO-DIRECIONADOS
+//   e DEDUPADOS (forma canônica min<max, sem self-loops): edges_cap conta ints
+//   (= 2 × edge_count). `seg_ids[local]` = segment id global (labels/hit-test).
+//   `is_result[local]` = 1 se nó do resultado, 0 se halo.
+//
+// Retorno: 0 = OK (dims preenchido; buffers preenchidos se fornecidos e cabem).
+//   -1 = args NULL (engine/dims, ou seg_ids_in NULL com seg_count>0, ou seg_count<0).
+//   -2 = dims->struct_size < sizeof(GgqlSubgraphDims).
+//   -3 = topologia indisponível (engine sem CSR — ver has_topology).
+//   -4 = halo_hops não suportado (só 0 ou 1 nesta versão).
+//   -5 = buffer fornecido com capacidade insuficiente (edges_cap < 2×edge_count,
+//        ids_cap < node_count ou flags_cap < node_count). Realoque pelos dims.
+typedef struct {
+    uint32_t struct_size;   // = sizeof(GgqlSubgraphDims) — preenchido pelo caller
+    int64_t  node_count;    // total de nós no subgrafo (resultado + halo, após cap)
+    int64_t  edge_count;    // arestas não-direcionadas dedupadas (edges tem 2× ints)
+    int64_t  result_count;  // quantos dos node_count são do resultado (resto = halo)
+    bool     truncated;     // node_cap estourado → cliente mostra "refine query"
+} GgqlSubgraphDims;
+
+int64_t ggql_engine_subgraph_from_result(
+    GgqlEngineHandle  engine,
+    const int64_t*    seg_ids_in,  int64_t seg_count,   // nós do resultado (ids globais)
+    int32_t           halo_hops,   int64_t node_cap,
+    GgqlSubgraphDims* dims,
+    int32_t*          edges,       int64_t edges_cap,    // pares achatados, idx LOCAL
+    int64_t*          seg_ids,     int64_t ids_cap,      // idx local → segment id global
+    uint8_t*          is_result,   int64_t flags_cap     // 1 = resultado, 0 = halo
+);
+
 // ── Metadados do resultado ─────────────────────────────────────────────────────
 
 int64_t ggql_result_row_count       (GgqlResultHandle result);  // linhas neste batch

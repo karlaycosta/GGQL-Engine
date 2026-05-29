@@ -16,15 +16,20 @@
 
 #include "ggql/storage/topology.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <variant>
+#include <vector>
 
 using namespace ggql;
 
@@ -203,6 +208,99 @@ static constexpr auto kNodeColsC    = to_c_array(ggql::query::kNodeColumns);
         if (ca != cb) { return false; }
     }
     return true;
+}
+
+// ── Subgrafo induzido para o GraphView (C12 / Round 5, 2026-05-29) ───────────
+//
+// Mora aqui (namespace anônimo acima do extern "C") porque retorna um tipo C++
+// — viver dentro do extern "C" dispararia -Wreturn-type-c-linkage.
+
+// Resultado intermediário do cálculo do subgrafo induzido + halo, em índices
+// LOCAIS densos [0, seg_ids.size()): primeiro os nós do resultado, depois o halo.
+struct SubgraphData {
+    std::vector<int64_t> seg_ids;    // local idx → segment id global
+    std::vector<uint8_t> is_result;  // 1 = resultado, 0 = halo
+    std::vector<int32_t> edges;      // pares achatados em idx local (canônico lo<hi, dedup)
+    int64_t result_count = 0;
+    bool    truncated    = false;
+};
+
+// node_cap <= 0 = sem cap. Em truncated, retorna cedo SEM montar arestas
+// (seg_ids/is_result contêm só o que foi descoberto até o estouro).
+[[nodiscard]] SubgraphData compute_subgraph(const GfaCsrTopology& topo,
+                                            std::span<const int64_t> seg_ids_in,
+                                            int halo_hops, int64_t node_cap) {
+    SubgraphData out;
+    const uint64_t N      = topo.num_nodes();
+    const bool     capped = node_cap > 0;
+
+    std::unordered_map<uint64_t, int32_t> local_of;  // global id → idx local
+    local_of.reserve(seg_ids_in.size() * 2 + 16);
+
+    // Adiciona um nó global ao conjunto (dedup). Retorna false se o cap estourou.
+    // Ids fora de [0, N) são silenciosamente ignorados (não contam).
+    auto try_add = [&](uint64_t gid, uint8_t is_res) -> bool {
+        if (gid >= N) { return true; }
+        auto [it, inserted] =
+            local_of.try_emplace(gid, static_cast<int32_t>(out.seg_ids.size()));
+        if (!inserted) { return true; }
+        out.seg_ids.push_back(static_cast<int64_t>(gid));
+        out.is_result.push_back(is_res);
+        if (capped && static_cast<int64_t>(out.seg_ids.size()) > node_cap) {
+            out.truncated = true;
+            return false;
+        }
+        return true;
+    };
+
+    // 1) Conjunto resultado R (dedup + valida).
+    for (int64_t raw : seg_ids_in) {
+        if (raw < 0) { continue; }
+        if (!try_add(static_cast<uint64_t>(raw), 1)) {
+            out.result_count = static_cast<int64_t>(out.seg_ids.size());
+            return out;  // estourou já no resultado
+        }
+    }
+    out.result_count = static_cast<int64_t>(out.seg_ids.size());
+
+    // 2) Halo de 1 hop: vizinhos de SAÍDA e de ENTRADA de cada nó do resultado.
+    if (halo_hops >= 1) {
+        const int64_t r_end = out.result_count;
+        for (int64_t i = 0; i < r_end; ++i) {
+            const uint64_t r = static_cast<uint64_t>(out.seg_ids[static_cast<size_t>(i)]);
+            for (uint32_t enc : topo.out_neighbors(r)) {
+                if (!try_add(GfaCsrTopology::decode(enc).node_id, 0)) { return out; }
+            }
+            for (uint32_t enc : topo.in_neighbors(r)) {
+                if (!try_add(GfaCsrTopology::decode(enc).node_id, 0)) { return out; }
+            }
+        }
+    }
+
+    // 3) Arestas induzidas: itera out_neighbors de cada nó do conjunto; mantém só
+    //    as com ambos endpoints no conjunto. Canônico (lo,hi), dedup, sem self-loop
+    //    — cada aresta não-direcionada aparece uma única vez.
+    std::unordered_set<uint64_t> seen;
+    const size_t node_count = out.seg_ids.size();
+    seen.reserve(node_count * 2);
+    for (size_t la = 0; la < node_count; ++la) {
+        const uint64_t ga = static_cast<uint64_t>(out.seg_ids[la]);
+        for (uint32_t enc : topo.out_neighbors(ga)) {
+            const auto it = local_of.find(GfaCsrTopology::decode(enc).node_id);
+            if (it == local_of.end()) { continue; }
+            const int32_t lb  = it->second;
+            const int32_t lai = static_cast<int32_t>(la);
+            if (lb == lai) { continue; }  // self-loop: irrelevante p/ layout
+            const int32_t  lo  = std::min(lai, lb);
+            const int32_t  hi  = std::max(lai, lb);
+            const uint64_t key = (static_cast<uint64_t>(lo) << 32) | static_cast<uint32_t>(hi);
+            if (seen.insert(key).second) {
+                out.edges.push_back(lo);
+                out.edges.push_back(hi);
+            }
+        }
+    }
+    return out;
 }
 
 } // namespace
@@ -1059,6 +1157,63 @@ GgqlResultHandle ggql_engine_execute(
     uint32_t         offset
 ) {
     return ggql_engine_execute_with_cap(engine, query_str, limit, offset, 0);
+}
+
+int64_t ggql_engine_subgraph_from_result(
+    GgqlEngineHandle  engine,
+    const int64_t*    seg_ids_in, int64_t seg_count,
+    int32_t           halo_hops,  int64_t node_cap,
+    GgqlSubgraphDims* dims,
+    int32_t*          edges,      int64_t edges_cap,
+    int64_t*          seg_ids,    int64_t ids_cap,
+    uint8_t*          is_result,  int64_t flags_cap
+) {
+    if (!engine || !dims)                        { return -1; }
+    if (seg_count < 0)                           { return -1; }
+    if (seg_count > 0 && !seg_ids_in)            { return -1; }
+    if (dims->struct_size < sizeof(GgqlSubgraphDims)) { return -2; }
+
+    auto* w = reinterpret_cast<GgqlEngineWrapper*>(engine);
+    if (!w->topology) {
+        g_last_engine_error = "subgraph: topologia indisponível (engine sem CSR)";
+        return -3;
+    }
+    if (halo_hops < 0 || halo_hops > 1) {
+        g_last_engine_error = "subgraph: halo_hops só suporta 0 ou 1 nesta versão";
+        return -4;
+    }
+
+    const auto data = compute_subgraph(
+        *w->topology,
+        std::span<const int64_t>(seg_ids_in, static_cast<size_t>(seg_count)),
+        halo_hops, node_cap);
+
+    // Preenche dims (echo de struct_size do caller, como nos outros structs C5).
+    const uint32_t caller_size = dims->struct_size;
+    *dims = GgqlSubgraphDims{};
+    dims->struct_size  = caller_size;
+    dims->node_count   = static_cast<int64_t>(data.seg_ids.size());
+    dims->edge_count   = static_cast<int64_t>(data.edges.size() / 2);
+    dims->result_count = data.result_count;
+    dims->truncated    = data.truncated;
+
+    // Estourou o cap → não materializa (cliente cai no estado "refine query").
+    if (data.truncated) { return 0; }
+
+    // 2ª passada: preenche cada buffer NÃO-NULL fornecido; -5 se algum não cabe.
+    if (edges) {
+        if (edges_cap < static_cast<int64_t>(data.edges.size())) { return -5; }
+        std::memcpy(edges, data.edges.data(), data.edges.size() * sizeof(int32_t));
+    }
+    if (seg_ids) {
+        if (ids_cap < static_cast<int64_t>(data.seg_ids.size())) { return -5; }
+        std::memcpy(seg_ids, data.seg_ids.data(), data.seg_ids.size() * sizeof(int64_t));
+    }
+    if (is_result) {
+        if (flags_cap < static_cast<int64_t>(data.is_result.size())) { return -5; }
+        std::memcpy(is_result, data.is_result.data(), data.is_result.size() * sizeof(uint8_t));
+    }
+    return 0;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
