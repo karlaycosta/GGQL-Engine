@@ -330,7 +330,6 @@ class GfaIngestorMmapParallel {
     }
 
     static std::string_view next_token(const char*& p, const char* end) noexcept {
-        [[assume(p <= end)]];  // C++23: invariante de chunk — elimina checagens redundantes
         const char* start = p;
         // ATENÇÃO: este loop NÃO é auto-vetorizado. Loops de busca com saída
         // antecipada (trip-count desconhecido) não vetorizam no GCC/Clang —
@@ -356,7 +355,6 @@ class GfaIngestorMmapParallel {
 
     static size_t tokenize(const char*& p, const char* end, std::array<std::string_view, 8>& out,
                            size_t max_fields) noexcept {
-        [[assume(p <= end)]];  // C++23: invariante de chunk
         size_t n = 0;
 #ifdef __GNUC__
     #pragma GCC unroll 8

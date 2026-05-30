@@ -544,7 +544,7 @@ contra `CHM13-464.gfa` antes de mexer no `next_token`.
 | H2-perf | memchr no token de sequência (S-line) | perf parse | **5,95× isolado** no CHM13-464; diluído end-to-end | ⏳ no `.cpp`, não no header (parse-bound only) |
 | H3 | nota sobre MADV_HUGEPAGE no-op | doc | nenhum | ✅ aplicado 2026-05-29 |
 | H4 | tratar CRLF em tokenize | robustez | nenhum (perf) | ✅ aplicado 2026-05-29 |
-| C++23 | `[[assume(p <= end)]]` em next_token/tokenize | perf | marginal | ✅ aplicado 2026-05-29 |
+| C++23 | `[[assume(p <= end)]]` em next_token/tokenize | perf | **nulo (no-op verificado)** | ↩️ revertido 2026-05-29 |
 
 ### Pacote de correções baratas aplicado (2026-05-29)
 
@@ -562,6 +562,13 @@ Editado `include/ggql/ingest/ingestor.hpp`:
   (2 segs / 1 link / 1 path).
 - **C++23** — `[[assume(p <= end)]]` em `next_token` e `tokenize` (invariante
   de chunk; ajuda o otimizador a remover checagens de limite).
+  **⚠️ REVERTIDO (mesmo dia, re-análise):** verificado por assembly que o
+  `[[assume]]` é NO-OP aqui — a guarda do loop já é `p < end`, então saber
+  `p <= end` não remove nenhuma comparação (diff com/sem o atributo: idêntico).
+  O comentário `// elimina checagens redundantes` era falso (mesmo pecado do
+  H2/AVX2). Como `[[assume]]` introduz contrato de UB sem ganho, as duas linhas
+  foram removidas. Lição: medir antes de afirmar ganho — inclusive em fixes
+  "óbvios" de C++23.
 
 **H2-perf e H1 NÃO aplicados** — H1 sem ROI nesta HW (medido); H2-perf vive no
 `.cpp` (parse de S-line), com ganho diluído end-to-end (paralelo + FM-Index
