@@ -198,3 +198,17 @@ add_test(
 set_tests_properties(test_ffi_subgraph PROPERTIES
     ENVIRONMENT "GGQL_TEST_IDX=${CMAKE_SOURCE_DIR}/data/chm13_subset_sm.gfa.idx"
 )
+
+# ── Teste do contrato de versão (Fase A) — handle-free, sem dataset ──────────
+add_executable(test_ffi_version test_ffi_version.cpp)
+target_compile_options(test_ffi_version PRIVATE
+    -std=c++23 -march=native
+    $<$<CONFIG:Debug>:-O0 -g>
+    $<$<NOT:$<CONFIG:Debug>>:-O2>
+)
+target_link_libraries(test_ffi_version PRIVATE ggql_ffi)
+add_test(
+    NAME test_ffi_version
+    COMMAND test_ffi_version
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)

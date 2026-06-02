@@ -9,6 +9,49 @@
 extern "C" {
 #endif
 
+// ── Versionamento (Fase A / 2026-06-02) ──────────────────────────────────────
+//
+// Três identidades distintas (ver docs/plano_versionamento_engine.md):
+//   - Product version : SemVer MAJOR.MINOR.PATCH — de project(VERSION) no CMake.
+//   - ABI contract    : GGQL_FFI_ABI_VERSION — inteiro monotônico abaixo.
+//   - Build identity  : git_hash + build_date — preenchidos em build-time.
+//
+// GGQL_FFI_ABI_VERSION é compile-time e é compilado JUNTO do consumer (via
+// ffigen no lado Dart). O consumer compara o valor que compilou contra o
+// abi_version devolvido em runtime por ggql_ffi_version(): divergência => a .so
+// não é compatível com o header contra o qual o consumer foi gerado.
+//
+// Política de bump (igual ao contrato struct_size do resto da API):
+//   - BUMP ao remover/reordenar campo, mudar assinatura ou semântica de retorno.
+//   - NÃO bumpa ao adicionar campo NO FIM de um struct com struct_size — o caller
+//     antigo lê só até o offset que conhece (forward-compat aditiva).
+#define GGQL_FFI_ABI_VERSION 1u
+
+// Identidade da .so. Strings têm storage estático (literais) — NÃO liberar.
+//
+// C5: struct evolve-friendly via struct_size. Caller DEVE preencher
+// struct_size = sizeof(GgqlVersionInfo) antes de chamar.
+typedef struct {
+    size_t   struct_size;        // caller seta = sizeof(GgqlVersionInfo)
+    uint32_t abi_version;        // == GGQL_FFI_ABI_VERSION no build da .so
+    uint32_t version_major;
+    uint32_t version_minor;
+    uint32_t version_patch;
+    const char* version_str;     // "0.1.0"   (storage estático)
+    const char* git_hash;        // "43fab89" (+ "-dirty" se árvore suja)
+    const char* build_date;      // ISO-8601 (granularidade de dia)
+} GgqlVersionInfo;
+
+// Identidade da .so carregada. HANDLE-FREE: funciona ANTES de qualquer
+// engine_load e mesmo se o load falhar — é chamável no boot do consumer para o
+// gate de compatibilidade de ABI.
+//
+// Retorno:
+//    0 — ok, struct preenchido.
+//   -1 — out == NULL.
+//   -2 — out->struct_size < sizeof(GgqlVersionInfo) (recompile contra header novo).
+int32_t ggql_ffi_version(GgqlVersionInfo* out);
+
 // Opaque handles
 //
 // E1 / Fase 4 (Round 4 / 2026-05-22): opaque struct typedef em vez de

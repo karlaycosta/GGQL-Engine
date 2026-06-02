@@ -1,4 +1,5 @@
 #include "ffi/ffi.h"
+#include "ggql/version.h"  // gerado em build-time (build/generated/ggql/version.h)
 #include "ggql/cli/console.hpp"
 #include "ggql/ingest/ingestor.hpp"
 #include "ggql/ingest/metadata_store.hpp"
@@ -306,6 +307,27 @@ struct SubgraphData {
 } // namespace
 
 extern "C" {
+
+// ── Versionamento (Fase A / 2026-06-02) ──────────────────────────────────────
+// Handle-free: chamável no boot do consumer para o gate de ABI, antes de
+// qualquer engine_load. Strings vêm de literais do version.h gerado (storage
+// estático) — nada para liberar. Ver docs/plano_versionamento_engine.md.
+int32_t ggql_ffi_version(GgqlVersionInfo* out) {
+    if (!out) { return -1; }
+    if (out->struct_size < sizeof(GgqlVersionInfo)) { return -2; }
+
+    // Echo do struct_size do caller (padrão C5 do resto da API).
+    const size_t caller_size = out->struct_size;
+    out->abi_version   = GGQL_FFI_ABI_VERSION;
+    out->version_major = GGQL_VERSION_MAJOR;
+    out->version_minor = GGQL_VERSION_MINOR;
+    out->version_patch = GGQL_VERSION_PATCH;
+    out->version_str   = GGQL_VERSION_STR;
+    out->git_hash      = GGQL_GIT_HASH;
+    out->build_date    = GGQL_BUILD_DATE;
+    out->struct_size   = caller_size;
+    return 0;
+}
 
 GgqlIngestorHandle ggql_ingestor_create() {
     try {

@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
-project(ggql_engine LANGUAGES CXX)
+# VERSION é a fonte única da SemVer (product version) do engine — ver
+# docs/plano_versionamento_engine.md. O git hash/data entram via
+# tools/cmake/GenerateVersionHeader.cmake (build-time, não envelhece).
+project(ggql_engine VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
@@ -16,6 +19,29 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(CTest)
+
+# ── Header de versão gerado (ggql/version.h) ─────────────────────────────────
+# Fonte: project(VERSION) acima + git (hash/dirty) + data. Gerado em DUAS etapas:
+#   1. agora (configure) — garante o header para IntelliSense/primeira compilação;
+#   2. a cada build via custom target ggql_version — o git hash nunca envelhece.
+# Header gerado vive em build/ (já no .gitignore) e é interno (só ffi.cpp inclui).
+set(GGQL_VERSION_GEN_DIR "${CMAKE_BINARY_DIR}/generated")
+set(GGQL_VERSION_HEADER  "${GGQL_VERSION_GEN_DIR}/ggql/version.h")
+set(GGQL_VERSION_SCRIPT  "${CMAKE_SOURCE_DIR}/tools/cmake/GenerateVersionHeader.cmake")
+set(_ggql_ver_args
+    "-DGGQL_VERSION_STR=${PROJECT_VERSION}"
+    "-DGGQL_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}"
+    "-DGGQL_VERSION_MINOR=${PROJECT_VERSION_MINOR}"
+    "-DGGQL_VERSION_PATCH=${PROJECT_VERSION_PATCH}"
+    "-DSRC_DIR=${CMAKE_SOURCE_DIR}"
+    "-DTEMPLATE=${CMAKE_SOURCE_DIR}/include/ggql/version.h.in"
+    "-DOUT=${GGQL_VERSION_HEADER}")
+execute_process(COMMAND ${CMAKE_COMMAND} ${_ggql_ver_args} -P ${GGQL_VERSION_SCRIPT})
+add_custom_target(ggql_version ALL
+    BYPRODUCTS ${GGQL_VERSION_HEADER}
+    COMMAND ${CMAKE_COMMAND} ${_ggql_ver_args} -P ${GGQL_VERSION_SCRIPT}
+    COMMENT "Gerando ggql/version.h (git hash + build date)"
+    VERBATIM)
 
 # {fmt} — Biblioteca de formatação moderna (estilo Python/C++23) com suporte a cores.
 add_subdirectory(third_party/fmt)
@@ -265,6 +291,9 @@ target_compile_options(ggql_repl PRIVATE
 )
 target_link_options(ggql_repl PRIVATE -flto=auto)
 target_link_libraries(ggql_repl PRIVATE ggql_query ${GGQL_BIN_ALLOCATOR_LIB})
+# version.h gerado — para o --version (B1). Mesmo wiring do ggql_ffi.
+target_include_directories(ggql_repl PRIVATE ${GGQL_VERSION_GEN_DIR})
+add_dependencies(ggql_repl ggql_version)
 
 # ── bench_gbwt ─────────────────────────────────────────
 # Benchmark vg-equivalent: remapeia IDs MPHF → sequenciais por componente,
@@ -348,6 +377,9 @@ target_compile_options(ggql_ffi PRIVATE
 )
 target_link_options(ggql_ffi PRIVATE -flto=auto)
 target_link_libraries(ggql_ffi PRIVATE ggql_query ${GGQL_FFI_ALLOCATOR_LIB})
+# version.h gerado (build/generated/ggql/version.h) — só o ffi.cpp inclui.
+target_include_directories(ggql_ffi PRIVATE ${GGQL_VERSION_GEN_DIR})
+add_dependencies(ggql_ffi ggql_version)   # regenera o hash antes de compilar
 
 # ── Testes unitários do ingestor (ARCH-5) ────────────────────────────────────
 add_subdirectory(tests)

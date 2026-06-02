@@ -1,0 +1,22 @@
+// version.h — GERADO AUTOMATICAMENTE a partir de version.h.in.
+//
+// NÃO EDITE À MÃO. Fonte da verdade:
+//   - SemVer  → project(ggql_engine VERSION ...) no CMakeLists.txt
+//   - git     → tools/cmake/GenerateVersionHeader.cmake (rev-parse + status)
+//
+// Regenerado a cada build pelo custom target `ggql_version`, então GGQL_GIT_HASH
+// e GGQL_BUILD_DATE nunca envelhecem entre commits. Header interno do engine —
+// NÃO é exposto à UI (a UI compara apenas GGQL_FFI_ABI_VERSION, que mora em
+// include/ffi/ffi.h). Ver docs/plano_versionamento_engine.md.
+#ifndef GGQL_VERSION_H
+#define GGQL_VERSION_H
+
+#define GGQL_VERSION_MAJOR @GGQL_VERSION_MAJOR@
+#define GGQL_VERSION_MINOR @GGQL_VERSION_MINOR@
+#define GGQL_VERSION_PATCH @GGQL_VERSION_PATCH@
+#define GGQL_VERSION_STR   "@GGQL_VERSION_STR@"
+#define GGQL_GIT_HASH      "@GGQL_GIT_HASH@"   // inclui sufixo "-dirty" quando aplicável
+#define GGQL_GIT_DIRTY     @GGQL_GIT_DIRTY@    // 0 = árvore limpa, 1 = mudanças não commitadas
+#define GGQL_BUILD_DATE    "@GGQL_BUILD_DATE@" // ISO-8601 (granularidade de dia)
+
+#endif // GGQL_VERSION_H

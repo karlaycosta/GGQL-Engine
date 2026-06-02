@@ -31,6 +31,8 @@
 #include <ggql/query/query_planner.hpp>
 #include <ggql/storage/fm_index.hpp>
 #include <ggql/utils.hpp>
+#include <ggql/version.h>  // gerado em build-time (build/generated/ggql/version.h)
+#include <ffi/ffi.h>       // só pela macro GGQL_FFI_ABI_VERSION (declarações, sem link)
 #include <iostream>
 #include <optional>
 #include <ranges>
@@ -368,6 +370,7 @@ struct Args {
     std::string idx_path;
     int threads = 4;
     bool help = false;
+    bool version = false;
     ggql::IngestProfile profile = ggql::IngestProfile::Pangenome;
     bool profile_err = false;
     std::string profile_err_val;
@@ -398,6 +401,8 @@ static Args parse_args(int argc, char** argv) {
             }
         } else if (arg == "--help" || arg == "-h") {
             a.help = true;
+        } else if (arg == "--version" || arg == "-V") {
+            a.version = true;
         } else {
             fmt::println(stderr, "  Argumento desconhecido ignorado: {}", arg);
         }
@@ -415,8 +420,16 @@ static void usage(const char* prog) {
                "                              metagenomics  — sem gBWT, sem snarls\n"
                "                              assembly      — sem gBWT, com snarls\n"
                "                              comparative   — com gBWT, sem snarls\n"
+               "  -V, --version              versão do engine (SemVer · ABI · git · data)\n"
                "  -h, --help                 esta mensagem\n",
                prog);
+}
+
+// Identidade do build, alinhada com ggql_ffi_version (ver
+// docs/plano_versionamento_engine.md). Formato estável para o deploy script logar.
+static void print_version() {
+    fmt::println("ggql {} ({}) · ABI {} · built {}",
+                 GGQL_VERSION_STR, GGQL_GIT_HASH, GGQL_FFI_ABI_VERSION, GGQL_BUILD_DATE);
 }
 
 // ─── Banner ───────────────────────────────────────────────────────────────────
@@ -444,6 +457,10 @@ static void print_banner() {
 int main(int argc, char** argv) {
     const Args args = parse_args(argc, argv);
 
+    if (args.version) {
+        print_version();
+        return 0;
+    }
     if (args.help) {
         usage(argv[0]);
         return 0;
