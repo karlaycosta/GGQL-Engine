@@ -9,8 +9,9 @@
 [![CMake](https://img.shields.io/badge/CMake-3.16%2B-064F8C?logo=cmake)](CMakeLists.txt)
 [![GCC](https://img.shields.io/badge/GCC-14%2B-A42E2B?logo=gnu)](https://gcc.gnu.org)
 [![Plataforma](https://img.shields.io/badge/plataforma-Linux-lightgrey?logo=linux)](https://kernel.org)
-[![FFI Round 5](https://img.shields.io/badge/FFI-Round%205%20%C2%B7%2042%20s%C3%ADmbolos-success)](docs/ffi_flutter_python_integration.md)
-[![Tests](https://img.shields.io/badge/CTest-17%20suites-blue)](tests/CMakeLists.txt)
+[![Versão](https://img.shields.io/badge/vers%C3%A3o-0.1.0%20%C2%B7%20ABI%201-blue)](docs/plano_versionamento_engine.md)
+[![FFI](https://img.shields.io/badge/FFI-43%20s%C3%ADmbolos-success)](docs/ffi_flutter_python_integration.md)
+[![Tests](https://img.shields.io/badge/CTest-18%20suites-blue)](tests/CMakeLists.txt)
 
 Um motor de consulta declarativa para grafos pangenômicos no **formato GFA**,
 projetado para genomas de **85 milhões de nós** (HPRC / CHM13). Expõe a
@@ -85,7 +86,7 @@ pelo menos três ferramentas distintas em um pipeline tradicional.
 - **Cache inteligente em disco.** A primeira ingestão grava `.idx/`; chamadas
   subsequentes carregam em milissegundos com validação por hash XXH64 +
   mtime/size.
-- **Integração multi-linguagem madura.** Além da REPL, expõe **42 símbolos
+- **Integração multi-linguagem madura.** Além da REPL, expõe **43 símbolos
   C ABI** para bindings em Dart/Flutter, Python (via `ctypes`), Rust, etc.
   API endurecida no Round 4 (2026-05-22, 9 commits em 7 fases): opaque
   struct typedefs, `struct_size` para forward-compat, cursor stateful
@@ -95,6 +96,14 @@ pelo menos três ferramentas distintas em um pipeline tradicional.
   `ggql_estimate_ingest`, sugestão de perfil) e subgrafo induzido para o
   GraphView (`ggql_engine_subgraph_from_result`) — tudo documentado em
   [`docs/ffi_flutter_python_integration.md`](docs/ffi_flutter_python_integration.md).
+- **Versionamento legível em build e runtime.** SemVer (`0.1.0`) vinda do
+  CMake + identidade de build (git hash + flag dirty + data) gerada em
+  build-time, e um contrato de ABI explícito (`GGQL_FFI_ABI_VERSION`). O
+  símbolo handle-free `ggql_ffi_version` deixa o consumer fazer um **gate de
+  compatibilidade no boot** (ABI divergente vira erro acionável, não UB), e
+  `ggql_repl --version` + `tools/deploy_ffi_to_ui.sh` garantem que a `.so`
+  copiada é a esperada (sha256 verificado). Ver
+  [`docs/plano_versionamento_engine.md`](docs/plano_versionamento_engine.md).
 - **Allocator otimizado por target.** Binários standalone usam jemalloc
   (perf máxima); `libggql_ffi.so` usa mimalloc (dlopen-safe, sem
   `LD_PRELOAD` para Flutter/Python). Configurável via
@@ -355,8 +364,8 @@ ctest --test-dir build --output-on-failure
 | `ggql_repl` | **REPL interativa** — entry point principal |
 | `bench_gbwt` | Benchmark de ingestão + construção gBWT |
 | `bench_{snarl,fm_index,metadata,topology,graph_algorithms,path_storage}` | Microbench por componente |
-| `libggql_ffi.so` | Biblioteca compartilhada para bindings Dart/Python/FFI (**42 símbolos**) |
-| `tests/test_*` | **17 testes CTest** (incluindo `test_ffi_query`, `test_ffi_ingest_cancel`, `test_ffi_cursor`, `test_ffi_subgraph` validando a API FFI) |
+| `libggql_ffi.so` | Biblioteca compartilhada para bindings Dart/Python/FFI (**43 símbolos**) |
+| `tests/test_*` | **18 testes CTest** (incluindo `test_ffi_query`, `test_ffi_ingest_cancel`, `test_ffi_cursor`, `test_ffi_subgraph`, `test_ffi_version` validando a API FFI) |
 
 ---
 
@@ -373,6 +382,10 @@ ctest --test-dir build --output-on-failure
 
 # Carregar índice já existente (sem re-ingestão)
 ./build/ggql_repl --idx caminho/para/grafo.gfa.idx
+
+# Identidade do build (SemVer · ABI · git hash · data)
+./build/ggql_repl --version
+# → ggql 0.1.0 (43fab89) · ABI 1 · built 2026-06-02
 ```
 
 ### Modo batch (pipe)
@@ -406,10 +419,21 @@ printf 'FIND TIP RETURN id;\n.quit\n' \
 
 ### Bindings C/Dart/FFI/Python
 
-A API C está em [`include/ffi/ffi.h`](include/ffi/ffi.h) — **42 símbolos
+A API C está em [`include/ffi/ffi.h`](include/ffi/ffi.h) — **43 símbolos
 exportados**. Guia completo de integração com Flutter (ffigen) e Python
 (ctypes/cffi) em
 [`docs/ffi_flutter_python_integration.md`](docs/ffi_flutter_python_integration.md).
+
+```c
+// ── Versão / gate de ABI (handle-free — chamável no boot, sem engine_load) ──
+// Consumer compara o GGQL_FFI_ABI_VERSION que compilou (via ffigen) contra o
+// abi_version devolvido em runtime: divergência ⇒ .so incompatível com o header.
+GgqlVersionInfo v = { .struct_size = sizeof(GgqlVersionInfo) };
+if (ggql_ffi_version(&v) == 0 && v.abi_version != GGQL_FFI_ABI_VERSION) {
+    /* erro acionável: "recompile/recopie o engine" — em vez de UB */
+}
+// v.version_str "0.1.0" · v.git_hash "43fab89" (+ "-dirty") · v.build_date ISO-8601
+```
 
 ```c
 // ── Ingestão (Round 4 Fase 5 — BREAKING vs versões anteriores) ──────────────
@@ -468,10 +492,12 @@ if (!dims.truncated) {                                            // senão: "re
 
 O cliente `ggql_ui` (repo Flutter separado) usa bindings gerados via
 `ffigen` + wrapper Dart idiomático (`GgqlEngine`, `GgqlResult`,
-`GgqlCapabilities`). **28/28 testes** ponta-a-ponta passando contra
-`libggql_ffi.so` atual. Integração coordenada em
+`GgqlCapabilities`, `GgqlVersion`). **48 testes FFI** passando contra
+`libggql_ffi.so` atual — inclui o **gate de ABI fail-closed no startup**
+(`GgqlLib.checkAbiCompatibility()`) e a versão real do engine na status bar.
+Integração coordenada em
 [`ggql_ui/docs/ffi_conflitos_coordenacao.md`](https://github.com/karlaycosta/ggql_ui)
-(14 sub-seções §4.4–§4.14 documentando cada fase).
+e [`ggql_ui/docs/versionamento_ggql.md`](https://github.com/karlaycosta/ggql_ui).
 
 ---
 
@@ -493,14 +519,16 @@ ggql_engine/
 │   ├── query/            ─ query_planner.cpp, query_evaluator.cpp
 │   ├── storage/          ─ csr_builder, graph_algorithms, path_index, fm_index
 │   ├── ffi/              ─ ffi.cpp (bindings extern "C")
-│   ├── repl/             ─ ggql_repl.cpp
+│   ├── repl/             ─ ggql_repl.cpp (inclui --version)
 │   └── bench_gbwt.cpp    ─ Driver de benchmark/ingestão
-├── tests/                ─ 17 testes do projeto (CTest)
-│                           inclui test_ffi_query / _ingest_cancel / _cursor / _subgraph
+├── include/ggql/version.h.in ─ template do header de versão (gerado em build-time)
+├── tests/                ─ 18 testes do projeto (CTest)
+│                           inclui test_ffi_query / _ingest_cancel / _cursor / _subgraph / _version
+├── tools/                ─ deploy_ffi_to_ui.sh + cmake/GenerateVersionHeader.cmake
 ├── third_party/          ─ fmt · pegtl · sdsl-lite · gbwt · libsais
 ├── docs/                 ─ ingest_profiles.md + diagramas GFA
 │                           ffi_flutter_python_integration.md (guia consumer)
-│                           ffi_problemas_round4.md (auditoria FFI Round 4)
+│                           plano_versionamento_engine.md (sistema de versão)
 └── CMakeLists.txt        ─ Arquitetura por bibliotecas estáticas
                             (+ vendor jemalloc opcional via ExternalProject_Add)
 ```
@@ -521,7 +549,7 @@ ggql_engine/
 - [x] QueryPlanner — `FIND TIP/REPEAT/BUBBLE/SEGMENT/EDGE/PATH`, `SEARCH KMER`
 - [x] REPL interativa com input multilinha
 - [x] **Perfis de ingestão** — pangenome / metagenomics / assembly / comparative
-- [x] **17 testes CTest** (do projeto) + 7 do gbwt vendorizado
+- [x] **18 testes CTest** (do projeto) + 7 do gbwt vendorizado
 - [x] `crosses()` integrado ao QueryPlanner (com `CrossesCache` para
   composição AND/OR sobre paths atravessados)
 - [x] `contains_kmer()` integrado ao `FIND SEGMENT WHERE`
@@ -567,6 +595,18 @@ ggql_engine/
   devolve o subgrafo induzido + halo de 1-hop em índices locais densos
   (two-pass `struct_size` + copy-out, arestas não-direcionadas/dedupadas, cap
   rígido com `truncated`). Habilita o GraphView result-driven do cliente Flutter
+
+### Versionamento (entregue 2026-06-02)
+
+- [x] **SemVer + identidade de build** — `project(VERSION 0.1.0)` no CMake +
+  `version.h` gerado em build-time (git hash + flag dirty + data) via
+  `GenerateVersionHeader.cmake` (custom target, `copy_if_different` para não
+  recompilar à toa)
+- [x] **Contrato de ABI explícito** — macro `GGQL_FFI_ABI_VERSION` + struct
+  `GgqlVersionInfo` + símbolo handle-free `ggql_ffi_version` (padrão
+  `struct_size`), habilitando o gate de compatibilidade no boot do consumer
+- [x] **Ergonomia/deploy** — `ggql_repl --version` + `tools/deploy_ffi_to_ui.sh`
+  (build + cópia + log de versão + verificação sha256)
 
 ### Próximos passos
 
