@@ -69,8 +69,10 @@ A build identity resolve "essa `.so` é a mais recente?".
 - **SemVer:** `project(ggql_engine VERSION 0.1.0 LANGUAGES CXX)` → CMake expõe
   `PROJECT_VERSION_MAJOR/MINOR/PATCH`.
 - **Build identity:** capturada em **build-time** (não só configure-time) via
-  `git rev-parse --short HEAD` + `git status --porcelain` (vazio = limpo). O hash
-  sai já com sufixo `-dirty` embutido quando há mudanças não commitadas.
+  `git rev-parse --short HEAD` + `git status --porcelain --untracked-files=no`
+  (vazio = árvore rastreada limpa). O hash sai com sufixo `-dirty` quando há
+  mudanças em arquivos **rastreados** — semântica do `git describe --dirty`;
+  arquivos untracked não-ignorados (artefatos/dados) **não** ligam o flag.
 - **Header gerado:** `include/ggql/version.h.in` → `build/generated/ggql/version.h`
   via `configure_file(... @ONLY)`. Header gerado é **artefato** (entra no
   `.gitignore`), incluído só internamente pelo `ffi.cpp` (não exposto à UI).

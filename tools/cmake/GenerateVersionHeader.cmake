@@ -25,8 +25,12 @@ if(Git_FOUND)
         RESULT_VARIABLE _rc)
     if(_rc EQUAL 0 AND _hash)
         set(GGQL_GIT_HASH "${_hash}")
+        # --untracked-files=no: só modificações em arquivos RASTREADOS contam como
+        # dirty (semântica do `git describe --dirty`). Sem isso, arquivos untracked
+        # não-ignorados (artefatos, dados de teste) ligariam o flag quase sempre,
+        # esvaziando seu sinal.
         execute_process(
-            COMMAND "${GIT_EXECUTABLE}" status --porcelain
+            COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=no
             WORKING_DIRECTORY "${SRC_DIR}"
             OUTPUT_VARIABLE _status
             OUTPUT_STRIP_TRAILING_WHITESPACE
